@@ -383,7 +383,7 @@ pub mod sink_attack_interceptor {
         }
 
         // Can be used to query all of the attacker's reputation stats.
-        fn get_reputation_stats(&self) {
+        fn get_reputation_stats(&self) -> Result<(), ()> {
             let attacking_channels = self.filter_chanels_by_type(TargetChannelType::Attacker);
             let peer_channels = self.filter_chanels_by_type(TargetChannelType::Peer);
 
@@ -413,8 +413,21 @@ pub mod sink_attack_interceptor {
 
                     log::info!(
                         "Reputation check for attacker; {:?}",
-                        fwd_outcome.unwrap().0
+                        fwd_outcome.map_err(|_| ())?.0
                     );
+                }
+            }
+
+            Ok(())
+        }
+
+        pub async fn poll_reputation_stats(&self, interval: Duration) -> Result<(), ()> {
+            loop {
+                select! {
+                    _ = self.listener.clone() => return Ok(()),
+                    _ = time::sleep(interval) => {
+                        self.get_reputation_stats()?;
+                    }
                 }
             }
         }

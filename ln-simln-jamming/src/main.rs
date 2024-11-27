@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
 
     // TODO: these should be shared with simln!!
     let (shutdown, listener) = triggered::trigger();
-    let attack_interceptor: Box<dyn Interceptor> = Box::new(SinkInterceptor::new_for_network(
+    let sink_interceptor = SinkInterceptor::new_for_network(
         Instant::now(),
         Duration::from_secs(60),
         "51".to_string(),
@@ -44,12 +44,13 @@ async fn main() -> anyhow::Result<()> {
         sim_network.clone(),
         listener,
         shutdown,
-    ));
+    );
 
-    let interceptors = Arc::new(vec![
-        latency_interceptor,
-        attack_interceptor,
-    ]);
+    tokio::spawn(sink_interceptor.poll_reputation_stats(Duration::from_secs(30)));
+
+    let attack_interceptor: Box<dyn Interceptor> = Box::new(sink_interceptor);
+
+    let interceptors = Arc::new(vec![latency_interceptor, attack_interceptor]);
 
     // Simulated channels for our simulated graph.
     let channels = sim_network
