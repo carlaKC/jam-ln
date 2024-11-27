@@ -97,6 +97,24 @@ pub mod reputation_interceptor {
             })
         }
 
+        // TODO: flatten this with a macro
+        pub fn get_forwarding_outcome(
+            &self,
+            forwading_node: PublicKey,
+            htlc: &ProposedForward,
+        ) -> Result<(AllocatoinCheck, String), ReputationError> {
+            match self.network_nodes.lock().unwrap().entry(forwading_node) {
+                Entry::Occupied(mut e) => {
+                    let (node, alias) = e.get_mut();
+                    Ok((node.get_forwarding_outcome(htlc)?, alias.to_string()))
+                }
+                Entry::Vacant(_) => Err(ReputationError::ErrUnknown(format!(
+                    "node not found: {}",
+                    forwading_node,
+                ))),
+            }
+        }
+
         fn get_interceptor_resp(
             &self,
             forwading_node: PublicKey,
@@ -235,7 +253,8 @@ pub mod reputation_interceptor {
 pub mod sink_attack_interceptor {
     use crate::reputation_interceptor::{endorsement_from_records, JammingInterceptor};
     use async_trait::async_trait;
-    use ln_resource_mgr::reputation::EndorsementSignal;
+    use bitcoin::secp256k1::PublicKey;
+    use ln_resource_mgr::reputation::{EndorsementSignal, HtlcRef, ProposedForward};
     use simln_lib::sim_node::{
         CustomRecords, ForwardingError, InterceptRequest, InterceptResolution, Interceptor,
     };
@@ -265,6 +284,8 @@ pub mod sink_attack_interceptor {
         target_channels: HashMap<ShortChannelID, TargetChannelType>,
         /// Inner reputation monitor that implements jamming mitigation.
         jamming_interceptor: JammingInterceptor,
+        attacking_node: PublicKey,
+        target_node: PublicKey,
         /// Used to control shutdown.
         listener: Listener,
         shutdown: Trigger,
@@ -310,6 +331,9 @@ pub mod sink_attack_interceptor {
             shutdown: Trigger,
         ) -> Self {
             let mut target_channels = HashMap::new();
+            // TODO: clean this up it's gross
+            let mut attacker_pubkey = None;
+            let mut target_pubkey = None;
 
             for channel in edges.iter() {
                 let node_1_target = channel.node_1.alias == target_alias;
@@ -320,10 +344,16 @@ pub mod sink_attack_interceptor {
                 }
 
                 let channel_type = if node_1_target && channel.node_2.alias == attacking_alias {
+                    attacker_pubkey = Some(channel.node_1.pubkey);
+                    target_pubkey = Some(channel.node_2.pubkey);
+
                     TargetChannelType::Attacker
                 } else if node_1_target {
                     TargetChannelType::Peer
                 } else if node_2_target && channel.node_1.alias == attacking_alias {
+                    attacker_pubkey = Some(channel.node_2.pubkey);
+                    target_pubkey = Some(channel.node_1.pubkey);
+
                     TargetChannelType::Attacker
                 } else {
                     TargetChannelType::Peer
@@ -337,8 +367,55 @@ pub mod sink_attack_interceptor {
                 bootstrap,
                 jamming_interceptor: JammingInterceptor::new_for_network(&edges).unwrap(),
                 target_channels,
+                attacking_node: attacker_pubkey.unwrap(),
+                target_node: target_pubkey.unwrap(),
                 listener,
                 shutdown,
+            }
+        }
+
+        fn filter_chanels_by_type(&self, channel_type: TargetChannelType) -> Vec<ShortChannelID> {
+            self.target_channels
+                .iter()
+                .filter(|v| *v.1 == channel_type)
+                .map(|v| *v.0)
+                .collect()
+        }
+
+        // Can be used to query all of the attacker's reputation stats.
+        fn get_reputation_stats(&self) {
+            let attacking_channels = self.filter_chanels_by_type(TargetChannelType::Attacker);
+            let peer_channels = self.filter_chanels_by_type(TargetChannelType::Peer);
+
+            for attacker_chan in attacking_channels.iter() {
+                for peer_chan in peer_channels.iter() {
+                    // Create a htlc that is forwarded from Peer -> Target -> Attacker to gauge whether the attacker
+                    // has sufficient reputation.
+                    let htlc = ProposedForward {
+                        incoming_ref: HtlcRef {
+                            channel_id: u64::from(*peer_chan),
+                            htlc_index: 0,
+                        },
+                        outgoing_channel_id: u64::from(*attacker_chan),
+                        // Set fee = 5000 msat.
+                        amount_in_msat: 10_000,
+                        amount_out_msat: 5_000,
+                        // Set cltv_expiry_delta = 100.
+                        expiry_in_height: 200,
+                        expiry_out_height: 100,
+                        added_at: Instant::now(),
+                        incoming_endorsed: EndorsementSignal::Unendorsed,
+                    };
+
+                    let fwd_outcome = self
+                        .jamming_interceptor
+                        .get_forwarding_outcome(self.target_node, &htlc);
+
+                    log::info!(
+                        "Reputation check for attacker; {:?}",
+                        fwd_outcome.unwrap().0
+                    );
+                }
             }
         }
 

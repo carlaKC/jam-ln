@@ -126,6 +126,7 @@ pub mod reputation {
     }
 
     /// A snapshot of the reputation and resources available for a forward.
+    #[derive(Debug)]
     pub struct AllocatoinCheck {
         pub reputation_check: ReputationCheck,
         pub resource_check: ResourceCheck,
@@ -160,6 +161,7 @@ pub mod reputation {
     }
 
     /// A snapshot of a reputation check for a htlc forward.
+    #[derive(Debug)]
     pub struct ReputationCheck {
         pub outgoing_reputation: i64,
         pub incoming_revenue: i64,
@@ -178,8 +180,8 @@ pub mod reputation {
         }
     }
 
-    #[derive(Clone)]
     /// A snapshot of the resource check for a htlc forward.
+    #[derive(Debug)]
     pub struct ResourceCheck {
         pub general_slots_used: u16,
         pub general_slots_availabe: u16,
