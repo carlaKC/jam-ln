@@ -92,9 +92,9 @@ async fn main() -> Result<(), BoxError> {
         general_liquidity_portion: 50,
     };
 
-    // TODO: these should be shared with simln!!
     let (shutdown, listener) = triggered::trigger();
     let attack_interceptor = SinkInterceptor::new_for_network(
+        clock.clone(),
         attacker_pubkey,
         target_pubkey,
         &sim_network,
