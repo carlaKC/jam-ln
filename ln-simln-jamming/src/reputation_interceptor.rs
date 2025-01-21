@@ -1,5 +1,5 @@
 use crate::clock::InstantClock;
-use crate::{endorsement_from_records, records_from_endorsement, BoxError};
+use crate::{endorsement_from_records, records_from_endorsement, BoxError, InterceptResult};
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use ln_resource_mgr::outgoing_reputation::{ForwardManager, ForwardManagerParams};
@@ -277,7 +277,7 @@ impl ReputationInterceptor {
     async fn inner_add_htlc(
         &self,
         htlc_add: HtlcAdd,
-    ) -> Result<Result<HashMap<u64, Vec<u8>>, ForwardingError>, ReputationError> {
+    ) -> InterceptResult{
         // If the forwarding node can't be found, we've hit a critical error and can't proceed.
         let (allocation_check, alias) = match self
             .network_nodes

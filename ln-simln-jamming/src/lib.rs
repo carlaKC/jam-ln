@@ -1,5 +1,6 @@
-use ln_resource_mgr::EndorsementSignal;
-use simln_lib::sim_node::CustomRecords;
+use ln_resource_mgr::{EndorsementSignal, ReputationError};
+use simln_lib::sim_node::{CustomRecords, ForwardingError};
+use std::collections::HashMap;
 use std::error::Error;
 
 pub mod clock;
@@ -8,6 +9,8 @@ pub mod reputation_interceptor;
 pub mod revenue_interceptor;
 pub mod sink_interceptor;
 pub(crate) mod test_utils;
+
+pub type InterceptResult = Result<Result<HashMap<u64, Vec<u8>>, ForwardingError>, ReputationError>;
 
 /// Error type for errors that can be erased, includes 'static so that down-casting is possible.
 pub type BoxError = Box<dyn Error + Send + Sync + 'static>;
