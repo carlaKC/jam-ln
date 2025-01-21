@@ -1,6 +1,6 @@
 use crate::clock::InstantClock;
 use crate::reputation_interceptor::{HtlcAdd, ReputationMonitor, ReputationPair};
-use crate::{endorsement_from_records, records_from_endorsement, BoxError};
+use crate::{endorsement_from_records, records_from_endorsement, BoxError, InterceptResult};
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use futures::future::join_all;
@@ -241,22 +241,32 @@ impl<C: InstantClock + Clock, R: Interceptor + ReputationMonitor> SinkIntercepto
         Ok(reputations)
     }
 
+	/// Gets an interception response for the request provided and returns it to the interceptor.
+    async fn intercept_attacker_incoming(&self, req: InterceptRequest) {
+        let resp = self.intercept_attacker_incoming_inner(&req).await;
+
+        if let Err(e) = req
+            .response
+            .send(resp.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>))
+            .await
+        {
+            log::error!("Could not send interceptor response: {e}");
+            self.shutdown.trigger();
+        }
+    }
+
     /// Intercepts payments flowing from target -> attacker, holding the htlc for the maximum allowable time to
     /// trash its reputation if the htlc is endorsed. We do not use our underlying jamming mitigation interceptor
     /// at all because the attacker is not required to run the mitigation.
-    async fn intercept_attacker_incoming(&self, req: InterceptRequest) {
+    async fn intercept_attacker_incoming_inner(&self, req: &InterceptRequest) -> InterceptResult {
         // Exit early if not endorsed, no point in holding.
         if endorsement_from_records(&req.incoming_custom_records) == EndorsementSignal::Unendorsed {
             log::info!(
                 "HTLC from target -> attacker not endorsed, releasing: {}",
                 print_request(&req)
             );
-            send_intercept_result!(
-                req,
-                Ok(Ok(records_from_endorsement(EndorsementSignal::Unendorsed))),
-                self.shutdown
-            );
-            return;
+
+            return Ok(Ok(records_from_endorsement(EndorsementSignal::Unendorsed)));
         }
 
         // Get maximum hold time assuming 10 minute blocks.
@@ -273,12 +283,10 @@ impl<C: InstantClock + Clock, R: Interceptor + ReputationMonitor> SinkIntercepto
 
         // If the htlc is endorsed, then we go ahead and hold the htlc for as long as we can only exiting if we
         // get a shutdown signal elsewhere.
-        let resp = select! {
-            _ = self.listener.clone() => Err(ForwardingError::InterceptorError("shutdown signal received".to_string().into())),
-            _ = self.clock.sleep(max_hold_secs) => Ok(records_from_endorsement(EndorsementSignal::Endorsed))
-        };
-
-        send_intercept_result!(req, Ok(resp), self.shutdown);
+        select! {
+            _ = self.listener.clone() => Ok(Err(ForwardingError::InterceptorError("shutdown signal received".to_string().into()))),
+            _ = self.clock.sleep(max_hold_secs) => Ok(Ok(records_from_endorsement(EndorsementSignal::Endorsed)))
+        }
     }
 
     /// Intercepts payments flowing from peer -> target, simulating a general jamming attack by failing any
