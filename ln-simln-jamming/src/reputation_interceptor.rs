@@ -23,6 +23,36 @@ pub struct HtlcAdd {
     pub htlc: ProposedForward,
 }
 
+impl HtlcAdd {
+    /// Creates a htlc add from an intercept request, returning non if the request is for a htlc receive (there is no
+    /// forward in this case).
+    fn from_request(req: &InterceptRequest, added_at: Instant) -> Option<Self> {
+        let outgoing_channel_id = match req.outgoing_channel_id {
+            Some(o) => o.into(),
+            None => return None,
+        };
+
+        let htlc = ProposedForward {
+            incoming_ref: HtlcRef {
+                channel_id: req.incoming_htlc.channel_id.into(),
+                htlc_index: req.incoming_htlc.index,
+            },
+            outgoing_channel_id,
+            amount_in_msat: req.incoming_amount_msat,
+            amount_out_msat: req.outgoing_amount_msat,
+            expiry_in_height: req.incoming_expiry_height,
+            expiry_out_height: req.outgoing_expiry_height,
+            added_at,
+            incoming_endorsed: endorsement_from_records(&req.incoming_custom_records),
+        };
+
+        Some(HtlcAdd {
+            forwarding_node: req.forwarding_node,
+            htlc,
+        })
+    }
+}
+
 struct HtlcResolve {
     outgoing_channel_id: u64,
     forwarding_node: PublicKey,
@@ -383,9 +413,10 @@ impl ReputationMonitor for ReputationInterceptor {
 impl Interceptor for ReputationInterceptor {
     /// Implemented by HTLC interceptors that provide input on the resolution of HTLCs forwarded in the simulation.
     async fn intercept_htlc(&self, req: InterceptRequest) {
-        // If the intercept has no outgoing channel, we can just exit early because there's no action to be taken.
-        let outgoing_channel_id = match req.outgoing_channel_id {
-            Some(c) => c.into(),
+        // Only intercept htlcs which are being forwarded, if it's a receive (no outgoing) then we'll just send the
+        // okay straight to the interceptor.
+        let htlc = match HtlcAdd::from_request(&req, self.clock.now()) {
+            Some(h) => h,
             None => {
                 if let Err(e) = req
                     .response
@@ -394,38 +425,18 @@ impl Interceptor for ReputationInterceptor {
                     ))))
                     .await
                 {
-                    // TODO: select?
-                    println!("Failed to send response: {:?}", e);
+                    log::error!("Could not send response to interceptor: {e}");
+                    self.shutdown.trigger();
                 }
                 return;
             }
         };
 
-        let htlc = ProposedForward {
-            incoming_ref: HtlcRef {
-                channel_id: req.incoming_htlc.channel_id.into(),
-                htlc_index: req.incoming_htlc.index,
-            },
-            outgoing_channel_id,
-            amount_in_msat: req.incoming_amount_msat,
-            amount_out_msat: req.outgoing_amount_msat,
-            expiry_in_height: req.incoming_expiry_height,
-            expiry_out_height: req.outgoing_expiry_height,
-            added_at: self.clock.now(),
-            incoming_endorsed: endorsement_from_records(&req.incoming_custom_records),
-        };
-
-        let resp = self
-            .inner_add_htlc(HtlcAdd {
-                forwarding_node: req.forwarding_node,
-                htlc,
-            })
-            .await
-            .map_err(|e| e.into()); // into maps error enum to erased Box<dyn Error>
+        let resp = self.inner_add_htlc(htlc).await.map_err(|e| e.into());
 
         if let Err(e) = req.response.send(resp).await {
-            // TODO: select
-            println!("Failed to send response: {:?}", e); // TODO: error handling
+            log::error!("Failed to send response: {:?}", e);
+            self.shutdown.trigger();
         }
     }
 
