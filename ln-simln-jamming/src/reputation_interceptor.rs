@@ -15,6 +15,7 @@ use std::error::Error;
 use std::ops::Sub;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use triggered::Trigger;
 
 #[derive(Clone)]
 pub struct HtlcAdd {
@@ -85,6 +86,7 @@ pub trait ReputationMonitor {
 pub struct ReputationInterceptor {
     network_nodes: Arc<Mutex<HashMap<PublicKey, (ForwardManager, String)>>>,
     clock: Arc<dyn InstantClock + Send + Sync>,
+    shutdown: Trigger,
 }
 
 impl ReputationInterceptor {
@@ -92,6 +94,7 @@ impl ReputationInterceptor {
         params: ForwardManagerParams,
         edges: &[NetworkParser],
         clock: Arc<dyn InstantClock + Send + Sync>,
+        shutdown: Trigger,
     ) -> Result<Self, BoxError> {
         let mut network_nodes: HashMap<PublicKey, (ForwardManager, String)> = HashMap::new();
 
@@ -134,6 +137,7 @@ impl ReputationInterceptor {
         Ok(Self {
             network_nodes: Arc::new(Mutex::new(network_nodes)),
             clock,
+            shutdown,
         })
     }
 
@@ -144,9 +148,10 @@ impl ReputationInterceptor {
         edges: &[NetworkParser],
         history: &[BootstrapForward],
         clock: Arc<dyn InstantClock + Send + Sync>,
+        shutdown: Trigger,
     ) -> Result<Self, BoxError> {
-        let mut interceptor =
-            Self::new_for_network(params, edges, clock).map_err(|_| "could not create network")?;
+        let mut interceptor = Self::new_for_network(params, edges, clock, shutdown)
+            .map_err(|_| "could not create network")?;
         interceptor.bootstrap_network_history(history).await?;
         Ok(interceptor)
     }

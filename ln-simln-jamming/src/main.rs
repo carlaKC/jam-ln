@@ -103,6 +103,7 @@ async fn main() -> Result<(), BoxError> {
             &sim_network,
             &history,
             clock.clone(),
+            shutdown.clone(),
         )
         .await?,
         listener.clone(),
