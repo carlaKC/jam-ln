@@ -119,8 +119,8 @@ async fn main() -> Result<(), BoxError> {
     let clock = Arc::new(SimulationClock::new(cli.clock_speedup)?);
     let forward_params = ForwardManagerParams {
         reputation_params: ReputationParams {
-            revenue_window: Duration::from_secs(14 * 24 * 60 * 60),
-            reputation_multiplier: 12,
+            revenue_window: Duration::from_secs(cli.revenue_window_seconds),
+            reputation_multiplier: cli.reputation_multiplier,
             resolution_period: Duration::from_secs(90),
             expected_block_speed: Some(Duration::from_secs(10 * 60)),
         },

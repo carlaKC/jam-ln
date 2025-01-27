@@ -45,6 +45,12 @@ const DEFAULT_ATTACKER_POLL_SECONDS: &str = "300";
 /// The default batch size for writing results to disk.
 const DEFAULT_RESULT_BATCH_SIZE: &str = "500";
 
+/// The default window that we consider revenue over (2 weeks = 60 * 60 * 24 * 7).
+const DEFAULT_REVENUE_WINDOW_SECONDS: &str = "1210000";
+
+/// The default multiplier applied to the revenue window to get reputation window.
+const DEFAULT_REPUTATION_MULTIPLIER: &str = "12";
+
 #[derive(Parser)]
 #[command(version, about)]
 pub struct Cli {
@@ -99,6 +105,14 @@ pub struct Cli {
     /// The size of results batches to write to disk.
     #[arg(long, default_value = DEFAULT_RESULT_BATCH_SIZE)]
     pub result_batch_size: u16,
+
+    /// The window over which the value of a link's revenue to our node is calculated.
+    #[arg(long, default_value = DEFAULT_REVENUE_WINDOW_SECONDS)]
+    pub revenue_window_seconds: u64,
+
+    /// The multiplier applied to revenue_window_seconds to get the duration over which reputation is bootstrapped.
+    #[arg(long, default_value = DEFAULT_REPUTATION_MULTIPLIER)]
+    pub reputation_multiplier: u8,
 }
 
 impl Cli {
