@@ -176,18 +176,23 @@ where
 
     /// Creates a network from the set of edges provided and bootstraps the reputation of nodes in the network using
     /// the historical forwards provided. Forwards are expected to be sorted by added_ns in ascending order.
+    #[allow(clippy::too_many_arguments)]
     pub async fn new_with_bootstrap(
         params: ForwardManagerParams,
         edges: &[NetworkParser],
         general_jammed: HashMap<PublicKey, u64>,
         history: &[BootstrapForward],
+        custom_boostrap: (u64, Duration),
         clock: Arc<dyn InstantClock + Send + Sync>,
         results: Option<Arc<Mutex<R>>>,
         shutdown: Trigger,
-    ) -> Result<Self, BoxError> {
+    ) -> Result<(Self, u64), BoxError> {
         let mut interceptor = Self::new_for_network(params, edges, clock, results, shutdown)
             .map_err(|_| "could not create network")?;
-        interceptor.bootstrap_network_history(history).await?;
+
+        let bootstrap_revenue = interceptor
+            .bootstrap_network_history(history, custom_boostrap)
+            .await?;
 
         // After the network has been bootstrapped, we can go ahead and general jam required channels.
         for (pubkey, channel) in general_jammed.iter() {
@@ -201,13 +206,14 @@ where
                 .general_jam_channel(*channel)?;
         }
 
-        Ok(interceptor)
+        Ok((interceptor, bootstrap_revenue))
     }
 
     async fn bootstrap_network_history(
         &mut self,
         history: &[BootstrapForward],
-    ) -> Result<(), BoxError> {
+        custom_bootstrap: (u64, Duration),
+    ) -> Result<u64, BoxError> {
         // We'll get all instants relative to the last timestamp we're given, so we get an instant now and track
         // the last timestamp in the set of forwards.
         let start_ins = self.clock.now();
@@ -217,6 +223,17 @@ where
             .ok_or("at least one entry required in bootstrap history")?
             .settled_ns;
 
+        if last_ts < custom_bootstrap.1.as_nanos() as u64 {
+            return Err(format!(
+                "last absolute timestamp {last_ts} is less than attacker boostrap: {}",
+                custom_bootstrap.1.as_nanos()
+            )
+            .into());
+        }
+
+        // Get the absolute timestamp that we want to start custom bootstrap for a specific channel.
+        let start_custom_bootstrap = last_ts - custom_bootstrap.1.as_nanos() as u64;
+        let mut bootstrap_revenue = 0;
         // Run through history and create instants relative to the current time, we'll have two events per forward
         // so we can allocate accordingly.
         let mut bootstrap_events = Vec::with_capacity(history.len() * 2);
@@ -225,6 +242,16 @@ where
                 channel_id: h.channel_in_id,
                 htlc_index: i as u64,
             };
+
+            // If we're before the custom bootstrap period we'll skip over any payments for the custom outgoing channel.
+            // If we're in it, we'll start to include that node and count our bootstrap period's revenue.
+            if h.added_ns < start_custom_bootstrap {
+                if h.channel_out_id == custom_bootstrap.0 {
+                    continue;
+                }
+            } else {
+                bootstrap_revenue += h.incoming_amt - h.outgoing_amt;
+            }
 
             bootstrap_events.push(BootstrapEvent::BootstrapAdd(HtlcAdd {
                 forwarding_node: h.forwarding_node,
@@ -287,7 +314,7 @@ where
             }
         }
 
-        Ok(())
+        Ok(bootstrap_revenue)
     }
 }
 
@@ -928,8 +955,8 @@ mod tests {
             outgoing_amt: 500,
             incoming_expiry: 100,
             outgoing_expiry: 50,
-            added_ns: 900_000,
-            settled_ns: 1_000_000,
+            added_ns: 900,
+            settled_ns: 1000,
             forwarding_node: bob_pk,
             channel_in_id: alice_to_bob,
             channel_out_id: bob_to_carol,
@@ -937,18 +964,22 @@ mod tests {
 
         // Create an interceptor that is intended to general jam payments on Bob -> Carol in the three hop network
         // Alice -> Bob -> Carol.
-        let interceptor: ReputationInterceptor<BatchForwardWriter, ForwardManager> =
-            ReputationInterceptor::new_with_bootstrap(
-                params,
-                &edges,
-                HashMap::from([(edges[1].node_1.pubkey, bob_to_carol)]),
-                &boostrap,
-                Arc::new(SimulationClock::new(1).unwrap()),
-                None,
-                shutdown,
-            )
-            .await
-            .unwrap();
+        let (interceptor, _): (
+            ReputationInterceptor<BatchForwardWriter, ForwardManager>,
+            u64,
+        ) = ReputationInterceptor::new_with_bootstrap(
+            params,
+            &edges,
+            HashMap::from([(edges[1].node_1.pubkey, bob_to_carol)]),
+            &boostrap,
+            // Set to 200 so that we'll start at 700 and include the forward.
+            (bob_to_carol, Duration::from_nanos(200)),
+            Arc::new(SimulationClock::new(1).unwrap()),
+            None,
+            shutdown,
+        )
+        .await
+        .unwrap();
 
         let bob_reputation = interceptor
             .network_nodes

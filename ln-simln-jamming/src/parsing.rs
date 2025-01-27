@@ -133,7 +133,22 @@ impl Cli {
             .into());
         }
 
+        if self.reputation_window() < self.attacker_bootstrap {
+            return Err(format!(
+                "attacker_bootstrap {:?} < reputation window {:?} ({} * {})))",
+                self.attacker_bootstrap,
+                self.reputation_window(),
+                self.revenue_window_seconds,
+                self.reputation_multiplier,
+            )
+            .into());
+        }
+
         Ok(())
+    }
+
+    pub fn reputation_window(&self) -> Duration {
+        Duration::from_secs(self.revenue_window_seconds * self.reputation_multiplier as u64)
     }
 }
 

@@ -101,16 +101,29 @@ async fn main() -> Result<(), BoxError> {
         })
         .collect();
 
+    let target_to_attacker: Vec<u64> = target_channels
+        .iter()
+        .filter_map(|(scid, channel)| {
+            if channel.channel_type == TargetChannelType::Attacker {
+                let scid = *scid;
+                Some(scid.into())
+            } else {
+                None
+            }
+        })
+        .collect();
+    if target_to_attacker.len() != 1 {
+        return Err(format!(
+            "expected one target -> attacker channel, got: {}",
+            target_to_attacker.len()
+        )
+        .into());
+    }
+
     // Pull history that bootstraps the simulation in a network with the attacker's channels present and calculate
-    // revenue for the target node during this bootstrap period.
-    let history = history_from_file(&cli.bootstrap_file, Some(cli.attacker_bootstrap))?;
-    let bootstrap_revenue = history.iter().fold(0, |acc, item| {
-        if item.forwarding_node == target_pubkey {
-            acc + item.incoming_amt - item.outgoing_amt
-        } else {
-            acc
-        }
-    });
+    // revenue for the target node during this bootstrap period. Limit history pulled to the period that we observe
+    // reputation for, any longer is wasteful because values are completely decayed away.
+    let history = history_from_file(&cli.bootstrap_file, Some(cli.reputation_window()))?;
 
     // Use the channel jamming interceptor and latency for simulated payments.
     let latency_interceptor: Arc<dyn Interceptor> =
@@ -154,22 +167,25 @@ async fn main() -> Result<(), BoxError> {
         }
     });
 
+    let (reputation_interceptor, bootstrap_revenue) = ReputationInterceptor::new_with_bootstrap(
+        forward_params,
+        &sim_network,
+        jammed_peers,
+        &history,
+        (*target_to_attacker.first().unwrap(), cli.attacker_bootstrap),
+        clock.clone(),
+        Some(results_writer),
+        shutdown.clone(),
+    )
+    .await?;
+
     let attack_interceptor = SinkInterceptor::new_for_network(
         clock.clone(),
         attacker_pubkey,
         target_pubkey,
         target_channel_map,
         honest_peers,
-        ReputationInterceptor::new_with_bootstrap(
-            forward_params,
-            &sim_network,
-            jammed_peers,
-            &history,
-            clock.clone(),
-            Some(results_writer),
-            shutdown.clone(),
-        )
-        .await?,
+        reputation_interceptor,
         listener.clone(),
         shutdown.clone(),
     );
