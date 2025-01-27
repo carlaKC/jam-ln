@@ -103,7 +103,7 @@ async fn main() -> Result<(), BoxError> {
 
     // Pull history that bootstraps the simulation in a network with the attacker's channels present and calculate
     // revenue for the target node during this bootstrap period.
-    let history = history_from_file(&cli.bootstrap_file, Some(cli.bootstrap_duration))?;
+    let history = history_from_file(&cli.bootstrap_file, Some(cli.attacker_bootstrap))?;
     let bootstrap_revenue = history.iter().fold(0, |acc, item| {
         if item.forwarding_node == target_pubkey {
             acc + item.incoming_amt - item.outgoing_amt
@@ -231,7 +231,7 @@ async fn main() -> Result<(), BoxError> {
         clock.clone(),
         target_pubkey,
         bootstrap_revenue,
-        cli.bootstrap_duration,
+        cli.attacker_bootstrap,
         cli.peacetime_file,
         listener.clone(),
         shutdown.clone(),

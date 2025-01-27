@@ -62,10 +62,10 @@ pub struct Cli {
     #[arg(long, default_value = DEFAULT_PEACETIME_FILE)]
     pub peacetime_file: PathBuf,
 
-    /// The duration of time that reputation for the network should be bootstrapped for, expressed as human readable
-    /// values (eg: 1w, 3d).
+    /// The duration of time that reputation of the attacking node should be bootstrapped for, expressed as human
+    /// readable values (eg: 1w, 3d).
     #[arg(long, value_parser = parse_duration)]
-    pub bootstrap_duration: Duration,
+    pub attacker_bootstrap: Duration,
 
     /// The minimum percentage of channel pairs between the target and its honest peers that the target needs to have
     /// good reputation on for the simulation to run.
