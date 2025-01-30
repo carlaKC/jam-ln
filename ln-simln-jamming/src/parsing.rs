@@ -20,7 +20,7 @@ const DEFAULT_SIM_FILE: &str = "./simln.json";
 const DEFAULT_BOOTSTRAP_FILE: &str = "./bootstrap.csv";
 
 /// Default file used to imitate peacetime revenue
-const DEFAULT_PEACETIME_FILE: &str = "./no_attacker.csv";
+const DEFAULT_PEACETIME_FILE: &str = "./peacetime.csv";
 
 /// Default percent of good reputation pairs the target requires.
 const DEFAULT_TARGET_REP_PERCENT: &str = "50";
