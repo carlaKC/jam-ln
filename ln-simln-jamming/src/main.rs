@@ -151,6 +151,7 @@ async fn main() -> Result<(), BoxError> {
         cli.results_dir.clone(),
         &monitor_nodes,
         cli.result_batch_size,
+        InstantClock::now(&*clock),
     )));
 
     let results_writer_1 = results_writer.clone();

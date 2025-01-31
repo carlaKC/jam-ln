@@ -7,6 +7,7 @@ use serde::{Serialize, Serializer};
 use std::collections::HashMap;
 use std::fs::{metadata, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 /// Implemented to report forwards for analytics and data recording.
 pub trait ForwardReporter: Send + Sync {
@@ -21,6 +22,8 @@ pub trait ForwardReporter: Send + Sync {
 struct Record {
     forward: ProposedForward,
     decision: AllocationCheck,
+    // Tracked with the record so that serialization can express a relative timestamp since the simulation started.
+    start_ins: Instant,
 }
 
 impl Serialize for Record {
@@ -31,7 +34,15 @@ impl Serialize for Record {
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct("Record", 14)?;
+        let mut state = serializer.serialize_struct("Record", 15)?;
+        state.serialize_field(
+            "ts_offset_ns",
+            &self
+                .forward
+                .added_at
+                .duration_since(self.start_ins)
+                .as_nanos(),
+        )?;
         state.serialize_field("incoming_channel_id", &self.forward.incoming_ref.channel_id)?;
         state.serialize_field("outgoing_channel_id", &self.forward.outgoing_channel_id)?;
         state.serialize_field("amount_in_msat", &self.forward.amount_in_msat)?;
@@ -81,10 +92,16 @@ pub struct BatchForwardWriter {
     batch_size: u16,
     record_count: u16,
     path: PathBuf,
+    start_ins: Instant,
 }
 
 impl BatchForwardWriter {
-    pub fn new(path: PathBuf, nodes: &[(PublicKey, String)], batch_size: u16) -> Self {
+    pub fn new(
+        path: PathBuf,
+        nodes: &[(PublicKey, String)],
+        batch_size: u16,
+        start_ins: Instant,
+    ) -> Self {
         Self {
             nodes: nodes
                 .iter()
@@ -94,6 +111,7 @@ impl BatchForwardWriter {
             batch_size,
             record_count: 0,
             path,
+            start_ins,
         }
     }
 
@@ -145,7 +163,11 @@ impl ForwardReporter for BatchForwardWriter {
         forward: ProposedForward,
     ) -> Result<(), BoxError> {
         if let Some((records, _)) = self.nodes.get_mut(&forwarding_node) {
-            records.push(Record { decision, forward });
+            records.push(Record {
+                decision,
+                forward,
+                start_ins: self.start_ins,
+            });
             self.record_count += 1;
         }
 
@@ -158,7 +180,7 @@ mod tests {
     use std::fs::read_to_string;
     use std::path::{Path, PathBuf};
     use std::str::FromStr;
-    use std::time::SystemTime;
+    use std::time::{Instant, SystemTime};
 
     use crate::analysis::get_file;
     use crate::test_utils::{get_random_keypair, test_allocation_check, test_proposed_forward};
@@ -175,6 +197,7 @@ mod tests {
             PathBuf::from_str(".").unwrap(),
             &[(node_0, "0".to_string())],
             5,
+            Instant::now(),
         );
 
         // Tracked node reported.
@@ -216,7 +239,7 @@ mod tests {
         let path = PathBuf::from_str(".").unwrap();
         let filename = get_file(&path, &node_0, alias.clone());
 
-        let mut writer = BatchForwardWriter::new(path, &[(node_0, alias)], 2);
+        let mut writer = BatchForwardWriter::new(path, &[(node_0, alias)], 2, Instant::now());
 
         // Track a forward that should be written to disk.
         writer
