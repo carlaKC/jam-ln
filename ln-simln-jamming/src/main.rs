@@ -278,7 +278,11 @@ async fn main() -> Result<(), BoxError> {
         }
     });
 
-    let interceptors = vec![latency_interceptor, attack_interceptor, revenue_interceptor];
+    let interceptors = vec![
+        latency_interceptor,
+        attack_interceptor.clone(),
+        revenue_interceptor.clone(),
+    ];
 
     // Simulated channels for our simulated graph.
     let channels = sim_network
@@ -292,7 +296,7 @@ async fn main() -> Result<(), BoxError> {
         SimulationCfg::new(None, 3_800_000, 2.0, None, Some(13995354354227336701)),
         channels,
         vec![], // No activities, we want random activity!
-        clock,
+        clock.clone(),
         interceptors,
         listener,
         shutdown,
@@ -303,6 +307,16 @@ async fn main() -> Result<(), BoxError> {
     // Run simulation until it shuts down, then wait for the graph to exit.
     simulation.run().await?;
     graph.lock().await.wait_for_shutdown().await;
+
+    // Add revenue interceptor?
+    let _revenue_snapshot = revenue_interceptor.get_revenue_difference().await;
+    let _reputation_pairs = attack_interceptor
+        .get_target_pairs(
+            target_pubkey,
+            TargetChannelType::Attacker,
+            InstantClock::now(&*clock),
+        )
+        .await;
 
     Ok(())
 }
@@ -315,6 +329,14 @@ struct TargetChannel {
     channel_type: TargetChannelType,
 }
 
+struct ReputationPairs{
+	with_reputation: usize,
+	total: usize,
+}
+
+fn get_reputation_paris(chan_type: TargetChannelType) -> Result<ReputationPairs, BoxError>{
+
+}
 fn get_target_channel_descriptions(
     edges: &[NetworkParser],
     attacker_pubkey: PublicKey,

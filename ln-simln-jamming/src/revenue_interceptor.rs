@@ -5,7 +5,7 @@ use std::error::Error;
 use std::ops::{Add, Sub};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
@@ -30,6 +30,7 @@ where
     target_node: PublicKey,
     target_revenue: Mutex<NodeRevenue>,
     peacetime_revenue: Mutex<PeacetimeRevenue>,
+    start_ins: Instant,
     listener: Listener,
     shutdown: Trigger,
 }
@@ -70,6 +71,13 @@ struct PeacetimeRevenue {
     /// A queue of peacetime revenue events that need to be replayed with the simulation to compare peace and attack
     /// time revenue.
     revenue_events: BinaryHeap<RevenueEvent>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RevenueSnapshot {
+    peacetime_revenue_msat: u64,
+    simulation_revenue_msat: u64,
+    runtime: Duration,
 }
 
 impl PeacetimeRevenue {
@@ -120,7 +128,7 @@ impl<C: InstantClock + Clock> RevenueInterceptor<C> {
         shutdown: Trigger,
     ) -> Result<Self, BoxError> {
         Ok(Self {
-            clock,
+            clock: clock.clone(),
             target_node: target_pubkey,
             target_revenue: Mutex::new(NodeRevenue {
                 revenue_total: bootstrap_revenue,
@@ -131,6 +139,7 @@ impl<C: InstantClock + Clock> RevenueInterceptor<C> {
                 revenue_file,
                 bootstrap_duration,
             )?),
+            start_ins: InstantClock::now(&*clock),
             listener,
             shutdown,
         })
@@ -168,7 +177,6 @@ impl<C: InstantClock + Clock> RevenueInterceptor<C> {
     /// Polls the difference between attack and peacetime revenue using the provide interval. Triggers shutdown if
     /// attack revenue drops below projected peacetime revenue.
     pub async fn poll_revenue_difference(&self, interval: Duration) -> Result<(), BoxError> {
-        let start_ins = InstantClock::now(&*self.clock);
         let mut i = 0;
 
         loop {
@@ -177,21 +185,29 @@ impl<C: InstantClock + Clock> RevenueInterceptor<C> {
                 _ = self.clock.sleep(interval) => {
                     i +=1;
 
-                    let simulation_revenue = self.target_revenue.lock().await.revenue_total;
-                    let peacetime_revenue = self.peacetime_revenue.lock().await.peacetime_revenue;
-                    let elapsed = InstantClock::now(&*self.clock).duration_since(start_ins);
-
-                    if peacetime_revenue > simulation_revenue{
+                    let snapshot = self.get_revenue_difference().await;
+                    if snapshot.peacetime_revenue_msat > snapshot.simulation_revenue_msat{
                         self.shutdown.trigger();
-                        log::error!("Peacetime revenue: {peacetime_revenue} exceeds simulation revenue: {simulation_revenue} after: {:?}", elapsed);
+                        log::error!("Peacetime revenue: {} exceeds simulation revenue: {} after: {:?}",
+                            snapshot.peacetime_revenue_msat, snapshot.simulation_revenue_msat, snapshot.runtime);
                         return Ok(())
                     }
 
                     if i % 10 == 0{
-                        log::info!("Peacetime revenue: {peacetime_revenue} less than simulation revenue: {simulation_revenue} after: {:?}", elapsed);
+                        log::info!("Peacetime revenue: {} less than simulation revenue: {} after: {:?}",
+                            snapshot.peacetime_revenue_msat, snapshot.simulation_revenue_msat, snapshot.runtime);
                     }
                 },
             }
+        }
+    }
+
+    /// Returns a snapshot of the simulation's revenue for its runtime compared to a network with no attacking channels.
+    pub async fn get_revenue_difference(&self) -> RevenueSnapshot {
+        RevenueSnapshot {
+            simulation_revenue_msat: self.target_revenue.lock().await.revenue_total,
+            peacetime_revenue_msat: self.peacetime_revenue.lock().await.peacetime_revenue,
+            runtime: InstantClock::now(&*self.clock).duration_since(self.start_ins),
         }
     }
 }
