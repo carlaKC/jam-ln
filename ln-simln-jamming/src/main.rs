@@ -176,6 +176,8 @@ async fn main() -> Result<(), BoxError> {
         }
     });
 
+    let fee = get_reputation_margin_fee(cli.reputation_margin_msat);
+    let oc = forward_params.htlc_opportunity_cost(fee, cli.reputation_margin_expiry_blocks);
     let reputation_interceptor = ReputationInterceptor::new_with_bootstrap(
         forward_params,
         &sim_network,
@@ -191,6 +193,7 @@ async fn main() -> Result<(), BoxError> {
         .print_reputations(InstantClock::now(&*clock))
         .await?;
 
+    log::info!("CKC OC is {oc}");
     return Ok(());
     /*let attack_interceptor = SinkInterceptor::new_for_network(
         clock.clone(),

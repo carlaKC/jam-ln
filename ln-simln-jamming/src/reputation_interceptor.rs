@@ -314,7 +314,9 @@ where
                     }
 
                     // TODO: add in constant check for htlc opportunity
-                    if snapshot_incoming.incoming_revenue < snapshot_outgoing.outgoing_reputation {
+                    if snapshot_incoming.incoming_revenue + 1466300
+                        < snapshot_outgoing.outgoing_reputation
+                    {
                         good_reptation += 1;
                     }
                     total_reputation += 1;
