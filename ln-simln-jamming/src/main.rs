@@ -74,12 +74,12 @@ async fn main() -> Result<(), BoxError> {
     monitor_nodes.push((target_pubkey, cli.target_alias.to_string()));
 
     // Create a map of all the target's channels, and a vec of its non-attacking peers.
-    let target_channel_map = target_channels
+    let target_channel_map: Vec<(ShortChannelID, TargetChannelType)> = target_channels
         .values()
         .map(|channel| (channel.scid, channel.channel_type.clone()))
         .collect();
 
-    let honest_peers = target_channels
+    let honest_peers: Vec<PublicKey> = target_channels
         .iter()
         .filter_map(|(_, channel)| {
             if channel.channel_type == TargetChannelType::Peer {
@@ -176,22 +176,32 @@ async fn main() -> Result<(), BoxError> {
         }
     });
 
-    let attack_interceptor = SinkInterceptor::new_for_network(
+    let fee = get_reputation_margin_fee(cli.reputation_margin_msat);
+    let oc = forward_params.htlc_opportunity_cost(fee, cli.reputation_margin_expiry_blocks);
+    let reputation_interceptor = ReputationInterceptor::new_with_bootstrap(
+        forward_params,
+        &sim_network,
+        jammed_peers,
+        &bootstrap,
+        clock.clone(),
+        Some(results_writer),
+        shutdown.clone(),
+    )
+    .await?;
+
+    reputation_interceptor
+        .print_reputations(InstantClock::now(&*clock))
+        .await?;
+
+    log::info!("CKC OC is {oc}");
+    return Ok(());
+    /*let attack_interceptor = SinkInterceptor::new_for_network(
         clock.clone(),
         attacker_pubkey,
         target_pubkey,
         target_channel_map,
         honest_peers,
-        ReputationInterceptor::new_with_bootstrap(
-            forward_params,
-            &sim_network,
-            jammed_peers,
-            &bootstrap,
-            clock.clone(),
-            Some(results_writer),
-            shutdown.clone(),
-        )
-        .await?,
+        reputation_interceptor,
         listener.clone(),
         shutdown.clone(),
     );
@@ -323,7 +333,7 @@ async fn main() -> Result<(), BoxError> {
         &end_reputation,
     )?;
 
-    Ok(())
+    Ok(())*/
 }
 
 struct TargetChannel {
