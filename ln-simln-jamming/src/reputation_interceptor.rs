@@ -297,6 +297,49 @@ where
 
         Ok(())
     }
+
+    pub async fn print_reputations(&self, instant: Instant) -> Result<(), BoxError> {
+        let lock = self.network_nodes.lock().unwrap();
+
+        let mut good_reputation_nodes = 0;
+        for (_, node) in lock.iter() {
+            let reputations = node.forward_manager.list_reputation(instant)?;
+
+            let mut good_reptation = 0;
+            let mut total_reputation = 0;
+            for (incoming_scid, snapshot_incoming) in reputations.iter() {
+                for (outgoing_scid, snapshot_outgoing) in reputations.iter() {
+                    if incoming_scid == outgoing_scid {
+                        continue;
+                    }
+
+                    // TODO: add in constant check for htlc opportunity
+                    if snapshot_incoming.incoming_revenue < snapshot_outgoing.outgoing_reputation {
+                        good_reptation += 1;
+                    }
+                    total_reputation += 1;
+                }
+            }
+
+            if good_reptation != 0 && total_reputation / good_reptation <= 2 {
+                good_reputation_nodes += 1;
+            }
+
+            log::info!(
+                "Node: {} reputation: {}/{}",
+                node.alias,
+                good_reptation,
+                total_reputation
+            );
+        }
+
+        log::info!(
+            "Nodes with at least half good pairs: {good_reputation_nodes}/{}",
+            lock.len()
+        );
+
+        Ok(())
+    }
 }
 
 impl<R, M> ReputationInterceptor<R, M>
