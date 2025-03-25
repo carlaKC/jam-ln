@@ -1,5 +1,6 @@
 use crate::decaying_average::DecayingAverage;
 use crate::htlc_manager::{ChannelFilter, InFlightHtlc, InFlightManager};
+use crate::incoming_channel::IncomingChannel;
 use crate::outgoing_channel::{BucketParameters, OutgoingChannel};
 use crate::{
     AllocationCheck, BucketResources, ForwardResolution, HtlcRef, ProposedForward, ReputationCheck,
@@ -15,6 +16,7 @@ use std::time::{Duration, Instant};
 #[derive(Debug)]
 struct TrackedChannel {
     outgoing_direction: OutgoingChannel,
+    incoming_direction: IncomingChannel,
     /// Tracks the revenue that this channel has been responsible for, considering htlcs where the channel has been the
     /// incoming or outgoing forwarding channel.
     bidirectional_revenue: DecayingAverage,
@@ -63,14 +65,20 @@ impl ForwardManagerImpl {
         forward.validate()?;
 
         // Get the incoming revenue threshold that the outgoing channel must meet.
-        let incoming_threshold = self
+        let incoming_channel = self
             .channels
             .get_mut(&forward.incoming_ref.channel_id)
             .ok_or(ReputationError::ErrIncomingNotFound(
                 forward.incoming_ref.channel_id,
-            ))?
+            ))?;
+
+        let incoming_threshold = incoming_channel
             .bidirectional_revenue
             .value_at_instant(forward.added_at)?;
+
+        let no_congestion_misuse = incoming_channel
+            .incoming_direction
+            .no_congestion_misuse(forward.added_at);
 
         // Check reputation and resources available for the forward.
         let outgoing_channel = &mut self
@@ -95,9 +103,12 @@ impl ForwardManagerImpl {
                     .htlcs
                     .htlc_risk(forward.fee_msat(), forward.expiry_in_height),
             },
-            congestion_eligible: self
-                .htlcs
-                .congestion_eligible(forward.incoming_ref.channel_id),
+            // The incoming channel can only use congestion resources if it hasn't recently misused congestion
+            // resources and it doesn't currently have any htlcs using them.
+            congestion_eligible: no_congestion_misuse
+                && self
+                    .htlcs
+                    .congestion_eligible(forward.incoming_ref.channel_id),
             resource_check: ResourceCheck {
                 general_bucket: BucketResources {
                     slots_used: self.htlcs.bucket_in_flight_count(
@@ -175,6 +186,7 @@ impl ReputationManager for ForwardManager {
                     capacity_msat * self.params.congestion_liquidity_portion as u64 / 100;
 
                 v.insert(TrackedChannel {
+                    incoming_direction: IncomingChannel::new(self.params.reputation_params),
                     outgoing_direction: OutgoingChannel::new(
                         self.params.reputation_params,
                         BucketParameters {
@@ -259,18 +271,24 @@ impl ReputationManager for ForwardManager {
             .lock()
             .map_err(|e| ReputationError::ErrUnrecoverable(e.to_string()))?;
 
-        // Remove from outgoing channel, which will return the amount that we need to add to the incoming channel's
-        // revenue for forwarding the htlc.
+        // Remove the hltc from our tracker, as well as the incoming and outgoing direction's current state.
         let in_flight = inner_lock
             .htlcs
             .remove_htlc(outgoing_channel, incoming_ref)?;
 
-        let outgoing_channel_tracker = inner_lock
+        inner_lock
+            .channels
+            .get_mut(&incoming_ref.channel_id)
+            .ok_or(ReputationError::ErrIncomingNotFound(
+                incoming_ref.channel_id,
+            ))?
+            .incoming_direction
+            .remove_incoming_htlc(&in_flight, resolved_instant);
+
+        inner_lock
             .channels
             .get_mut(&outgoing_channel)
-            .ok_or(ReputationError::ErrOutgoingNotFound(outgoing_channel))?;
-
-        outgoing_channel_tracker
+            .ok_or(ReputationError::ErrOutgoingNotFound(outgoing_channel))?
             .outgoing_direction
             .remove_outgoing_htlc(&in_flight, resolution, resolved_instant)?;
 
@@ -281,7 +299,10 @@ impl ReputationManager for ForwardManager {
         // If the htlc was settled, update *both* the outgoing and incoming channel's revenue trackers.
         let fee_i64 = i64::try_from(in_flight.fee_msat).unwrap_or(i64::MAX);
 
-        let _ = outgoing_channel_tracker
+        inner_lock
+            .channels
+            .get_mut(&outgoing_channel)
+            .ok_or(ReputationError::ErrOutgoingNotFound(outgoing_channel))?
             .bidirectional_revenue
             .add_value(fee_i64, resolved_instant)?;
 
