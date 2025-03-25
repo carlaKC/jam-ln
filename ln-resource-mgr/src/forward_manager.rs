@@ -25,6 +25,8 @@ pub struct ForwardManagerParams {
     pub reputation_params: ReputationParams,
     pub general_slot_portion: u8,
     pub general_liquidity_portion: u8,
+    pub congestion_slot_portion: u8,
+    pub congestion_liquidity_portion: u8,
 }
 
 impl ForwardManagerParams {
@@ -93,6 +95,9 @@ impl ForwardManagerImpl {
                     .htlcs
                     .htlc_risk(forward.fee_msat(), forward.expiry_in_height),
             },
+            congestion_eligible: self
+                .htlcs
+                .congestion_eligible(forward.incoming_ref.channel_id),
             resource_check: ResourceCheck {
                 general_bucket: BucketResources {
                     slots_used: self.htlcs.bucket_in_flight_count(
@@ -105,6 +110,18 @@ impl ForwardManagerImpl {
                         ResourceBucketType::General,
                     ),
                     liquidity_available_msat: outgoing_channel.general_bucket.liquidity_msat,
+                },
+                congestion_bucket: BucketResources {
+                    slots_used: self.htlcs.bucket_in_flight_count(
+                        forward.outgoing_channel_id,
+                        ResourceBucketType::Congestion,
+                    ),
+                    slots_available: outgoing_channel.congestion_bucket.slot_count,
+                    liquidity_used_msat: self.htlcs.bucket_in_flight_msat(
+                        forward.outgoing_channel_id,
+                        ResourceBucketType::Congestion,
+                    ),
+                    liquidity_available_msat: outgoing_channel.congestion_bucket.liquidity_msat,
                 },
             },
         })
@@ -153,12 +170,20 @@ impl ReputationManager for ForwardManager {
                 let general_liquidity_amount =
                     capacity_msat * self.params.general_liquidity_portion as u64 / 100;
 
+                let congestion_slot_count = 483 * self.params.congestion_slot_portion as u16 / 100;
+                let congestion_liquidity_amount =
+                    capacity_msat * self.params.congestion_liquidity_portion as u64 / 100;
+
                 v.insert(TrackedChannel {
                     outgoing_direction: OutgoingChannel::new(
                         self.params.reputation_params,
                         BucketParameters {
                             slot_count: general_slot_count,
                             liquidity_msat: general_liquidity_amount,
+                        },
+                        BucketParameters {
+                            slot_count: congestion_slot_count,
+                            liquidity_msat: congestion_liquidity_amount,
                         },
                     )?,
                     bidirectional_revenue: DecayingAverage::new(

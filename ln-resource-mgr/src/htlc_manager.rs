@@ -167,6 +167,14 @@ impl InFlightManager {
             .count() as u16 // Safe because we have in protocol limit 483.
     }
 
+    /// Returns false if the incoming channel currently has any in-flight htlcs that are utilizing
+    /// congestion resources.
+    pub(super) fn congestion_eligible(&self, incoming_channel_id: u64) -> bool {
+        !self.in_flight.iter().any(|(k, v)| {
+            v.bucket == ResourceBucketType::Congestion && k.channel_id == incoming_channel_id
+        })
+    }
+
     /// Calculates the worst case reputation damage of a htlc, assuming it'll be held for its full expiry_delta.
     pub(super) fn htlc_risk(&self, fee_msat: u64, expiry_delta: u32) -> u64 {
         self.params.htlc_risk(fee_msat, expiry_delta)
@@ -345,13 +353,24 @@ mod tests {
         };
         let htlc_3 = get_test_htlc(channel_2, false, ResourceBucketType::General, 100000);
 
+        // Endorsed htlc in congestion bucket still contributes to risk, 1 -> 2.
+        let htlc_4_ref = HtlcRef {
+            channel_id: channel_1,
+            htlc_index: 2,
+        };
+        let htlc_4 = get_test_htlc(channel_2, true, ResourceBucketType::Congestion, 1250);
+        let htlc_4_risk = tracker
+            .params
+            .htlc_risk(htlc_4.fee_msat, htlc_4.hold_blocks);
+
         assert!(tracker.add_htlc(htlc_1_ref, htlc_1).is_ok());
         assert!(tracker.add_htlc(htlc_2_ref, htlc_2).is_ok());
         assert!(tracker.add_htlc(htlc_3_ref, htlc_3).is_ok());
+        assert!(tracker.add_htlc(htlc_4_ref, htlc_4).is_ok());
 
         assert_eq!(
             tracker.channel_in_flight_risk(ChannelFilter::OutgoingChannel(channel_0)),
-            htlc_2_risk
+            htlc_2_risk,
         );
         assert_eq!(
             tracker.channel_in_flight_risk(ChannelFilter::OutgoingChannel(channel_1)),
@@ -359,7 +378,7 @@ mod tests {
         );
         assert_eq!(
             tracker.channel_in_flight_risk(ChannelFilter::OutgoingChannel(channel_2)),
-            0, // Unendorsed does not contribute to risk, so no htlc_3.
+            htlc_4_risk, // Unendorsed does not contribute to risk, so no htlc_3.
         );
 
         assert_eq!(
@@ -368,7 +387,7 @@ mod tests {
         );
         assert_eq!(
             tracker.channel_in_flight_risk(ChannelFilter::IncomingChannel(channel_1)),
-            htlc_2_risk, // Unendorsed does not contribute to risk, so no htlc_3.
+            htlc_2_risk + htlc_4_risk, // Unendorsed does not contribute to risk, so no htlc_3.
         );
         assert_eq!(
             tracker.channel_in_flight_risk(ChannelFilter::IncomingChannel(channel_2)),
@@ -393,11 +412,19 @@ mod tests {
             0
         );
         assert_eq!(
+            tracker.bucket_in_flight_count(channel_0, ResourceBucketType::Congestion),
+            0
+        );
+        assert_eq!(
             tracker.bucket_in_flight_count(channel_1, ResourceBucketType::Protected),
             0
         );
         assert_eq!(
             tracker.bucket_in_flight_count(channel_1, ResourceBucketType::General),
+            0
+        );
+        assert_eq!(
+            tracker.bucket_in_flight_count(channel_1, ResourceBucketType::Congestion),
             0
         );
 
@@ -417,6 +444,10 @@ mod tests {
             tracker.bucket_in_flight_msat(channel_1, ResourceBucketType::Protected),
             htlc_1.outgoing_amt_msat,
         );
+        assert_eq!(
+            tracker.bucket_in_flight_count(channel_1, ResourceBucketType::Congestion),
+            0
+        );
 
         assert_eq!(
             tracker.bucket_in_flight_count(channel_0, ResourceBucketType::Protected),
@@ -425,6 +456,10 @@ mod tests {
         assert_eq!(
             tracker.bucket_in_flight_msat(channel_0, ResourceBucketType::Protected),
             0,
+        );
+        assert_eq!(
+            tracker.bucket_in_flight_count(channel_0, ResourceBucketType::Congestion),
+            0
         );
 
         let htlc_2_ref = HtlcRef {
@@ -456,5 +491,34 @@ mod tests {
             tracker.bucket_in_flight_msat(channel_1, ResourceBucketType::Protected),
             htlc_2.outgoing_amt_msat,
         );
+    }
+
+    #[test]
+    fn test_congestion_eligible() {
+        let mut tracker = get_test_manager();
+        let channel_0 = 0;
+        let channel_1 = 1;
+
+        assert!(tracker.congestion_eligible(channel_0));
+        assert!(tracker.congestion_eligible(channel_1));
+
+        // Endorsed htlc 0 -> 1.
+        let htlc_1_ref = HtlcRef {
+            channel_id: channel_0,
+            htlc_index: 0,
+        };
+        let htlc_1 = get_test_htlc(channel_1, true, ResourceBucketType::Congestion, 1000);
+        assert!(tracker.add_htlc(htlc_1_ref, htlc_1.clone()).is_ok());
+
+        // Congestion not eligible for incoming channel.
+        assert!(!tracker.congestion_eligible(channel_0));
+        assert!(tracker.congestion_eligible(channel_1));
+
+        // Re-eligible once htlc has been removed.
+        assert!(tracker
+            .remove_htlc(htlc_1.outgoing_channel_id, htlc_1_ref)
+            .is_ok());
+        assert!(tracker.congestion_eligible(channel_0));
+        assert!(tracker.congestion_eligible(channel_1));
     }
 }

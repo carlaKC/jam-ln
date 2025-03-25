@@ -26,12 +26,17 @@ pub(super) struct OutgoingChannel {
 
     /// The resources available for htlcs that are not endorsed, or are not sent by a peer with sufficient reputation.
     pub(super) general_bucket: BucketParameters,
+
+    /// The resources available for htlcs that are endorsed from peers that do not have sufficient reputation. This
+    /// bucket is only used when the general bucket is full, and peers are limited to a single slot/liquidity block.
+    pub(super) congestion_bucket: BucketParameters,
 }
 
 impl OutgoingChannel {
     pub(super) fn new(
         params: ReputationParams,
         general_bucket: BucketParameters,
+        congestion_bucket: BucketParameters,
     ) -> Result<Self, ReputationError> {
         if params.reputation_multiplier <= 1 {
             return Err(ReputationError::ErrInvalidMultiplier);
@@ -43,6 +48,7 @@ impl OutgoingChannel {
                 params.revenue_window * params.reputation_multiplier.into(),
             ),
             general_bucket,
+            congestion_bucket,
         })
     }
 
@@ -112,6 +118,10 @@ mod tests {
             BucketParameters {
                 slot_count: 100,
                 liquidity_msat: 100_000,
+            },
+            BucketParameters {
+                slot_count: 30,
+                liquidity_msat: 50_000,
             },
         )
         .unwrap()
