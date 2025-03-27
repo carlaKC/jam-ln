@@ -74,12 +74,19 @@ pub fn test_allocation_check(forward_succeeds: bool) -> AllocationCheck {
             in_flight_total_risk: 0,
             htlc_risk: 0,
         },
+        congestion_eligible: true,
         resource_check: ResourceCheck {
             general_bucket: BucketResources {
                 slots_used: 0,
                 slots_available: 10,
                 liquidity_used_msat: 0,
                 liquidity_available_msat: 100_000,
+            },
+            congestion_bucket: BucketResources {
+                slots_used: 0,
+                slots_available: 5,
+                liquidity_used_msat: 0,
+                liquidity_available_msat: 50_000,
             },
         },
     };

@@ -145,8 +145,10 @@ async fn main() -> Result<(), BoxError> {
             resolution_period: Duration::from_secs(90),
             expected_block_speed: Some(Duration::from_secs(10 * 60)),
         },
-        general_slot_portion: 50,
-        general_liquidity_portion: 50,
+        general_slot_portion: 30,
+        general_liquidity_portion: 30,
+        congestion_slot_portion: 20,
+        congestion_liquidity_portion: 20,
     };
 
     // Create a writer to store results for nodes that we care about.
