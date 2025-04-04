@@ -91,14 +91,17 @@ async fn main() -> Result<(), BoxError> {
         })
         .collect();
 
-    let jammed_peers = target_channels
+    let jammed_peers: Vec<(u64, PublicKey)> = target_channels
         .iter()
-        .filter_map(|(scid, channel)| {
+        .flat_map(|(scid, channel)| {
             if channel.channel_type == TargetChannelType::Peer {
                 let scid = *scid;
-                Some((channel.peer_pubkey, scid.into()))
+                vec![
+                    (scid.into(), channel.peer_pubkey),
+                    (scid.into(), target_pubkey),
+                ]
             } else {
-                None
+                vec![]
             }
         })
         .collect();
@@ -188,7 +191,7 @@ async fn main() -> Result<(), BoxError> {
         ReputationInterceptor::new_with_bootstrap(
             forward_params,
             &sim_network,
-            jammed_peers,
+            &jammed_peers,
             &bootstrap,
             clock.clone(),
             Some(results_writer),
@@ -207,9 +210,18 @@ async fn main() -> Result<(), BoxError> {
 
     check_reputation_status(&cli, &forward_params, &start_reputation, true)?;
 
+    let (_, start_target_reputation_count) = get_reputation_count(
+        cli.reputation_margin_msat,
+        cli.reputation_margin_expiry_blocks,
+        &forward_params,
+        &start_reputation,
+    );
+
     let attack_interceptor = Arc::new(attack_interceptor);
 
-    // Spawn a task that will trigger shutdown of the simulation if the attacker loses reputation.
+    // Spawn a task that will trigger shutdown of the simulation if the attacker loses reputation provided that the
+    // target is at similar reputation to the start of the simulation. This is a somewhat crude check, because we're
+    // only looking at the count of peers with reputation not the actual pairs.
     let attack_interceptor_1 = attack_interceptor.clone();
     let attack_clock = clock.clone();
     let attack_listener = listener.clone();
@@ -225,19 +237,21 @@ async fn main() -> Result<(), BoxError> {
         select! {
             _ = attack_listener.clone() => return,
             _ = attack_clock.sleep(interval) => {
-                match attack_interceptor_1
-                    .get_target_pairs(
-                        target_pubkey,
-                        TargetChannelType::Attacker,
-                        InstantClock::now(&*attack_clock),
-                    )
+                match attack_interceptor_1.get_reputation_status(InstantClock::now(&*attack_clock))
                 .await {
                     Ok(rep) => {
-                        if !rep.iter().any(|pair| pair.outgoing_reputation(reputation_threshold)) {
+                        if !rep.attacker_reputation.iter().any(|pair| pair.outgoing_reputation(reputation_threshold)) {
                             log::error!("Attacker has no more reputation with the target");
-                            attack_shutdown.trigger();
-                            return;
-                        }
+
+							let target_reputation = rep.target_reputation.iter().filter(|pair| pair.outgoing_reputation(reputation_threshold)).count();
+							if target_reputation >= start_target_reputation_count {
+								log::error!("Attacker has no more reputation with target and the target's reputation is similar to simulation start");
+								attack_shutdown.trigger();
+								return;
+							}
+
+							log::info!("Attacker has no more reputation with target but target's reputation is worse than start count ({target_reputation} < {start_target_reputation_count}), continuing simulation to monitor recovery"); 
+						}
                     },
                     Err(e) => {
                         log::error!("Error checking attacker reputation: {e}");
@@ -324,6 +338,7 @@ async fn main() -> Result<(), BoxError> {
         &snapshot,
         &start_reputation,
         &end_reputation,
+        jammed_peers.len(),
     )?;
 
     Ok(())
@@ -470,6 +485,7 @@ fn check_reputation_status(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_simulation_summary(
     data_dir: PathBuf,
     reputation_margin_msat: u64,
@@ -478,6 +494,7 @@ fn write_simulation_summary(
     revenue: &RevenueSnapshot,
     start_reputation: &NetworkReputation,
     end_reputation: &NetworkReputation,
+    general_jammed: usize,
 ) -> Result<(), BoxError> {
     let file = OpenOptions::new()
         .append(true)
@@ -548,6 +565,10 @@ fn write_simulation_summary(
         "Target end reputation (pairs): {}/{}",
         end_count.1,
         end_reputation.target_reputation.len()
+    )?;
+    writeln!(
+        writer,
+        "Attacker general jammed {general_jammed} edges (directional)",
     )?;
     writer.flush()?;
 

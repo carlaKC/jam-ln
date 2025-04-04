@@ -188,7 +188,7 @@ where
     pub async fn new_with_bootstrap(
         params: ForwardManagerParams,
         edges: &[NetworkParser],
-        general_jammed: HashMap<PublicKey, u64>,
+        general_jammed: &[(u64, PublicKey)],
         bootstrap: &BoostrapRecords,
         clock: Arc<dyn InstantClock + Send + Sync>,
         results: Option<Arc<Mutex<R>>>,
@@ -199,7 +199,7 @@ where
         interceptor.bootstrap_network_history(bootstrap).await?;
 
         // After the network has been bootstrapped, we can go ahead and general jam required channels.
-        for (pubkey, channel) in general_jammed.iter() {
+        for (channel, pubkey) in general_jammed.iter() {
             interceptor
                 .network_nodes
                 .lock()
@@ -954,7 +954,7 @@ mod tests {
             ReputationInterceptor::new_with_bootstrap(
                 params,
                 &edges,
-                HashMap::from([(edges[1].node_1.pubkey, bob_to_carol)]),
+                &[(bob_to_carol, edges[1].node_1.pubkey)],
                 &BoostrapRecords {
                     forwards: boostrap,
                     last_timestamp_nanos: 1_000_000,
