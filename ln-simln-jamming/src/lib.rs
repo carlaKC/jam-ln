@@ -11,6 +11,7 @@ use self::reputation_interceptor::ReputationMonitor;
 
 pub mod analysis;
 pub mod attack_interceptor;
+pub mod attacks;
 pub mod clock;
 pub mod parsing;
 pub mod reputation_interceptor;
