@@ -5,7 +5,7 @@ use bitcoin::secp256k1::PublicKey;
 use clap::Parser;
 use csv::StringRecord;
 use humantime::Duration as HumanDuration;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashSet};
 use std::fs::File;
 use std::io::BufReader;
 use std::ops::Add;
@@ -273,7 +273,7 @@ pub fn peacetime_from_file(
 pub fn get_history_for_bootstrap(
     attacker_bootstrap: Duration,
     unfiltered_history: Vec<BootstrapForward>,
-    attacker_channel: u64,
+    attacker_channel: HashSet<u64>,
 ) -> Result<BoostrapRecords, BoxError> {
     let last_timestamp_nanos = unfiltered_history
         .iter()
@@ -298,7 +298,7 @@ pub fn get_history_for_bootstrap(
                     return true;
                 }
 
-                forward.channel_out_id != attacker_channel
+                !attacker_channel.contains(&forward.channel_out_id)
             })
             .collect(),
         last_timestamp_nanos,
@@ -307,6 +307,7 @@ pub fn get_history_for_bootstrap(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::ops::Add;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -316,7 +317,12 @@ mod tests {
     /// Tests the cases where filtering bootstrap data fails.
     #[test]
     fn test_get_history_for_bootstrap_errors() {
-        assert!(get_history_for_bootstrap(Duration::from_secs(1), vec![], 10).is_err());
+        assert!(get_history_for_bootstrap(
+            Duration::from_secs(1),
+            vec![],
+            HashSet::from_iter(vec![10])
+        )
+        .is_err());
 
         // Bootstrapped with a duration that's too high for the data provided.
         let settled_ts = Duration::from_secs(100);
@@ -330,7 +336,7 @@ mod tests {
         assert!(get_history_for_bootstrap(
             settled_ts.add(Duration::from_secs(10)),
             unfiltered_history,
-            123,
+            HashSet::from_iter(vec![123])
         )
         .is_err());
     }
@@ -380,7 +386,7 @@ mod tests {
         let filtered_history = get_history_for_bootstrap(
             Duration::from_nanos(9),
             unfiltered_history,
-            attacker_channel,
+            HashSet::from_iter(vec![attacker_channel]),
         )
         .unwrap();
         assert_eq!(filtered_history.forwards.len(), 4);

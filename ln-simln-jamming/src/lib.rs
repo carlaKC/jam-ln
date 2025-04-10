@@ -48,7 +48,7 @@ pub fn records_from_endorsement(endorsement: EndorsementSignal) -> CustomRecords
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct NetworkReputation {
     pub target_reputation: usize,
     pub target_pair_count: usize,
@@ -58,38 +58,48 @@ pub struct NetworkReputation {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn get_network_reputation<R: ReputationMonitor>(
-    target_pubkey: PublicKey,
     reputation_monitor: &R,
-    attacker_channel: u64,
-    honest_channels: &[(u64, PublicKey)],
+    target_pubkey: PublicKey,
+    attacker_pubkey: PublicKey,
+    target_channels: &HashMap<u64, PublicKey>,
     risk_margin: u64,
     access_ins: Instant,
 ) -> Result<NetworkReputation, BoxError> {
-    let target_channels = reputation_monitor
+    let target_channels_snapshot = reputation_monitor
         .list_channels(target_pubkey, access_ins)
         .await?;
+
     let mut network_reputation = NetworkReputation {
-        attacker_reputation: count_reputation_pairs(
-            &target_channels,
-            attacker_channel,
-            risk_margin,
-        )?,
-        // The attacker will be the outgoing channel for each one of the target's channels, except for itself.
-        attacker_pair_count: target_channels.len() - 1,
+        attacker_reputation: 0,
+        attacker_pair_count: 0,
         target_pair_count: 0,
         target_reputation: 0,
     };
 
-    for (scid, pubkey) in honest_channels {
-        let peer_channels = reputation_monitor
-            .list_channels(*pubkey, access_ins)
-            .await?;
+    for (scid, pubkey) in target_channels {
+        // If we've got a chanel with the attacker, we want to get a snapshot of what its reputation is with the
+        // target node. Otherwise, we'll get a snapshot of what the target node's reputation is with its peers.
+        let (channels, is_attacker) = if *pubkey == attacker_pubkey {
+            (&target_channels_snapshot, true)
+        } else {
+            (
+                &reputation_monitor
+                    .list_channels(*pubkey, access_ins)
+                    .await?,
+                false,
+            )
+        };
 
-        network_reputation.target_reputation +=
-            count_reputation_pairs(&peer_channels, *scid, risk_margin)?;
+        let repuation_pairs = count_reputation_pairs(channels, *scid, risk_margin)?;
+        let total_paris = channels.len() - 1;
 
-        // The target will be the outgoing channel for each one of the peer's channels, except for itself.
-        network_reputation.target_pair_count += peer_channels.len() - 1;
+        if is_attacker {
+            network_reputation.attacker_reputation += repuation_pairs;
+            network_reputation.attacker_pair_count += total_paris;
+        } else {
+            network_reputation.target_reputation += repuation_pairs;
+            network_reputation.target_pair_count += total_paris;
+        }
     }
 
     log::info!(

@@ -1,35 +1,39 @@
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use simln_lib::sim_node::InterceptRequest;
-use simln_lib::NetworkParser;
 
-use crate::{endorsement_from_records, records_from_endorsement, BoxError};
+use crate::reputation_interceptor::ReputationMonitor;
+use crate::{endorsement_from_records, records_from_endorsement, BoxError, NetworkReputation};
 
-mod sink;
+pub mod sink;
 
-// Defines an attack that can be mounted against the simulation framework.
-#[async_trait]
-pub trait JammingAttack {
-    /// Validates the graph that has been loaded into the simulation.
-    ///
-    /// Should be used to validate any topology assumptions that the attack makes, to ensure that the simulation is
-    /// running with a graph with the expected characteristics. The default implementation will return `Ok(())`.
-    fn validate_network(&self, _network: &[NetworkParser]) -> Result<(), BoxError> {
-        Ok(())
-    }
-
-    /// Returns the list of short channel ides that should be general jammed for the duration of the attack. The public
-    /// key provided indicates the channel party whose outgoing resources should be general jammed.
+pub struct NetworkSetup {
+    /// The public key and alias of nodes whose reputation scores should be written to disk during the simulation.
+    /// Should include any nodes that are of interest for analysis.
+    pub monitored_nodes: Vec<(PublicKey, String)>,
+    /// The identifier for channel edges that should be general jammed during the simulation.
     ///
     /// For example: a channel with ID 999 between A -- B will have general resources exhausted as follows:
     /// - (999, A): no general resources for A -> B
     /// - (999, B): no general resources for B -> A
     ///
-    /// This method is provided as a convenience for attacks that don't wish to implement general jamming the cost of
-    /// this general jamming will be accounted for at the end of the attack. The default implementation will not jam
-    /// any channels.
-    fn general_jammed_channels(&self) -> Result<Vec<(u64, PublicKey)>, BoxError> {
-        Ok(vec![])
+    /// This option is provided as a convenience for attacks that don't wish to implement general jamming the cost of
+    /// this general jamming will be accounted for at the end of the attack.
+    pub general_jammed_nodes: Vec<(u64, PublicKey)>,
+}
+
+// Defines an attack that can be mounted against the simulation framework.
+#[async_trait]
+pub trait JammingAttack<R: ReputationMonitor> {
+    /// Responsible for validating that the network provided meets any topological expectations for the attack, and
+    /// returning network-specific setup instructions for the attack.
+    ///
+    /// The default implementation has no network setup and passes validation.
+    fn setup_for_network(&self) -> Result<NetworkSetup, BoxError> {
+        Ok(NetworkSetup {
+            monitored_nodes: vec![],
+            general_jammed_nodes: vec![],
+        })
     }
 
     /// Called for evey HTLC that is forwarded through attacking nodes, to allow the attacker to take custom actions
@@ -51,7 +55,11 @@ pub trait JammingAttack {
     ///
     /// Should be used when there are shutdown conditions specific to the attack, the default implementation will
     /// return `Ok(false)`.
-    fn simulation_completed(&self) -> Result<bool, BoxError> {
+    async fn simulation_completed(
+        &self,
+        _reputation_monitor: &R,
+        _start_reputation: NetworkReputation,
+    ) -> Result<bool, BoxError> {
         Ok(false)
     }
 }

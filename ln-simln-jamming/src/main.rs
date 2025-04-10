@@ -1,9 +1,11 @@
 use bitcoin::secp256k1::PublicKey;
 use clap::Parser;
-use ln_resource_mgr::forward_manager::ForwardManagerParams;
+use ln_resource_mgr::forward_manager::{ForwardManager, ForwardManagerParams};
 use ln_resource_mgr::ReputationParams;
 use ln_simln_jamming::analysis::BatchForwardWriter;
-use ln_simln_jamming::attack_interceptor::{AttackInterceptor, TargetChannelType};
+use ln_simln_jamming::attack_interceptor::AttackInterceptor;
+use ln_simln_jamming::attacks::sink::SinkAttack;
+use ln_simln_jamming::attacks::JammingAttack;
 use ln_simln_jamming::clock::InstantClock;
 use ln_simln_jamming::parsing::{get_history_for_bootstrap, history_from_file, Cli};
 use ln_simln_jamming::reputation_interceptor::ReputationInterceptor;
@@ -15,9 +17,9 @@ use simln_lib::clock::Clock;
 use simln_lib::clock::SimulationClock;
 use simln_lib::interceptors::LatencyIntercepor;
 use simln_lib::sim_node::{Interceptor, SimulatedChannel};
-use simln_lib::{NetworkParser, ShortChannelID, Simulation, SimulationCfg};
+use simln_lib::{NetworkParser, Simulation, SimulationCfg};
 use simple_logger::SimpleLogger;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
@@ -58,69 +60,20 @@ async fn main() -> Result<(), BoxError> {
     let target_pubkey = find_pubkey_by_alias(&cli.target_alias, &sim_network)?;
     let attacker_pubkey = find_pubkey_by_alias(&cli.attacker_alias, &sim_network)?;
 
-    let target_channels =
-        get_target_channel_descriptions(&sim_network, attacker_pubkey, target_pubkey);
-
-    // We want to monitor results for all non-attacking nodes and the target node.
-    let mut monitor_nodes = target_channels
+    let target_channels: HashMap<u64, PublicKey> = sim_network
         .iter()
-        .filter_map(|(_, channel)| {
-            if channel.channel_type == TargetChannelType::Peer {
-                return Some((channel.peer_pubkey, channel.alias.clone()));
-            }
-
-            None
-        })
-        .collect::<Vec<(PublicKey, String)>>();
-    monitor_nodes.push((target_pubkey, cli.target_alias.to_string()));
-
-    // Create a map of all the target's channels, and a vec of its non-attacking peers.
-    let target_channel_map = target_channels
-        .values()
-        .map(|channel| (channel.scid, channel.channel_type.clone()))
-        .collect();
-
-    let honest_channels: Vec<(u64, PublicKey)> = target_channels
-        .iter()
-        .filter_map(|(scid, channel)| {
-            let scid_deref: ShortChannelID = *scid;
-            if channel.channel_type == TargetChannelType::Peer {
-                Some((scid_deref.into(), channel.peer_pubkey))
+        .filter_map(|channel| {
+            if channel.node_1.pubkey == target_pubkey {
+                Some((channel.scid.into(), channel.node_2.pubkey))
+            } else if channel.node_2.pubkey == target_pubkey {
+                Some((channel.scid.into(), channel.node_1.pubkey))
             } else {
                 None
             }
         })
         .collect();
 
-    let jammed_peers: Vec<(u64, PublicKey)> = target_channels
-        .iter()
-        .flat_map(|(scid, channel)| {
-            if channel.channel_type == TargetChannelType::Peer {
-                let scid = *scid;
-                vec![
-                    (scid.into(), channel.peer_pubkey),
-                    (scid.into(), target_pubkey),
-                ]
-            } else {
-                vec![]
-            }
-        })
-        .collect();
-
-    let target_to_attacker: Vec<u64> = target_channels
-        .iter()
-        .filter(|(_, channel)| channel.channel_type == TargetChannelType::Attacker)
-        .map(|(scid, _)| u64::from(*scid))
-        .collect();
-
-    if target_to_attacker.len() != 1 {
-        return Err(format!(
-            "expected one target -> attacker channel, got: {}",
-            target_to_attacker.len()
-        )
-        .into());
-    }
-    let target_attacker_scid = *target_to_attacker.first().unwrap();
+    let clock = Arc::new(SimulationClock::new(cli.clock_speedup)?);
 
     // Pull history that bootstraps the simulation in a network with the attacker's channels present, filter to only
     // have attacker forwards present when the and calculate revenue for the target node during this bootstrap period.
@@ -128,7 +81,13 @@ async fn main() -> Result<(), BoxError> {
     let bootstrap = get_history_for_bootstrap(
         cli.attacker_bootstrap,
         unfiltered_history,
-        target_attacker_scid,
+        HashSet::from_iter(target_channels.iter().filter_map(|(k, v)| {
+            if *v == target_pubkey {
+                Some(*k)
+            } else {
+                None
+            }
+        })),
     )?;
     let bootstrap_revenue = bootstrap.forwards.iter().fold(0, |acc, item| {
         if item.forwarding_node == target_pubkey {
@@ -142,7 +101,6 @@ async fn main() -> Result<(), BoxError> {
     let latency_interceptor: Arc<dyn Interceptor> =
         Arc::new(LatencyIntercepor::new_poisson(150.0)?);
 
-    let clock = Arc::new(SimulationClock::new(cli.clock_speedup)?);
     let now = InstantClock::now(&*clock);
     let forward_params = ForwardManagerParams {
         reputation_params: ReputationParams {
@@ -157,10 +115,33 @@ async fn main() -> Result<(), BoxError> {
         congestion_liquidity_portion: 20,
     };
 
+    // Reputation is assessed for a channel pair and a specific HTLC that's being proposed. To assess whether pairs
+    // have reputation, we'll use LND's default fee policy to get the HTLC risk for our configured htlc size and hold
+    // time.
+    let risk_margin = forward_params.htlc_opportunity_cost(
+        1000 + (0.0001 * cli.reputation_margin_msat as f64) as u64,
+        cli.reputation_margin_expiry_blocks,
+    );
+
+    // Next, setup the attack interceptor to use our custom attack.
+    let attack = SinkAttack::new(
+        clock.clone(),
+        &sim_network,
+        target_pubkey,
+        cli.target_alias.clone(),
+        attacker_pubkey,
+        risk_margin,
+        listener.clone(),
+        shutdown.clone(),
+    );
+    let attack_setup = <SinkAttack<SimulationClock> as JammingAttack<
+        ReputationInterceptor<BatchForwardWriter, ForwardManager>,
+    >>::setup_for_network(&attack)?;
+
     // Create a writer to store results for nodes that we care about.
     let results_writer = Arc::new(Mutex::new(BatchForwardWriter::new(
         cli.results_dir.clone(),
-        &monitor_nodes,
+        &attack_setup.monitored_nodes,
         cli.result_batch_size,
         now,
     )));
@@ -185,46 +166,40 @@ async fn main() -> Result<(), BoxError> {
         }
     });
 
-    let attack_interceptor = AttackInterceptor::new_for_network(
-        clock.clone(),
-        attacker_pubkey,
-        target_pubkey,
-        target_channel_map,
-        ReputationInterceptor::new_with_bootstrap(
-            forward_params,
-            &sim_network,
-            &jammed_peers,
-            &bootstrap,
-            clock.clone(),
-            Some(results_writer),
-            shutdown.clone(),
-        )
-        .await?,
-        listener.clone(),
-        shutdown.clone(),
-    );
-
-    // Reputation is assessed for a channel pair and a specific HTLC that's being proposed. To assess whether pairs
-    // have reputation, we'll use LND's default fee policy to get the HTLC risk for our configured htlc size and hold
-    // time.
-    let risk_margin = forward_params.htlc_opportunity_cost(
-        1000 + (0.0001 * cli.reputation_margin_msat as f64) as u64,
-        cli.reputation_margin_expiry_blocks,
-    );
-
     // Do some preliminary checks on our reputation state - there isn't much point in running if we haven't built up
     // some reputation.
+    let reputation_interceptor = ReputationInterceptor::new_with_bootstrap(
+        forward_params,
+        &sim_network,
+        &attack_setup.general_jammed_nodes,
+        &bootstrap,
+        clock.clone(),
+        Some(results_writer),
+        shutdown.clone(),
+    )
+    .await?;
+
     let start_reputation = get_network_reputation(
+        &reputation_interceptor,
         target_pubkey,
-        &attack_interceptor.reputation_interceptor,
-        target_attacker_scid,
-        &honest_channels,
+        attacker_pubkey,
+        &target_channels,
         risk_margin,
         now,
     )
     .await?;
 
     check_reputation_status(&cli, &start_reputation)?;
+
+    let attack_interceptor = AttackInterceptor::new_for_network(
+        clock.clone(),
+        attacker_pubkey,
+        target_pubkey,
+        HashSet::from_iter(target_channels.keys().cloned()),
+        reputation_interceptor,
+        attack.clone(),
+        shutdown.clone(),
+    );
 
     let attack_interceptor = Arc::new(attack_interceptor);
 
@@ -235,45 +210,24 @@ async fn main() -> Result<(), BoxError> {
     let attack_clock = clock.clone();
     let attack_listener = listener.clone();
     let attack_shutdown = shutdown.clone();
-    let honest_channels_1 = honest_channels.clone();
-
+    let start_reputation_1 = start_reputation.clone();
     tasks.spawn(async move {
-    let interval = Duration::from_secs(cli.attacker_poll_interval_seconds);
-    loop {
-        select! {
-            _ = attack_listener.clone() => return,
-            _ = attack_clock.sleep(interval) => {
-               let status = get_network_reputation(
-                    target_pubkey,
-                    &attack_interceptor_1.reputation_interceptor,
-                    target_attacker_scid,
-                    &honest_channels_1,
-					risk_margin,
-                    InstantClock::now(&*attack_clock),
-                ).await;
-                match status {
-                    Ok(rep) => {
-                        if rep.attacker_reputation == 0 {
-                            log::error!("Attacker has no more reputation with the target");
-
-                            if rep.target_reputation >= start_reputation.target_reputation {
-                                log::error!("Attacker has no more reputation with target and the target's reputation is similar to simulation start");
-                                attack_shutdown.trigger();
-                                return;
-                            }
-
-                            log::info!("Attacker has no more reputation with target but target's reputation is worse than start count ({} < {}), continuing simulation to monitor recovery", rep.target_reputation, start_reputation.target_reputation); 
-                        }
-                    },
-                    Err(e) => {
-                        log::error!("Error checking attacker reputation: {e}");
-                        attack_shutdown.trigger();
-                        return;
-                    },
+        let interval = Duration::from_secs(cli.attacker_poll_interval_seconds);
+        loop {
+            select! {
+                _ = attack_listener.clone() => return,
+                _ = attack_clock.sleep(interval) => {
+                    match attack.simulation_completed(&attack_interceptor_1.reputation_interceptor, start_reputation_1.clone()).await {
+                        Ok(shutdown) => if shutdown {attack_shutdown.trigger()},
+                        Err(e) => {
+                            log::error!("Shutdown check failed: {e}");
+                            attack_shutdown.trigger();
+                        },
+                    }
                 }
             }
         }
-    }});
+    });
 
     let revenue_interceptor = Arc::new(RevenueInterceptor::new_with_bootstrap(
         clock.clone(),
@@ -338,10 +292,10 @@ async fn main() -> Result<(), BoxError> {
 
     // Write start and end state to a summary file.
     let end_reputation = get_network_reputation(
-        target_pubkey,
         &attack_interceptor.reputation_interceptor,
-        target_attacker_scid,
-        &honest_channels,
+        target_pubkey,
+        attacker_pubkey,
+        &target_channels,
         risk_margin,
         InstantClock::now(&*clock),
     )
@@ -353,59 +307,10 @@ async fn main() -> Result<(), BoxError> {
         &snapshot,
         &start_reputation,
         &end_reputation,
-        jammed_peers.len(),
+        attack_setup.general_jammed_nodes.len(),
     )?;
 
     Ok(())
-}
-
-struct TargetChannel {
-    /// The public key of the target's counterparty.
-    peer_pubkey: PublicKey,
-    scid: ShortChannelID,
-    alias: String,
-    channel_type: TargetChannelType,
-}
-
-fn get_target_channel_descriptions(
-    edges: &[NetworkParser],
-    attacker_pubkey: PublicKey,
-    target_pubkey: PublicKey,
-) -> HashMap<ShortChannelID, TargetChannel> {
-    let mut target_channels = HashMap::new();
-
-    for channel in edges.iter() {
-        let node_1_target = channel.node_1.pubkey == target_pubkey;
-        let node_2_target = channel.node_2.pubkey == target_pubkey;
-
-        if !(node_1_target || node_2_target) {
-            continue;
-        }
-
-        let chan_policy = if node_1_target {
-            &channel.node_2
-        } else {
-            &channel.node_1
-        };
-
-        let channel_type = if chan_policy.pubkey == attacker_pubkey {
-            TargetChannelType::Attacker
-        } else {
-            TargetChannelType::Peer
-        };
-
-        target_channels.insert(
-            channel.scid,
-            TargetChannel {
-                peer_pubkey: chan_policy.pubkey,
-                scid: channel.scid,
-                alias: chan_policy.alias.clone(),
-                channel_type,
-            },
-        );
-    }
-
-    target_channels
 }
 
 fn find_pubkey_by_alias(alias: &str, sim_network: &[NetworkParser]) -> Result<PublicKey, BoxError> {
