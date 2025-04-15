@@ -61,7 +61,7 @@ pub struct BootstrapForward {
 
 /// Functionality to monitor reputation values in a network.
 #[async_trait]
-pub trait ReputationMonitor {
+pub trait ReputationMonitor: Send + Sync {
     /// Returns a snapshot of the state tracked for each of a node's channels at the instant provided.
     ///
     /// Note that this data tracks all reputation-related values for an individual channel. To create the pair that is
