@@ -1,4 +1,5 @@
 use crate::analysis::ForwardReporter;
+use crate::attacks::AttackMonitor;
 use crate::clock::InstantClock;
 use crate::{endorsement_from_records, records_from_endorsement, BoxError};
 use async_trait::async_trait;
@@ -80,7 +81,7 @@ pub trait ReputationMonitor: Send + Sync {
 
 struct Node<M>
 where
-    M: ReputationManager,
+    M: ReputationManager + Send + Sync,
 {
     forward_manager: M,
     alias: String,
@@ -88,7 +89,7 @@ where
 
 impl<M> Node<M>
 where
-    M: ReputationManager,
+    M: ReputationManager + Send + Sync,
 {
     fn new(forward_manager: M, alias: String) -> Self {
         Node {
@@ -103,7 +104,7 @@ where
 pub struct ReputationInterceptor<R, M>
 where
     R: ForwardReporter,
-    M: ReputationManager,
+    M: ReputationManager + Send + Sync,
 {
     inner: Mutex<InnerReputationInterceptor<R, M>>,
 }
@@ -145,6 +146,13 @@ where
             inner: Mutex::new(inner),
         })
     }
+}
+
+impl<R, M> AttackMonitor for ReputationInterceptor<R, M>
+where
+    R: ForwardReporter,
+    M: ReputationManager + Send + Sync,
+{
 }
 
 /// Implementation of ReputationMonitor that simply locks our inner state and calls underlying implementation.
@@ -202,7 +210,7 @@ where
 pub struct InnerReputationInterceptor<R, M>
 where
     R: ForwardReporter,
-    M: ReputationManager,
+    M: ReputationManager + Send + Sync,
 {
     network_nodes: HashMap<PublicKey, Node<M>>,
     clock: Arc<dyn InstantClock + Send + Sync>,
@@ -365,7 +373,7 @@ where
 impl<R, M> InnerReputationInterceptor<R, M>
 where
     R: ForwardReporter,
-    M: ReputationManager,
+    M: ReputationManager + Send + Sync,
 {
     /// Adds a htlc forward to the jamming interceptor, performing forwarding checks and returning the decided
     /// forwarding outcome for the htlc. Callers should fail if the outer result is an error, because an unexpected
