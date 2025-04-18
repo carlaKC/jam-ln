@@ -5,19 +5,20 @@ use ln_resource_mgr::ReputationParams;
 use ln_simln_jamming::analysis::BatchForwardWriter;
 use ln_simln_jamming::attack_interceptor::AttackInterceptor;
 use ln_simln_jamming::clock::InstantClock;
-use ln_simln_jamming::parsing::{get_history_for_bootstrap, history_from_file, Cli};
+use ln_simln_jamming::parsing::{
+    find_pubkey_by_alias, reputation_snapshot_from_file, Cli, SimNetwork,
+};
 use ln_simln_jamming::reputation_interceptor::ReputationInterceptor;
 use ln_simln_jamming::revenue_interceptor::{RevenueInterceptor, RevenueSnapshot};
 use ln_simln_jamming::{get_network_reputation, BoxError, NetworkReputation};
 use log::LevelFilter;
-use serde::{Deserialize, Serialize};
 use simln_lib::clock::Clock;
 use simln_lib::clock::SimulationClock;
 use simln_lib::interceptors::LatencyIntercepor;
 use simln_lib::sim_node::{Interceptor, SimulatedChannel};
-use simln_lib::{NetworkParser, Simulation, SimulationCfg};
+use simln_lib::{Simulation, SimulationCfg};
 use simple_logger::SimpleLogger;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
@@ -26,12 +27,6 @@ use std::time::Duration;
 use tokio::select;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
-
-#[derive(Serialize, Deserialize)]
-pub struct SimNetwork {
-    #[serde(default)]
-    pub sim_network: Vec<NetworkParser>,
-}
 
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
@@ -124,22 +119,6 @@ async fn main() -> Result<(), BoxError> {
         .into());
     }
 
-    // Pull history that bootstraps the simulation in a network with the attacker's channels present, filter to only
-    // have attacker forwards present when the and calculate revenue for the target node during this bootstrap period.
-    let unfiltered_history = history_from_file(&cli.bootstrap_file, Some(cli.reputation_window()))?;
-    let bootstrap = get_history_for_bootstrap(
-        cli.attacker_bootstrap,
-        unfiltered_history,
-        HashSet::from_iter(target_to_attacker.into_iter()),
-    )?;
-    let bootstrap_revenue = bootstrap.forwards.iter().fold(0, |acc, item| {
-        if item.forwarding_node == target_pubkey {
-            acc + item.incoming_amt - item.outgoing_amt
-        } else {
-            acc
-        }
-    });
-
     // Use the channel jamming interceptor and latency for simulated payments.
     let latency_interceptor: Arc<dyn Interceptor> =
         Arc::new(LatencyIntercepor::new_poisson(150.0)?);
@@ -187,18 +166,29 @@ async fn main() -> Result<(), BoxError> {
         }
     });
 
+    let reputation_snapshot = reputation_snapshot_from_file(&cli.reputation_file)?;
+    let target_channels_snapshot = reputation_snapshot
+        .get(&target_pubkey)
+        .ok_or::<BoxError>("target pubkey not found".to_string().into())?;
+
+    let bootstrap_revenue = target_channels_snapshot
+        .iter()
+        .map(|(_, snapshot)| snapshot.bidirectional_revenue)
+        .sum::<i64>() as u64;
+
     let reputation_interceptor = Arc::new(Mutex::new(
-        ReputationInterceptor::new_with_bootstrap(
+        ReputationInterceptor::new_from_snapshot(
             forward_params,
             &sim_network,
             &jammed_peers,
-            &bootstrap,
+            reputation_snapshot,
             clock.clone(),
             Some(results_writer),
             shutdown.clone(),
         )
         .await?,
     ));
+
     let attack_interceptor = AttackInterceptor::new_for_network(
         clock.clone(),
         attacker_pubkey,
@@ -286,15 +276,18 @@ async fn main() -> Result<(), BoxError> {
         }
     }});
 
-    let revenue_interceptor = Arc::new(RevenueInterceptor::new_with_bootstrap(
-        clock.clone(),
-        target_pubkey,
-        bootstrap_revenue,
-        cli.attacker_bootstrap,
-        cli.peacetime_file,
-        listener.clone(),
-        shutdown.clone(),
-    )?);
+    let revenue_interceptor = Arc::new(
+        RevenueInterceptor::new_with_bootstrap(
+            clock.clone(),
+            target_pubkey,
+            bootstrap_revenue,
+            cli.attacker_bootstrap,
+            cli.peacetime_file,
+            listener.clone(),
+            shutdown.clone(),
+        )
+        .await?,
+    );
 
     let revenue_interceptor_1 = revenue_interceptor.clone();
     let revenue_shutdown = shutdown.clone();
@@ -371,19 +364,6 @@ async fn main() -> Result<(), BoxError> {
     )?;
 
     Ok(())
-}
-
-fn find_pubkey_by_alias(alias: &str, sim_network: &[NetworkParser]) -> Result<PublicKey, BoxError> {
-    let target_channel = sim_network
-        .iter()
-        .find(|hist| hist.node_1.alias == alias || hist.node_2.alias == alias)
-        .ok_or(format!("alias: {alias} not found in sim file"))?;
-
-    Ok(if target_channel.node_1.alias == alias {
-        target_channel.node_1.pubkey
-    } else {
-        target_channel.node_2.pubkey
-    })
 }
 
 /// Checks whether the attacker and target meet the required portion of high reputation pairs to required.

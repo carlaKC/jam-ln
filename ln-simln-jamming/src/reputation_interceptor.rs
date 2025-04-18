@@ -1,5 +1,6 @@
 use crate::analysis::ForwardReporter;
 use crate::clock::InstantClock;
+use crate::parsing::find_alias_by_pubkey;
 use crate::{endorsement_from_records, records_from_endorsement, BoxError};
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
@@ -135,6 +136,7 @@ where
                             $channel.scid.into(),
                             $channel.capacity_msat,
                             clock.now(),
+                            None,
                         )?;
 
                         e.insert(Node::new(forward_manager, $node_alias));
@@ -144,6 +146,7 @@ where
                             $channel.scid.into(),
                             $channel.capacity_msat,
                             clock.now(),
+                            None,
                         )?;
                     }
                 }
@@ -171,6 +174,88 @@ where
             results,
             shutdown,
         })
+    }
+
+    pub async fn new_from_snapshot(
+        params: ForwardManagerParams,
+        edges: &[NetworkParser],
+        general_jammed: &[(u64, PublicKey)],
+        reputation_snapshot: HashMap<PublicKey, HashMap<u64, ChannelSnapshot>>,
+        clock: Arc<dyn InstantClock + Send + Sync>,
+        results: Option<Arc<Mutex<R>>>,
+        shutdown: Trigger,
+    ) -> Result<Self, BoxError> {
+        let mut network_nodes = HashMap::with_capacity(reputation_snapshot.len());
+
+        for (node_pubkey, channels) in reputation_snapshot.iter() {
+            for (scid, channel_snapshot) in channels.iter() {
+                match network_nodes.entry(*node_pubkey) {
+                    Entry::Vacant(e) => {
+                        let forward_manager = ForwardManager::new(params);
+                        forward_manager.add_channel(
+                            *scid,
+                            channel_snapshot.capacity_msat,
+                            clock.now(),
+                            Some(channel_snapshot.clone()),
+                        )?;
+                        let alias = find_alias_by_pubkey(node_pubkey, edges)?;
+                        e.insert(Node::new(forward_manager, alias));
+                    }
+                    Entry::Occupied(mut e) => {
+                        e.get_mut().forward_manager.add_channel(
+                            *scid,
+                            channel_snapshot.capacity_msat,
+                            clock.now(),
+                            Some(channel_snapshot.clone()),
+                        )?;
+                    }
+                }
+            }
+        }
+
+        for channel in edges {
+            if let Entry::Vacant(e) = network_nodes.entry(channel.node_1.pubkey) {
+                let forward_manager = ForwardManager::new(params);
+                forward_manager.add_channel(
+                    channel.scid.into(),
+                    channel.capacity_msat,
+                    clock.now(),
+                    None,
+                )?;
+                e.insert(Node::new(forward_manager, channel.node_1.alias.clone()));
+            }
+
+            if let Entry::Vacant(e) = network_nodes.entry(channel.node_2.pubkey) {
+                let forward_manager = ForwardManager::new(params);
+                forward_manager.add_channel(
+                    channel.scid.into(),
+                    channel.capacity_msat,
+                    clock.now(),
+                    None,
+                )?;
+                e.insert(Node::new(forward_manager, channel.node_2.alias.clone()));
+            }
+        }
+
+        let interceptor = Self {
+            network_nodes: Arc::new(Mutex::new(network_nodes)),
+            clock,
+            results,
+            shutdown,
+        };
+
+        for (channel, pubkey) in general_jammed.iter() {
+            interceptor
+                .network_nodes
+                .lock()
+                .await
+                .get_mut(pubkey)
+                .ok_or(format!("jammed node: {} not found", pubkey))?
+                .forward_manager
+                .general_jam_channel(*channel)?;
+        }
+
+        Ok(interceptor)
     }
 
     /// Creates a network from the set of edges provided and bootstraps the reputation of nodes in the network using
@@ -203,7 +288,7 @@ where
         Ok(interceptor)
     }
 
-    async fn bootstrap_network_history(
+    pub async fn bootstrap_network_history(
         &mut self,
         bootstrap: &BoostrapRecords,
     ) -> Result<(), BoxError> {
@@ -562,6 +647,7 @@ mod tests {
                 channel_id: u64,
                 capacity_msat: u64,
                 add_ins: Instant,
+                channel_reputation: Option<ChannelSnapshot>,
             ) -> Result<(), ln_resource_mgr::ReputationError>;
 
             fn remove_channel(&self, channel_id: u64) -> Result<(), ReputationError>;

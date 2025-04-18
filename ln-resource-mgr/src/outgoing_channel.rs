@@ -37,16 +37,27 @@ impl OutgoingChannel {
         params: ReputationParams,
         general_bucket: BucketParameters,
         congestion_bucket: BucketParameters,
+        outgoing_reputation: Option<i64>,
     ) -> Result<Self, ReputationError> {
         if params.reputation_multiplier <= 1 {
             return Err(ReputationError::ErrInvalidMultiplier);
         }
+        let outgoing_reputation = match outgoing_reputation {
+            Some(value) => {
+                let mut reputation = DecayingAverage::new(
+                    params.revenue_window * params.reputation_multiplier.into(),
+                );
+                reputation.add_value(value, Instant::now())?;
+                reputation
+            }
+            None => {
+                DecayingAverage::new(params.revenue_window * params.reputation_multiplier.into())
+            }
+        };
 
         Ok(Self {
             params,
-            outgoing_reputation: DecayingAverage::new(
-                params.revenue_window * params.reputation_multiplier.into(),
-            ),
+            outgoing_reputation,
             general_bucket,
             congestion_bucket,
         })
@@ -123,6 +134,7 @@ mod tests {
                 slot_count: 30,
                 liquidity_msat: 50_000,
             },
+            None,
         )
         .unwrap()
     }

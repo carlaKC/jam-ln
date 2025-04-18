@@ -81,13 +81,12 @@ pub struct RevenueSnapshot {
 }
 
 impl PeacetimeRevenue {
-    fn new_with_bootstrap(
+    async fn new_with_bootstrap(
         target_pubkey: PublicKey,
         revenue_file: PathBuf,
         bootstrap_duration: Duration,
     ) -> Result<Self, BoxError> {
-        // TODO: paginate reads from file.
-        let mut peacetime_activity = peacetime_from_file(&revenue_file, target_pubkey)?;
+        let mut peacetime_activity = peacetime_from_file(&revenue_file, target_pubkey).await?;
 
         // Grab the first event to get our starting timestamp, push the event back on so that we can process it.
         let first_event = peacetime_activity
@@ -118,7 +117,7 @@ impl PeacetimeRevenue {
 }
 
 impl<C: InstantClock + Clock> RevenueInterceptor<C> {
-    pub fn new_with_bootstrap(
+    pub async fn new_with_bootstrap(
         clock: Arc<C>,
         target_pubkey: PublicKey,
         bootstrap_revenue: u64,
@@ -134,11 +133,14 @@ impl<C: InstantClock + Clock> RevenueInterceptor<C> {
                 revenue_total: bootstrap_revenue,
                 pending_htlcs: HashMap::new(),
             }),
-            peacetime_revenue: Mutex::new(PeacetimeRevenue::new_with_bootstrap(
-                target_pubkey,
-                revenue_file,
-                bootstrap_duration,
-            )?),
+            peacetime_revenue: Mutex::new(
+                PeacetimeRevenue::new_with_bootstrap(
+                    target_pubkey,
+                    revenue_file,
+                    bootstrap_duration,
+                )
+                .await?,
+            ),
             start_ins: InstantClock::now(&*clock),
             listener,
             shutdown,
