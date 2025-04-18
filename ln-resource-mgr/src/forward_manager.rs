@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 /// Tracks reputation and revenue for a channel.
 #[derive(Debug)]
 struct TrackedChannel {
+    capacity_msat: u64,
     outgoing_direction: OutgoingChannel,
     incoming_direction: IncomingChannel,
     /// Tracks the revenue that this channel has been responsible for, considering htlcs where the channel has been the
@@ -277,6 +278,7 @@ impl ReputationManager for ForwardManager {
                     capacity_msat * self.params.congestion_liquidity_portion as u64 / 100;
 
                 v.insert(TrackedChannel {
+                    capacity_msat,
                     incoming_direction: IncomingChannel::new(self.params.reputation_params),
                     outgoing_direction: OutgoingChannel::new(
                         self.params.reputation_params,
@@ -427,6 +429,7 @@ impl ReputationManager for ForwardManager {
             reputations.insert(
                 *scid,
                 ChannelSnapshot {
+                    capacity_msat: channel.capacity_msat,
                     outgoing_reputation: channel
                         .outgoing_direction
                         .outgoing_reputation(access_ins)?,

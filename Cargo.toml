@@ -4,4 +4,5 @@ resolver = "2"
 members = [
     "ln-resource-mgr",
     "ln-simln-jamming",
+    "reputation-builder",
 ]

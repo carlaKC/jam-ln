@@ -203,7 +203,7 @@ where
         Ok(interceptor)
     }
 
-    async fn bootstrap_network_history(
+    pub async fn bootstrap_network_history(
         &mut self,
         bootstrap: &BoostrapRecords,
     ) -> Result<(), BoxError> {
