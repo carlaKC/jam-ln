@@ -147,7 +147,7 @@ mod tests {
     use crate::{BoxError, NetworkReputation};
     use async_trait::async_trait;
     use bitcoin::secp256k1::PublicKey;
-    use ln_resource_mgr::{AllocationCheck, ChannelSnapshot, ReputationError};
+    use ln_resource_mgr::{ChannelSnapshot, ForwardingOutcome, ReputationError};
     use mockall::mock;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -160,7 +160,7 @@ mod tests {
         #[async_trait]
         impl ReputationMonitor for Monitor{
             async fn list_channels(&self, node: PublicKey, access_ins: Instant) -> Result<HashMap<u64, ChannelSnapshot>, BoxError>;
-            async fn check_htlc_outcome(&self,htlc_add: HtlcAdd) -> Result<AllocationCheck, ReputationError>;
+            async fn check_htlc_outcome(&self,htlc_add: HtlcAdd) -> Result<ForwardingOutcome, ReputationError>;
         }
     }
 
@@ -172,6 +172,10 @@ mod tests {
             (
                 0,
                 ChannelSnapshot {
+                    // NOTE: I did not change count_reputation_pairs method to use incoming
+                    // reputation so putting dummy values here. Not sure if I should change
+                    // something in that method or will that be addressed later?
+                    incoming_reputation: 100_000,
                     outgoing_reputation: 100_000,
                     bidirectional_revenue: 20_000,
                 },
@@ -179,6 +183,7 @@ mod tests {
             (
                 1,
                 ChannelSnapshot {
+                    incoming_reputation: 100_000,
                     outgoing_reputation: 45_000,
                     bidirectional_revenue: 50_000,
                 },
@@ -186,6 +191,7 @@ mod tests {
             (
                 2,
                 ChannelSnapshot {
+                    incoming_reputation: 100_000,
                     outgoing_reputation: 15_000,
                     bidirectional_revenue: 80_000,
                 },
@@ -235,6 +241,7 @@ mod tests {
                         (
                             0,
                             ChannelSnapshot {
+                                incoming_reputation: 100,
                                 outgoing_reputation: 100,
                                 bidirectional_revenue: 15,
                             },
@@ -242,6 +249,7 @@ mod tests {
                         (
                             1,
                             ChannelSnapshot {
+                                incoming_reputation: 100,
                                 outgoing_reputation: 150,
                                 bidirectional_revenue: 110,
                             },
@@ -249,6 +257,7 @@ mod tests {
                         (
                             2,
                             ChannelSnapshot {
+                                incoming_reputation: 100,
                                 outgoing_reputation: 200,
                                 bidirectional_revenue: 90,
                             },
@@ -256,6 +265,7 @@ mod tests {
                         (
                             3,
                             ChannelSnapshot {
+                                incoming_reputation: 100,
                                 outgoing_reputation: 75,
                                 bidirectional_revenue: 100,
                             },
@@ -266,6 +276,7 @@ mod tests {
                         (
                             1,
                             ChannelSnapshot {
+                                incoming_reputation: 100,
                                 outgoing_reputation: 500,
                                 bidirectional_revenue: 15,
                             },
@@ -273,6 +284,7 @@ mod tests {
                         (
                             4,
                             ChannelSnapshot {
+                                incoming_reputation: 100,
                                 outgoing_reputation: 150,
                                 bidirectional_revenue: 600,
                             },
@@ -280,6 +292,7 @@ mod tests {
                         (
                             5,
                             ChannelSnapshot {
+                                incoming_reputation: 100,
                                 outgoing_reputation: 200,
                                 bidirectional_revenue: 250,
                             },
@@ -290,6 +303,7 @@ mod tests {
                         (
                             2,
                             ChannelSnapshot {
+                                incoming_reputation: 100,
                                 outgoing_reputation: 1000,
                                 bidirectional_revenue: 50,
                             },
@@ -297,6 +311,7 @@ mod tests {
                         (
                             6,
                             ChannelSnapshot {
+                                incoming_reputation: 100,
                                 outgoing_reputation: 350,
                                 bidirectional_revenue: 800,
                             },
@@ -306,6 +321,7 @@ mod tests {
                     vec![(
                         3,
                         ChannelSnapshot {
+                            incoming_reputation: 100,
                             outgoing_reputation: 1000,
                             bidirectional_revenue: 50,
                         },

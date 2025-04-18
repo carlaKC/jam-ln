@@ -3,9 +3,10 @@ use std::time::Instant;
 
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use lightning::ln::PaymentHash;
+use ln_resource_mgr::forward_manager::Reputation;
 use ln_resource_mgr::{
     AllocationCheck, BucketResources, EndorsementSignal, ForwardingOutcome, ProposedForward,
-    ReputationCheck, ResourceCheck,
+    ReputationCheck, ReputationValues, ResourceCheck,
 };
 use rand::{distributions::Uniform, Rng};
 use simln_lib::sim_node::{CustomRecords, ForwardingError, InterceptRequest};
@@ -67,12 +68,17 @@ pub fn setup_test_request(
 
 #[allow(dead_code)]
 pub fn test_allocation_check(forward_succeeds: bool) -> AllocationCheck {
+    let reputation_values = ReputationValues {
+        reputation: 100_000,
+        revenue_threshold: if forward_succeeds { 0 } else { 200_000 },
+        in_flight_total_risk: 0,
+        htlc_risk: 0,
+    };
+
     let check = AllocationCheck {
         reputation_check: ReputationCheck {
-            outgoing_reputation: 100_000,
-            revenue_threshold: if forward_succeeds { 0 } else { 200_000 },
-            in_flight_total_risk: 0,
-            htlc_risk: 0,
+            incoming_reputation: reputation_values.clone(),
+            outgoing_reputation: reputation_values,
         },
         congestion_eligible: true,
         resource_check: ResourceCheck {
@@ -82,6 +88,7 @@ pub fn test_allocation_check(forward_succeeds: bool) -> AllocationCheck {
                 liquidity_used_msat: 0,
                 liquidity_available_msat: 100_000,
             },
+
             congestion_bucket: BucketResources {
                 slots_used: 0,
                 slots_available: 5,
@@ -93,7 +100,7 @@ pub fn test_allocation_check(forward_succeeds: bool) -> AllocationCheck {
 
     assert!(
         matches!(
-            check.forwarding_outcome(0, EndorsementSignal::Endorsed),
+            check.forwarding_outcome(0, EndorsementSignal::Endorsed, Reputation::Outgoing),
             ForwardingOutcome::Forward(_)
         ) == forward_succeeds
     );

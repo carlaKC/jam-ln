@@ -180,7 +180,7 @@ impl<C: InstantClock + Clock, R: Interceptor + ReputationMonitor> AttackIntercep
                     .await
             }
             EndorsementSignal::Unendorsed => {
-                let allocation_check = match self
+                let fwd_outcome = match self
                     .reputation_interceptor
                     .lock()
                     .await
@@ -213,9 +213,7 @@ impl<C: InstantClock + Clock, R: Interceptor + ReputationMonitor> AttackIntercep
                 };
 
                 // Query forwarding outcome as if the htlc was endorsed to see whether we'd make the cut.
-                match allocation_check
-                    .forwarding_outcome(req.outgoing_amount_msat, EndorsementSignal::Endorsed)
-                {
+                match fwd_outcome {
                     ForwardingOutcome::Forward(_) => {
                         log::info!("HTLC from peer -> target has sufficient reputation, forwarding endorsed");
 
@@ -331,17 +329,18 @@ impl<C: InstantClock + Clock, R: Interceptor + ReputationMonitor> Interceptor
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
-    use std::convert::From;
     use std::error::Error;
     use std::sync::Arc;
     use std::time::Instant;
 
     use crate::reputation_interceptor::{HtlcAdd, ReputationMonitor};
-    use crate::test_utils::{get_random_keypair, setup_test_request, test_allocation_check};
+    use crate::test_utils::{get_random_keypair, setup_test_request};
     use crate::{endorsement_from_records, records_from_endorsement, BoxError};
     use async_trait::async_trait;
     use bitcoin::secp256k1::PublicKey;
-    use ln_resource_mgr::{AllocationCheck, ChannelSnapshot, EndorsementSignal, ReputationError};
+    use ln_resource_mgr::{
+        ChannelSnapshot, EndorsementSignal, FailureReason, ForwardingOutcome, ReputationError,
+    };
     use mockall::mock;
     use mockall::predicate::function;
     use simln_lib::clock::SimulationClock;
@@ -363,10 +362,9 @@ mod tests {
         #[async_trait]
         impl ReputationMonitor for ReputationInterceptor{
             async fn list_channels(&self, node: PublicKey, access_ins: Instant) -> Result<HashMap<u64, ChannelSnapshot>, BoxError>;
-            async fn check_htlc_outcome(&self,htlc_add: HtlcAdd) -> Result<AllocationCheck, ReputationError>;
+            async fn check_htlc_outcome(&self,htlc_add: HtlcAdd) -> Result<ForwardingOutcome, ReputationError>;
         }
     }
-
     fn setup_interceptor_test() -> AttackInterceptor<SimulationClock, MockReputationInterceptor> {
         let target_pubkey = get_random_keypair().1;
         let attacker_pubkey = get_random_keypair().1;
@@ -502,7 +500,7 @@ mod tests {
                         == peer_to_target.outgoing_channel_id.unwrap().into()
                     && req.htlc.incoming_endorsed == EndorsementSignal::Endorsed
             }))
-            .return_once(|_| Ok(test_allocation_check(true)));
+            .return_once(|_| Ok(ForwardingOutcome::Forward(EndorsementSignal::Endorsed)));
         mock_intercept_htlc(interceptor.reputation_interceptor.clone(), &peer_to_target).await;
 
         interceptor.intercept_htlc(peer_to_target).await;
@@ -530,7 +528,7 @@ mod tests {
                         == peer_to_target.outgoing_channel_id.unwrap().into()
                     && req.htlc.incoming_endorsed == EndorsementSignal::Endorsed
             }))
-            .return_once(|_| Ok(test_allocation_check(false)));
+            .return_once(|_| Ok(ForwardingOutcome::Fail(FailureReason::NoReputation)));
 
         mock_intercept_htlc(interceptor.reputation_interceptor.clone(), &peer_to_target).await;
         interceptor.intercept_htlc(peer_to_target).await;

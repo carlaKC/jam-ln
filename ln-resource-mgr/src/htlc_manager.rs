@@ -9,6 +9,7 @@ pub(super) struct InFlightHtlc {
     pub(super) outgoing_channel_id: u64,
     pub(super) fee_msat: u64,
     pub(super) hold_blocks: u32,
+    pub(super) incoming_amt_msat: u64,
     pub(super) outgoing_amt_msat: u64,
     pub(super) added_instant: Instant,
     pub(super) incoming_endorsed: EndorsementSignal,
@@ -145,26 +146,53 @@ impl InFlightManager {
     /// Returns the total balance of htlcs in flight in the bucket provided.
     pub(super) fn bucket_in_flight_msat(
         &self,
-        outgoing_channel_id: u64,
+        filter: ChannelFilter,
         bucket: ResourceBucketType,
     ) -> u64 {
         self.in_flight
             .iter()
-            .filter(|(_, v)| v.bucket == bucket && v.outgoing_channel_id == outgoing_channel_id)
-            .map(|(_, v)| v.outgoing_amt_msat)
+            .filter_map(|(htlc_ref, in_flight)| match filter {
+                ChannelFilter::IncomingChannel(scid) => {
+                    if htlc_ref.channel_id == scid && in_flight.bucket == bucket {
+                        Some(in_flight.incoming_amt_msat)
+                    } else {
+                        None
+                    }
+                }
+                ChannelFilter::OutgoingChannel(scid) => {
+                    if in_flight.bucket == bucket && in_flight.outgoing_channel_id == scid {
+                        Some(in_flight.outgoing_amt_msat)
+                    } else {
+                        None
+                    }
+                }
+            })
             .sum()
     }
 
     /// Returns the total number of htlcs in flight in the bucket provided.
     pub(super) fn bucket_in_flight_count(
         &self,
-        outgoing_channel_id: u64,
+        filter: ChannelFilter,
         bucket: ResourceBucketType,
     ) -> u16 {
-        self.in_flight
-            .iter()
-            .filter(|(_, v)| v.bucket == bucket && v.outgoing_channel_id == outgoing_channel_id)
-            .count() as u16 // Safe because we have in protocol limit 483.
+        match filter {
+            ChannelFilter::IncomingChannel(scid) => self
+                .in_flight
+                .iter()
+                .filter(|(htlc_ref, in_flight)| {
+                    htlc_ref.channel_id == scid && in_flight.bucket == bucket
+                })
+                .count() as u16,
+            ChannelFilter::OutgoingChannel(scid) => {
+                self.in_flight
+                    .iter()
+                    .filter(|(_, in_flight)| {
+                        in_flight.bucket == bucket && in_flight.outgoing_channel_id == scid
+                    })
+                    .count() as u16 // Safe because we have in protocol limit 483.
+            }
+        }
     }
 
     /// Returns false if the incoming channel currently has any in-flight htlcs that are utilizing
@@ -210,6 +238,7 @@ mod tests {
         InFlightHtlc {
             outgoing_channel_id: outgoing_channel,
             hold_blocks: 1000,
+            incoming_amt_msat: 2000 + fee_msat,
             outgoing_amt_msat: 2000,
             fee_msat,
             added_instant: Instant::now(),
@@ -239,19 +268,31 @@ mod tests {
 
         // Check that HTLC counts for buckets are correct.
         assert_eq!(
-            tracker.bucket_in_flight_count(channel_1, ResourceBucketType::Protected),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::OutgoingChannel(channel_1),
+                ResourceBucketType::Protected
+            ),
             1
         );
         assert_eq!(
-            tracker.bucket_in_flight_count(channel_1, ResourceBucketType::General),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::OutgoingChannel(channel_1),
+                ResourceBucketType::General
+            ),
             0
         );
         assert_eq!(
-            tracker.bucket_in_flight_count(channel_0, ResourceBucketType::Protected),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::OutgoingChannel(channel_0),
+                ResourceBucketType::Protected
+            ),
             0
         );
         assert_eq!(
-            tracker.bucket_in_flight_count(channel_0, ResourceBucketType::General),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::OutgoingChannel(channel_0),
+                ResourceBucketType::General
+            ),
             0
         );
 
@@ -279,19 +320,31 @@ mod tests {
 
         assert!(tracker.add_htlc(htlc_2_ref, htlc_2).is_ok());
         assert_eq!(
-            tracker.bucket_in_flight_count(channel_1, ResourceBucketType::Protected),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::OutgoingChannel(channel_1),
+                ResourceBucketType::Protected
+            ),
             1
         );
         assert_eq!(
-            tracker.bucket_in_flight_count(channel_1, ResourceBucketType::General),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::OutgoingChannel(channel_1),
+                ResourceBucketType::General
+            ),
             0
         );
         assert_eq!(
-            tracker.bucket_in_flight_count(channel_0, ResourceBucketType::Protected),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::OutgoingChannel(channel_0),
+                ResourceBucketType::Protected
+            ),
             0
         );
         assert_eq!(
-            tracker.bucket_in_flight_count(channel_0, ResourceBucketType::General),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::OutgoingChannel(channel_0),
+                ResourceBucketType::General
+            ),
             1
         );
 
@@ -300,11 +353,17 @@ mod tests {
             .remove_htlc(htlc_1.outgoing_channel_id, htlc_1_ref)
             .is_ok());
         assert_eq!(
-            tracker.bucket_in_flight_count(channel_1, ResourceBucketType::Protected),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::OutgoingChannel(channel_1),
+                ResourceBucketType::Protected
+            ),
             0
         );
         assert_eq!(
-            tracker.bucket_in_flight_count(channel_1, ResourceBucketType::General),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::OutgoingChannel(channel_1),
+                ResourceBucketType::General
+            ),
             0
         );
     }
@@ -404,27 +463,45 @@ mod tests {
 
         // Buckets always empty to start.
         assert_eq!(
-            tracker.bucket_in_flight_count(channel_0, ResourceBucketType::Protected),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::IncomingChannel(channel_0),
+                ResourceBucketType::Protected
+            ),
             0
         );
         assert_eq!(
-            tracker.bucket_in_flight_count(channel_0, ResourceBucketType::General),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::IncomingChannel(channel_0),
+                ResourceBucketType::General
+            ),
             0
         );
         assert_eq!(
-            tracker.bucket_in_flight_count(channel_0, ResourceBucketType::Congestion),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::IncomingChannel(channel_0),
+                ResourceBucketType::Congestion
+            ),
             0
         );
         assert_eq!(
-            tracker.bucket_in_flight_count(channel_1, ResourceBucketType::Protected),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::OutgoingChannel(channel_1),
+                ResourceBucketType::Protected
+            ),
             0
         );
         assert_eq!(
-            tracker.bucket_in_flight_count(channel_1, ResourceBucketType::General),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::OutgoingChannel(channel_1),
+                ResourceBucketType::General
+            ),
             0
         );
         assert_eq!(
-            tracker.bucket_in_flight_count(channel_1, ResourceBucketType::Congestion),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::OutgoingChannel(channel_1),
+                ResourceBucketType::Congestion
+            ),
             0
         );
 
@@ -437,28 +514,68 @@ mod tests {
         assert!(tracker.add_htlc(htlc_1_ref, htlc_1.clone()).is_ok());
 
         assert_eq!(
-            tracker.bucket_in_flight_count(channel_1, ResourceBucketType::Protected),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::IncomingChannel(channel_0),
+                ResourceBucketType::Protected
+            ),
             1
         );
         assert_eq!(
-            tracker.bucket_in_flight_msat(channel_1, ResourceBucketType::Protected),
-            htlc_1.outgoing_amt_msat,
+            tracker.bucket_in_flight_msat(
+                ChannelFilter::IncomingChannel(channel_0),
+                ResourceBucketType::Protected
+            ),
+            htlc_1.incoming_amt_msat,
         );
         assert_eq!(
-            tracker.bucket_in_flight_count(channel_1, ResourceBucketType::Congestion),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::OutgoingChannel(channel_1),
+                ResourceBucketType::Protected
+            ),
+            1
+        );
+        assert_eq!(
+            tracker.bucket_in_flight_msat(
+                ChannelFilter::OutgoingChannel(channel_1),
+                ResourceBucketType::Protected
+            ),
+            htlc_1.outgoing_amt_msat,
+        );
+
+        assert_eq!(
+            tracker.bucket_in_flight_count(
+                ChannelFilter::IncomingChannel(channel_0),
+                ResourceBucketType::Congestion
+            ),
+            0
+        );
+        assert_eq!(
+            tracker.bucket_in_flight_count(
+                ChannelFilter::OutgoingChannel(channel_1),
+                ResourceBucketType::Congestion
+            ),
             0
         );
 
         assert_eq!(
-            tracker.bucket_in_flight_count(channel_0, ResourceBucketType::Protected),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::OutgoingChannel(channel_0),
+                ResourceBucketType::Protected
+            ),
             0
         );
         assert_eq!(
-            tracker.bucket_in_flight_msat(channel_0, ResourceBucketType::Protected),
+            tracker.bucket_in_flight_msat(
+                ChannelFilter::OutgoingChannel(channel_0),
+                ResourceBucketType::Protected
+            ),
             0,
         );
         assert_eq!(
-            tracker.bucket_in_flight_count(channel_0, ResourceBucketType::Congestion),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::OutgoingChannel(channel_0),
+                ResourceBucketType::Congestion
+            ),
             0
         );
 
@@ -470,12 +587,34 @@ mod tests {
         htlc_2.incoming_endorsed = EndorsementSignal::Unendorsed;
 
         assert!(tracker.add_htlc(htlc_2_ref, htlc_2.clone()).is_ok());
+
         assert_eq!(
-            tracker.bucket_in_flight_count(channel_1, ResourceBucketType::Protected),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::IncomingChannel(channel_0),
+                ResourceBucketType::Protected
+            ),
             2
         );
         assert_eq!(
-            tracker.bucket_in_flight_msat(channel_1, ResourceBucketType::Protected),
+            tracker.bucket_in_flight_msat(
+                ChannelFilter::IncomingChannel(channel_0),
+                ResourceBucketType::Protected
+            ),
+            htlc_1.incoming_amt_msat + htlc_2.incoming_amt_msat,
+        );
+
+        assert_eq!(
+            tracker.bucket_in_flight_count(
+                ChannelFilter::OutgoingChannel(channel_1),
+                ResourceBucketType::Protected
+            ),
+            2
+        );
+        assert_eq!(
+            tracker.bucket_in_flight_msat(
+                ChannelFilter::OutgoingChannel(channel_1),
+                ResourceBucketType::Protected
+            ),
             htlc_1.outgoing_amt_msat + htlc_2.outgoing_amt_msat,
         );
 
@@ -483,12 +622,34 @@ mod tests {
         assert!(tracker
             .remove_htlc(htlc_1.outgoing_channel_id, htlc_1_ref)
             .is_ok());
+
         assert_eq!(
-            tracker.bucket_in_flight_count(channel_1, ResourceBucketType::Protected),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::IncomingChannel(channel_0),
+                ResourceBucketType::Protected
+            ),
             1
         );
         assert_eq!(
-            tracker.bucket_in_flight_msat(channel_1, ResourceBucketType::Protected),
+            tracker.bucket_in_flight_count(
+                ChannelFilter::OutgoingChannel(channel_1),
+                ResourceBucketType::Protected
+            ),
+            1
+        );
+
+        assert_eq!(
+            tracker.bucket_in_flight_msat(
+                ChannelFilter::IncomingChannel(channel_0),
+                ResourceBucketType::Protected
+            ),
+            htlc_2.incoming_amt_msat,
+        );
+        assert_eq!(
+            tracker.bucket_in_flight_msat(
+                ChannelFilter::OutgoingChannel(channel_1),
+                ResourceBucketType::Protected
+            ),
             htlc_2.outgoing_amt_msat,
         );
     }

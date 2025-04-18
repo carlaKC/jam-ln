@@ -4,8 +4,8 @@ use crate::incoming_channel::IncomingChannel;
 use crate::outgoing_channel::{BucketParameters, OutgoingChannel};
 use crate::{
     AllocationCheck, BucketResources, ChannelSnapshot, ForwardResolution, HtlcRef, ProposedForward,
-    ReputationCheck, ReputationError, ReputationManager, ReputationParams, ResourceBucketType,
-    ResourceCheck,
+    ReputationCheck, ReputationError, ReputationManager, ReputationParams, ReputationValues,
+    ResourceBucketType, ResourceCheck,
 };
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -109,8 +109,41 @@ impl RevenueAverage {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Reputation {
+    Incoming,
+    Outgoing,
+    Bidirectional,
+}
+
+impl Reputation {
+    pub fn sufficient_reputation(&self, check: &AllocationCheck) -> bool {
+        match self {
+            Reputation::Incoming => check
+                .reputation_check
+                .incoming_reputation
+                .sufficient_reputation(),
+            Reputation::Outgoing => check
+                .reputation_check
+                .outgoing_reputation
+                .sufficient_reputation(),
+            Reputation::Bidirectional => {
+                check
+                    .reputation_check
+                    .incoming_reputation
+                    .sufficient_reputation()
+                    && check
+                        .reputation_check
+                        .outgoing_reputation
+                        .sufficient_reputation()
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ForwardManagerParams {
     pub reputation_params: ReputationParams,
+    pub reputation_check: Reputation,
     pub general_slot_portion: u8,
     pub general_liquidity_portion: u8,
     pub congestion_slot_portion: u8,
@@ -130,7 +163,7 @@ pub trait SimualtionDebugManager {
     fn general_jam_channel(&self, channel: u64) -> Result<(), ReputationError>;
 }
 
-/// Implements outgoing reputation algorithm and resource bucketing for an individual node.
+/// Implements incoming and outgoing reputation algorithm and resource bucketing for an individual node.
 #[derive(Debug)]
 pub struct ForwardManager {
     params: ForwardManagerParams,
@@ -150,7 +183,6 @@ impl ForwardManagerImpl {
     ) -> Result<AllocationCheck, ReputationError> {
         forward.validate()?;
 
-        // Get the incoming revenue threshold that the outgoing channel must meet.
         let incoming_channel = self
             .channels
             .get_mut(&forward.incoming_ref.channel_id)
@@ -158,36 +190,59 @@ impl ForwardManagerImpl {
                 forward.incoming_ref.channel_id,
             ))?;
 
-        let revenue_threshold = incoming_channel
+        let incoming_revenue_threshold = incoming_channel
             .bidirectional_revenue
             .value_at_instant(forward.added_at)?;
+
+        // Reputation from the incoming channel.
+        let incoming_reputation = incoming_channel
+            .incoming_direction
+            .incoming_reputation(forward.added_at)?;
 
         let no_congestion_misuse = incoming_channel
             .incoming_direction
             .no_congestion_misuse(forward.added_at);
 
         // Check reputation and resources available for the forward.
-        let outgoing_channel = &mut self
-            .channels
-            .get_mut(&forward.outgoing_channel_id)
-            .ok_or(ReputationError::ErrOutgoingNotFound(
-                forward.outgoing_channel_id,
-            ))?
-            .outgoing_direction;
+        let outgoing_channel = self.channels.get_mut(&forward.outgoing_channel_id).ok_or(
+            ReputationError::ErrOutgoingNotFound(forward.outgoing_channel_id),
+        )?;
+
+        // Revenue over the outgoing channel that the incoming channel must meet.
+        let outgoing_revenue_threshold = outgoing_channel
+            .bidirectional_revenue
+            .value_at_instant(forward.added_at)?;
+
+        // Reputation from the outgoing channel
+        let outgoing_reputation = outgoing_channel
+            .outgoing_direction
+            .outgoing_reputation(forward.added_at)?;
 
         Ok(AllocationCheck {
             reputation_check: ReputationCheck {
-                outgoing_reputation: outgoing_channel.outgoing_reputation(forward.added_at)?,
-                revenue_threshold,
-                in_flight_total_risk: self.htlcs.channel_in_flight_risk(
-                    ChannelFilter::OutgoingChannel(forward.outgoing_channel_id),
-                ),
-                // The underlying simulation is block height agnostic, and starts its routes with a height of zero, so
-                // we can just use the incoming expiry to reflect "maximum time htlc can be held on channel", because
-                // we're calculating expiry_in_height - 0.
-                htlc_risk: self
-                    .htlcs
-                    .htlc_risk(forward.fee_msat(), forward.expiry_in_height),
+                incoming_reputation: ReputationValues {
+                    reputation: incoming_reputation,
+                    revenue_threshold: outgoing_revenue_threshold,
+                    in_flight_total_risk: self.htlcs.channel_in_flight_risk(
+                        ChannelFilter::IncomingChannel(forward.incoming_ref.channel_id),
+                    ),
+                    // The underlying simulation is block height agnostic, and starts its routes with a height of zero, so
+                    // we can just use the expiry height to reflect "maximum time htlc can be held on channel", because
+                    // we're calculating expiry_in/out_height - 0.
+                    htlc_risk: self
+                        .htlcs
+                        .htlc_risk(forward.fee_msat(), forward.expiry_out_height),
+                },
+                outgoing_reputation: ReputationValues {
+                    reputation: outgoing_reputation,
+                    revenue_threshold: incoming_revenue_threshold,
+                    in_flight_total_risk: self.htlcs.channel_in_flight_risk(
+                        ChannelFilter::OutgoingChannel(forward.outgoing_channel_id),
+                    ),
+                    htlc_risk: self
+                        .htlcs
+                        .htlc_risk(forward.fee_msat(), forward.expiry_in_height),
+                },
             },
             // The incoming channel can only use congestion resources if it hasn't recently misused congestion
             // resources and it doesn't currently have any htlcs using them.
@@ -198,27 +253,39 @@ impl ForwardManagerImpl {
             resource_check: ResourceCheck {
                 general_bucket: BucketResources {
                     slots_used: self.htlcs.bucket_in_flight_count(
-                        forward.outgoing_channel_id,
+                        ChannelFilter::OutgoingChannel(forward.outgoing_channel_id),
                         ResourceBucketType::General,
                     ),
-                    slots_available: outgoing_channel.general_bucket.slot_count,
+                    slots_available: outgoing_channel
+                        .outgoing_direction
+                        .general_bucket
+                        .slot_count,
                     liquidity_used_msat: self.htlcs.bucket_in_flight_msat(
-                        forward.outgoing_channel_id,
+                        ChannelFilter::OutgoingChannel(forward.outgoing_channel_id),
                         ResourceBucketType::General,
                     ),
-                    liquidity_available_msat: outgoing_channel.general_bucket.liquidity_msat,
+                    liquidity_available_msat: outgoing_channel
+                        .outgoing_direction
+                        .general_bucket
+                        .liquidity_msat,
                 },
                 congestion_bucket: BucketResources {
                     slots_used: self.htlcs.bucket_in_flight_count(
-                        forward.outgoing_channel_id,
+                        ChannelFilter::OutgoingChannel(forward.outgoing_channel_id),
                         ResourceBucketType::Congestion,
                     ),
-                    slots_available: outgoing_channel.congestion_bucket.slot_count,
+                    slots_available: outgoing_channel
+                        .outgoing_direction
+                        .congestion_bucket
+                        .slot_count,
                     liquidity_used_msat: self.htlcs.bucket_in_flight_msat(
-                        forward.outgoing_channel_id,
+                        ChannelFilter::OutgoingChannel(forward.outgoing_channel_id),
                         ResourceBucketType::Congestion,
                     ),
-                    liquidity_available_msat: outgoing_channel.congestion_bucket.liquidity_msat,
+                    liquidity_available_msat: outgoing_channel
+                        .outgoing_direction
+                        .congestion_bucket
+                        .liquidity_msat,
                 },
             },
         })
@@ -331,14 +398,17 @@ impl ReputationManager for ForwardManager {
 
         let allocation_check = inner_lock.get_forwarding_outcome(forward)?;
 
-        if let Ok(bucket) = allocation_check
-            .inner_forwarding_outcome(forward.amount_out_msat, forward.incoming_endorsed)
-        {
+        if let Ok(bucket) = allocation_check.inner_forwarding_outcome(
+            forward.amount_out_msat,
+            forward.incoming_endorsed,
+            self.params.reputation_check,
+        ) {
             inner_lock.htlcs.add_htlc(
                 forward.incoming_ref,
                 InFlightHtlc {
                     outgoing_channel_id: forward.outgoing_channel_id,
                     hold_blocks: forward.expiry_in_height,
+                    incoming_amt_msat: forward.amount_in_msat,
                     outgoing_amt_msat: forward.amount_out_msat,
                     fee_msat: forward.fee_msat(),
                     added_instant: forward.added_at,
@@ -363,7 +433,7 @@ impl ReputationManager for ForwardManager {
             .lock()
             .map_err(|e| ReputationError::ErrUnrecoverable(e.to_string()))?;
 
-        // Remove the hltc from our tracker, as well as the incoming and outgoing direction's current state.
+        // Remove the htlc from our tracker, as well as the incoming and outgoing direction's current state.
         let in_flight = inner_lock
             .htlcs
             .remove_htlc(outgoing_channel, incoming_ref)?;
@@ -375,7 +445,7 @@ impl ReputationManager for ForwardManager {
                 incoming_ref.channel_id,
             ))?
             .incoming_direction
-            .remove_incoming_htlc(&in_flight, resolved_instant);
+            .remove_incoming_htlc(&in_flight, resolution, resolved_instant)?;
 
         inner_lock
             .channels
@@ -427,6 +497,9 @@ impl ReputationManager for ForwardManager {
             reputations.insert(
                 *scid,
                 ChannelSnapshot {
+                    incoming_reputation: channel
+                        .incoming_direction
+                        .incoming_reputation(access_ins)?,
                     outgoing_reputation: channel
                         .outgoing_direction
                         .outgoing_reputation(access_ins)?,
