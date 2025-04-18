@@ -1,4 +1,5 @@
 use crate::analysis::ForwardReporter;
+use crate::attacks::AttackMonitor;
 use crate::clock::InstantClock;
 use crate::{endorsement_from_records, records_from_endorsement, BoxError};
 use async_trait::async_trait;
@@ -61,7 +62,7 @@ pub struct BootstrapForward {
 
 /// Functionality to monitor reputation values in a network.
 #[async_trait]
-pub trait ReputationMonitor {
+pub trait ReputationMonitor: Send + Sync {
     /// Returns a snapshot of the state tracked for each of a node's channels at the instant provided.
     ///
     /// Note that this data tracks all reputation-related values for an individual channel. To create the pair that is
@@ -80,7 +81,7 @@ pub trait ReputationMonitor {
 
 struct Node<M>
 where
-    M: ReputationManager,
+    M: ReputationManager + Send + Sync,
 {
     forward_manager: M,
     alias: String,
@@ -88,7 +89,7 @@ where
 
 impl<M> Node<M>
 where
-    M: ReputationManager,
+    M: ReputationManager + Send + Sync,
 {
     fn new(forward_manager: M, alias: String) -> Self {
         Node {
@@ -100,19 +101,124 @@ where
 
 /// Implements a network-wide interceptor that implements resource management for every forwarding node in the
 /// network.
-#[derive(Clone)]
 pub struct ReputationInterceptor<R, M>
 where
     R: ForwardReporter,
-    M: ReputationManager,
+    M: ReputationManager + Send + Sync,
 {
-    network_nodes: Arc<Mutex<HashMap<PublicKey, Node<M>>>>,
+    inner: Mutex<InnerReputationInterceptor<R, M>>,
+}
+
+impl<R> ReputationInterceptor<R, ForwardManager>
+where
+    R: ForwardReporter,
+{
+    /// Creates a network from the set of edges provided and bootstraps the reputation of nodes in the network using
+    /// the historical forwards provided. Forwards are expected to be sorted by added_ns in ascending order.
+    //
+    // Note: This is a bit of a layering violation of the InnerReputationInterceptor, but we allow it to save the
+    // boilerplate of having to define this function twice.
+    pub async fn new_with_bootstrap(
+        params: ForwardManagerParams,
+        edges: &[NetworkParser],
+        general_jammed: &[(u64, PublicKey)],
+        bootstrap: &BoostrapRecords,
+        clock: Arc<dyn InstantClock + Send + Sync>,
+        results: Option<Arc<Mutex<R>>>,
+        shutdown: Trigger,
+    ) -> Result<Self, BoxError> {
+        let mut inner =
+            InnerReputationInterceptor::new_for_network(params, edges, clock, results, shutdown)
+                .map_err(|_| "could not create network")?;
+        inner.bootstrap_network_history(bootstrap).await?;
+
+        // After the network has been bootstrapped, we can go ahead and general jam required channels.
+        for (channel, pubkey) in general_jammed.iter() {
+            inner
+                .network_nodes
+                .get_mut(pubkey)
+                .ok_or(format!("jammed node: {} not found", pubkey))?
+                .forward_manager
+                .general_jam_channel(*channel)?;
+        }
+
+        Ok(Self {
+            inner: Mutex::new(inner),
+        })
+    }
+}
+
+impl<R, M> AttackMonitor for ReputationInterceptor<R, M>
+where
+    R: ForwardReporter,
+    M: ReputationManager + Send + Sync,
+{
+}
+
+/// Implementation of ReputationMonitor that simply locks our inner state and calls underlying implementation.
+#[async_trait]
+impl<R, M> ReputationMonitor for ReputationInterceptor<R, M>
+where
+    R: ForwardReporter,
+    M: ReputationManager + Send + Sync,
+{
+    async fn list_channels(
+        &self,
+        node: PublicKey,
+        access_ins: Instant,
+    ) -> Result<HashMap<u64, ChannelSnapshot>, BoxError> {
+        self.inner
+            .lock()
+            .await
+            .list_channels(node, access_ins)
+            .await
+    }
+
+    /// Checks the forwarding decision for a htlc without adding it to internal state.
+    async fn check_htlc_outcome(
+        &self,
+        htlc_add: HtlcAdd,
+    ) -> Result<AllocationCheck, ReputationError> {
+        self.inner.lock().await.check_htlc_outcome(htlc_add).await
+    }
+}
+
+/// Implementation of Interceptor that simply locks our inner state and calls underlying implementation.
+#[async_trait]
+impl<R, M> Interceptor for ReputationInterceptor<R, M>
+where
+    R: ForwardReporter,
+    M: ReputationManager + Send + Sync,
+{
+    async fn intercept_htlc(&self, req: InterceptRequest) {
+        self.inner.lock().await.intercept_htlc(req).await;
+    }
+
+    async fn notify_resolution(
+        &self,
+        res: InterceptResolution,
+    ) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+        self.inner.lock().await.notify_resolution(res).await
+    }
+
+    fn name(&self) -> String {
+        "channel jammer".to_string()
+    }
+}
+
+/// Manages reputation handling for a network of nodes.
+pub struct InnerReputationInterceptor<R, M>
+where
+    R: ForwardReporter,
+    M: ReputationManager + Send + Sync,
+{
+    network_nodes: HashMap<PublicKey, Node<M>>,
     clock: Arc<dyn InstantClock + Send + Sync>,
     results: Option<Arc<Mutex<R>>>,
     shutdown: Trigger,
 }
 
-impl<R> ReputationInterceptor<R, ForwardManager>
+impl<R> InnerReputationInterceptor<R, ForwardManager>
 where
     R: ForwardReporter,
 {
@@ -166,43 +272,14 @@ where
         }
 
         Ok(Self {
-            network_nodes: Arc::new(Mutex::new(network_nodes)),
+            network_nodes,
             clock,
             results,
             shutdown,
         })
     }
 
-    /// Creates a network from the set of edges provided and bootstraps the reputation of nodes in the network using
-    /// the historical forwards provided. Forwards are expected to be sorted by added_ns in ascending order.
-    pub async fn new_with_bootstrap(
-        params: ForwardManagerParams,
-        edges: &[NetworkParser],
-        general_jammed: &[(u64, PublicKey)],
-        bootstrap: &BoostrapRecords,
-        clock: Arc<dyn InstantClock + Send + Sync>,
-        results: Option<Arc<Mutex<R>>>,
-        shutdown: Trigger,
-    ) -> Result<Self, BoxError> {
-        let mut interceptor = Self::new_for_network(params, edges, clock, results, shutdown)
-            .map_err(|_| "could not create network")?;
-        interceptor.bootstrap_network_history(bootstrap).await?;
-
-        // After the network has been bootstrapped, we can go ahead and general jam required channels.
-        for (channel, pubkey) in general_jammed.iter() {
-            interceptor
-                .network_nodes
-                .lock()
-                .await
-                .get_mut(pubkey)
-                .ok_or(format!("jammed node: {} not found", pubkey))?
-                .forward_manager
-                .general_jam_channel(*channel)?;
-        }
-
-        Ok(interceptor)
-    }
-
+    /// Loads the forwarding history provided to the network, bootstrapping reputation values.
     async fn bootstrap_network_history(
         &mut self,
         bootstrap: &BoostrapRecords,
@@ -293,26 +370,21 @@ where
     }
 }
 
-impl<R, M> ReputationInterceptor<R, M>
+impl<R, M> InnerReputationInterceptor<R, M>
 where
     R: ForwardReporter,
-    M: ReputationManager,
+    M: ReputationManager + Send + Sync,
 {
     /// Adds a htlc forward to the jamming interceptor, performing forwarding checks and returning the decided
     /// forwarding outcome for the htlc. Callers should fail if the outer result is an error, because an unexpected
     /// error has occurred.
     async fn inner_add_htlc(
-        &self,
+        &mut self,
         htlc_add: HtlcAdd,
         report: bool,
     ) -> Result<Result<HashMap<u64, Vec<u8>>, ForwardingError>, ReputationError> {
         // If the forwarding node can't be found, we've hit a critical error and can't proceed.
-        let (allocation_check, alias) = match self
-            .network_nodes
-            .lock()
-            .await
-            .entry(htlc_add.forwarding_node)
-        {
+        let (allocation_check, alias) = match self.network_nodes.entry(htlc_add.forwarding_node) {
             Entry::Occupied(mut e) => {
                 let node = e.get_mut();
                 (
@@ -366,7 +438,7 @@ where
 
     /// Removes a htlc from the jamming interceptor, reporting its success/failure to the inner state machine.
     async fn inner_resolve_htlc(
-        &self,
+        &mut self,
         resolved_htlc: HtlcResolve,
     ) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
         log::info!(
@@ -377,12 +449,7 @@ where
             resolved_htlc.forward_resolution,
         );
 
-        match self
-            .network_nodes
-            .lock()
-            .await
-            .entry(resolved_htlc.forwarding_node)
-        {
+        match self.network_nodes.entry(resolved_htlc.forwarding_node) {
             Entry::Occupied(mut e) => Ok(e.get_mut().forward_manager.resolve_htlc(
                 resolved_htlc.outgoing_channel_id,
                 resolved_htlc.incoming_htlc,
@@ -394,60 +461,9 @@ where
             }
         }
     }
-}
 
-#[async_trait]
-impl<R, M> ReputationMonitor for ReputationInterceptor<R, M>
-where
-    R: ForwardReporter,
-    M: ReputationManager + Send,
-{
-    async fn list_channels(
-        &self,
-        node: PublicKey,
-        access_ins: Instant,
-    ) -> Result<HashMap<u64, ChannelSnapshot>, BoxError> {
-        self.network_nodes
-            .lock()
-            .await
-            .get(&node)
-            .ok_or(format!("node: {node} not found"))?
-            .forward_manager
-            .list_channels(access_ins)
-            .map_err(|e| e.into())
-    }
-
-    /// Checks the forwarding decision for a htlc without adding it to internal state.
-    async fn check_htlc_outcome(
-        &self,
-        htlc_add: HtlcAdd,
-    ) -> Result<AllocationCheck, ReputationError> {
-        match self
-            .network_nodes
-            .lock()
-            .await
-            .entry(htlc_add.forwarding_node)
-        {
-            Entry::Occupied(e) => e
-                .get()
-                .forward_manager
-                .get_forwarding_outcome(&htlc_add.htlc),
-            Entry::Vacant(_) => Err(ReputationError::ErrUnrecoverable(format!(
-                "node not found: {}",
-                htlc_add.forwarding_node,
-            ))),
-        }
-    }
-}
-
-#[async_trait]
-impl<R, M> Interceptor for ReputationInterceptor<R, M>
-where
-    R: ForwardReporter,
-    M: ReputationManager + Send + Sync,
-{
     /// Implemented by HTLC interceptors that provide input on the resolution of HTLCs forwarded in the simulation.
-    async fn intercept_htlc(&self, req: InterceptRequest) {
+    async fn intercept_htlc(&mut self, req: InterceptRequest) {
         // If the intercept has no outgoing channel, we can just exit early because there's no action to be taken.
         let outgoing_channel_id = match req.outgoing_channel_id {
             Some(c) => c.into(),
@@ -498,7 +514,7 @@ where
     }
 
     async fn notify_resolution(
-        &self,
+        &mut self,
         res: InterceptResolution,
     ) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
         // If there's not outgoing channel, we're notifying on the receiving node which doesn't need any action.
@@ -520,9 +536,35 @@ where
         .await
     }
 
-    /// Returns an identifying name for the interceptor for logging, does not need to be unique.
-    fn name(&self) -> String {
-        "channel jammer".to_string()
+    /// Provides a snapshot of the current state of a node's channels.
+    async fn list_channels(
+        &self,
+        node: PublicKey,
+        access_ins: Instant,
+    ) -> Result<HashMap<u64, ChannelSnapshot>, BoxError> {
+        self.network_nodes
+            .get(&node)
+            .ok_or(format!("node: {node} not found"))?
+            .forward_manager
+            .list_channels(access_ins)
+            .map_err(|e| e.into())
+    }
+
+    /// Checks the forwarding decision for a htlc without adding it to internal state.
+    async fn check_htlc_outcome(
+        &mut self,
+        htlc_add: HtlcAdd,
+    ) -> Result<AllocationCheck, ReputationError> {
+        match self.network_nodes.entry(htlc_add.forwarding_node) {
+            Entry::Occupied(e) => e
+                .get()
+                .forward_manager
+                .get_forwarding_outcome(&htlc_add.htlc),
+            Entry::Vacant(_) => Err(ReputationError::ErrUnrecoverable(format!(
+                "node not found: {}",
+                htlc_add.forwarding_node,
+            ))),
+        }
     }
 }
 
@@ -547,7 +589,9 @@ mod tests {
 
     use crate::analysis::BatchForwardWriter;
     use crate::endorsement_from_records;
-    use crate::reputation_interceptor::{BoostrapRecords, BootstrapForward};
+    use crate::reputation_interceptor::{
+        BoostrapRecords, BootstrapForward, InnerReputationInterceptor,
+    };
     use crate::test_utils::{get_random_keypair, setup_test_request, test_allocation_check};
 
     use super::{Node, ReputationInterceptor, ReputationMonitor};
@@ -602,7 +646,7 @@ mod tests {
             get_random_keypair().1,
         ];
 
-        let nodes = HashMap::from([
+        let network_nodes = HashMap::from([
             (
                 pubkeys[0],
                 Node {
@@ -628,10 +672,12 @@ mod tests {
 
         (
             ReputationInterceptor {
-                network_nodes: Arc::new(Mutex::new(nodes)),
-                clock: Arc::new(SimulationClock::new(1).unwrap()),
-                results: None,
-                shutdown,
+                inner: Mutex::new(super::InnerReputationInterceptor {
+                    network_nodes,
+                    clock: Arc::new(SimulationClock::new(1).unwrap()),
+                    results: None,
+                    shutdown,
+                }),
             },
             pubkeys,
         )
@@ -683,9 +729,10 @@ mod tests {
             setup_test_request(pubkeys[0], 0, 1, EndorsementSignal::Endorsed);
 
         interceptor
-            .network_nodes
+            .inner
             .lock()
             .await
+            .network_nodes
             .get_mut(&pubkeys[0])
             .unwrap()
             .forward_manager
@@ -709,9 +756,10 @@ mod tests {
             setup_test_request(pubkeys[0], 0, 1, EndorsementSignal::Unendorsed);
 
         interceptor
-            .network_nodes
+            .inner
             .lock()
             .await
+            .network_nodes
             .get_mut(&pubkeys[0])
             .unwrap()
             .forward_manager
@@ -773,9 +821,10 @@ mod tests {
         let (interceptor, pubkeys) = setup_test_interceptor();
 
         interceptor
-            .network_nodes
+            .inner
             .lock()
             .await
+            .network_nodes
             .get_mut(&pubkeys[0])
             .unwrap()
             .forward_manager
@@ -849,14 +898,17 @@ mod tests {
         let (params, edges) = setup_three_hop_network_edges();
 
         let interceptor: ReputationInterceptor<BatchForwardWriter, ForwardManager> =
-            ReputationInterceptor::new_for_network(
-                params,
-                &edges,
-                Arc::new(SimulationClock::new(1).unwrap()),
-                None,
-                shutdown,
-            )
-            .unwrap();
+            ReputationInterceptor {
+                inner: InnerReputationInterceptor::new_for_network(
+                    params,
+                    &edges,
+                    Arc::new(SimulationClock::new(1).unwrap()),
+                    None,
+                    shutdown,
+                )
+                .unwrap()
+                .into(),
+            };
 
         // Alice only has one channel tracked.
         let alice_channels = interceptor
@@ -929,9 +981,10 @@ mod tests {
             .unwrap();
 
         let bob_reputation = interceptor
-            .network_nodes
+            .inner
             .lock()
             .await
+            .network_nodes
             .get(&bob_pk)
             .unwrap()
             .forward_manager
