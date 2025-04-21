@@ -188,17 +188,21 @@ async fn main() -> Result<(), BoxError> {
     });
 
     let reputation_interceptor = Arc::new(Mutex::new(
-        ReputationInterceptor::new_with_bootstrap(
+        ReputationInterceptor::new(
             forward_params,
             &sim_network,
-            &jammed_peers,
-            &bootstrap,
             clock.clone(),
             Some(results_writer),
             shutdown.clone(),
         )
         .await?,
     ));
+    reputation_interceptor
+        .lock()
+        .await
+        .bootstrap_network(&jammed_peers, &bootstrap)
+        .await?;
+
     let attack_interceptor = AttackInterceptor::new_for_network(
         clock.clone(),
         attacker_pubkey,

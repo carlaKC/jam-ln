@@ -112,28 +112,37 @@ impl<R> ReputationInterceptor<R, ForwardManager>
 where
     R: ForwardReporter,
 {
-    /// Creates a network from the set of edges provided and bootstraps the reputation of nodes in the network using
-    /// the historical forwards provided. Forwards are expected to be sorted by added_ns in ascending order.
-    //
-    // Note: This is a bit of a layering violation of the InnerReputationInterceptor, but we allow it to save the
-    // boilerplate of having to define this function twice.
-    pub async fn new_with_bootstrap(
+    /// Creates a network that implements our reputation scheme from the set of edges provided.
+    pub async fn new(
         params: ForwardManagerParams,
         edges: &[NetworkParser],
-        general_jammed: &[(u64, PublicKey)],
-        bootstrap: &BoostrapRecords,
         clock: Arc<dyn InstantClock + Send + Sync>,
         results: Option<Arc<Mutex<R>>>,
         shutdown: Trigger,
     ) -> Result<Self, BoxError> {
-        let mut inner =
-            InnerReputationInterceptor::new_for_network(params, edges, clock, results, shutdown)
-                .map_err(|_| "could not create network")?;
-        inner.bootstrap_network_history(bootstrap).await?;
+        Ok(Self {
+            inner: Mutex::new(
+                InnerReputationInterceptor::new_for_network(
+                    params, edges, clock, results, shutdown,
+                )
+                .map_err(|_| "could not create network")?,
+            ),
+        })
+    }
+
+    /// Bootstraps reputation values in the network with the forwarding history provided, and general jams specified
+    /// nodes. Forwards are expected to be sorted by added_ns in ascending order.
+    pub async fn bootstrap_network(
+        &self,
+        general_jammed: &[(u64, PublicKey)],
+        bootstrap: &BoostrapRecords,
+    ) -> Result<(), BoxError> {
+        let mut inner_lock = self.inner.lock().await;
+        inner_lock.bootstrap_network_history(bootstrap).await?;
 
         // After the network has been bootstrapped, we can go ahead and general jam required channels.
         for (channel, pubkey) in general_jammed.iter() {
-            inner
+            inner_lock
                 .network_nodes
                 .get_mut(pubkey)
                 .ok_or(format!("jammed node: {} not found", pubkey))?
@@ -141,9 +150,7 @@ where
                 .general_jam_channel(*channel)?;
         }
 
-        Ok(Self {
-            inner: Mutex::new(inner),
-        })
+        Ok(())
     }
 }
 
@@ -957,17 +964,23 @@ mod tests {
         // Create an interceptor that is intended to general jam payments on Bob -> Carol in the three hop network
         // Alice -> Bob -> Carol.
         let interceptor: ReputationInterceptor<BatchForwardWriter, ForwardManager> =
-            ReputationInterceptor::new_with_bootstrap(
+            ReputationInterceptor::new(
                 params,
                 &edges,
+                Arc::new(SimulationClock::new(1).unwrap()),
+                None,
+                shutdown,
+            )
+            .await
+            .unwrap();
+
+        interceptor
+            .bootstrap_network(
                 &[(bob_to_carol, edges[1].node_1.pubkey)],
                 &BoostrapRecords {
                     forwards: boostrap,
                     last_timestamp_nanos: 1_000_000,
                 },
-                Arc::new(SimulationClock::new(1).unwrap()),
-                None,
-                shutdown,
             )
             .await
             .unwrap();
