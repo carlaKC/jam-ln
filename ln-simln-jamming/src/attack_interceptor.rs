@@ -1,6 +1,9 @@
 use crate::clock::InstantClock;
 use crate::reputation_interceptor::{HtlcAdd, ReputationMonitor};
-use crate::{endorsement_from_records, records_from_endorsement, BoxError};
+use crate::{
+    endorsement_from_records, print_request, records_from_endorsement, send_intercept_result,
+    BoxError,
+};
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use ln_resource_mgr::{EndorsementSignal, ForwardingOutcome, HtlcRef, ProposedForward};
@@ -38,35 +41,6 @@ where
     /// Used to control shutdown.
     listener: Listener,
     shutdown: Trigger,
-}
-
-macro_rules! send_intercept_result {
-    ($req:expr, $result:expr, $shutdown:expr) => {
-        if let Err(e) = $req.response.send($result).await {
-            log::error!("Could not send to interceptor: {e}");
-            $shutdown.trigger();
-        }
-    };
-}
-
-fn print_request(req: &InterceptRequest) -> String {
-    format!(
-        "{}:{} {} -> {} with fee {} ({} -> {}) and cltv {} ({} -> {})",
-        u64::from(req.incoming_htlc.channel_id),
-        req.incoming_htlc.index,
-        endorsement_from_records(&req.incoming_custom_records),
-        if let Some(outgoing_chan) = req.outgoing_channel_id {
-            outgoing_chan.into()
-        } else {
-            0
-        },
-        req.incoming_amount_msat - req.outgoing_amount_msat,
-        req.incoming_amount_msat,
-        req.outgoing_amount_msat,
-        req.incoming_expiry_height - req.outgoing_expiry_height,
-        req.incoming_expiry_height,
-        req.outgoing_expiry_height
-    )
 }
 
 impl<C: InstantClock + Clock, R: Interceptor + ReputationMonitor> AttackInterceptor<C, R> {

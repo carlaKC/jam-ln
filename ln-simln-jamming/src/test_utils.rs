@@ -2,8 +2,8 @@
 use std::error::Error;
 use std::time::Instant;
 
-use crate::{records_from_endorsement, BoxError};
 use crate::reputation_interceptor::{BootstrapForward, HtlcAdd, ReputationMonitor};
+use crate::{records_from_endorsement, BoxError};
 use async_trait::async_trait;
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use lightning::ln::PaymentHash;
@@ -14,7 +14,8 @@ use ln_resource_mgr::{
 use mockall::mock;
 use rand::{distributions::Uniform, Rng};
 use simln_lib::sim_node::{
-    CustomRecords, ForwardingError, InterceptRequest, InterceptResolution, Interceptor,
+    ChannelPolicy, CustomRecords, ForwardingError, InterceptRequest, InterceptResolution,
+    Interceptor,
 };
 use simln_lib::ShortChannelID;
 use std::collections::HashMap;
@@ -152,5 +153,19 @@ pub fn test_bootstrap_forward(
         forwarding_node: get_random_keypair().1,
         channel_in_id,
         channel_out_id,
+    }
+}
+
+pub fn get_test_policy(pubkey: PublicKey) -> ChannelPolicy {
+    ChannelPolicy {
+        pubkey,
+        alias: "test_node".into(),
+        max_htlc_count: 483,
+        max_in_flight_msat: 100_000,
+        min_htlc_size_msat: 1000,
+        max_htlc_size_msat: 100_000,
+        cltv_expiry_delta: 40,
+        base_fee: 1000,
+        fee_rate_prop: 1,
     }
 }

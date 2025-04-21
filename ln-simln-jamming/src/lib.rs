@@ -1,6 +1,6 @@
 use bitcoin::secp256k1::PublicKey;
 use ln_resource_mgr::{ChannelSnapshot, EndorsementSignal};
-use simln_lib::sim_node::CustomRecords;
+use simln_lib::sim_node::{CustomRecords, InterceptRequest};
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
@@ -138,6 +138,38 @@ fn count_reputation_pairs(
                     >= snapshot.bidirectional_revenue + risk_margin as i64
         })
         .count())
+}
+
+/// Sends a result to an interception request.
+#[macro_export]
+macro_rules! send_intercept_result {
+    ($req:expr, $result:expr, $shutdown:expr) => {
+        if let Err(e) = $req.response.send($result).await {
+            log::error!("Could not send to interceptor: {e}");
+            $shutdown.trigger();
+        }
+    };
+}
+
+/// Prints the details of an interception request.
+fn print_request(req: &InterceptRequest) -> String {
+    format!(
+        "{}:{} {} -> {} with fee {} ({} -> {}) and cltv {} ({} -> {})",
+        u64::from(req.incoming_htlc.channel_id),
+        req.incoming_htlc.index,
+        endorsement_from_records(&req.incoming_custom_records),
+        if let Some(outgoing_chan) = req.outgoing_channel_id {
+            outgoing_chan.into()
+        } else {
+            0
+        },
+        req.incoming_amount_msat - req.outgoing_amount_msat,
+        req.incoming_amount_msat,
+        req.outgoing_amount_msat,
+        req.incoming_expiry_height - req.outgoing_expiry_height,
+        req.incoming_expiry_height,
+        req.outgoing_expiry_height
+    )
 }
 
 #[cfg(test)]

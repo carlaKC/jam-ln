@@ -4,6 +4,8 @@ use simln_lib::sim_node::InterceptRequest;
 
 use crate::{endorsement_from_records, records_from_endorsement, BoxError, NetworkReputation};
 
+pub mod sink;
+
 #[allow(dead_code)]
 pub struct NetworkSetup {
     /// The identifier for channel edges that should be general jammed during the simulation.
