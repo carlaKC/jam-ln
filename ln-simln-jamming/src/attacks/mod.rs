@@ -6,7 +6,6 @@ use crate::{endorsement_from_records, records_from_endorsement, BoxError, Networ
 
 pub mod sink;
 
-#[allow(dead_code)]
 pub struct NetworkSetup {
     /// The identifier for channel edges that should be general jammed during the simulation.
     ///
@@ -21,7 +20,6 @@ pub struct NetworkSetup {
 
 // Defines an attack that can be mounted against the simulation framework.
 #[async_trait]
-#[allow(dead_code)]
 pub trait JammingAttack {
     /// Responsible for validating that the network provided meets any topological expectations for the attack, and
     /// returning network-specific setup instructions for the attack.

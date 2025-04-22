@@ -50,7 +50,7 @@ pub fn records_from_endorsement(endorsement: EndorsementSignal) -> CustomRecords
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct NetworkReputation {
     pub target_reputation: usize,
     pub target_pair_count: usize,
