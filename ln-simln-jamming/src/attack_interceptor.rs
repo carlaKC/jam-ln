@@ -330,42 +330,22 @@ impl<C: InstantClock + Clock, R: Interceptor + ReputationMonitor> Interceptor
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
     use std::convert::From;
-    use std::error::Error;
     use std::sync::Arc;
-    use std::time::Instant;
 
-    use crate::reputation_interceptor::{HtlcAdd, ReputationMonitor};
-    use crate::test_utils::{get_random_keypair, setup_test_request, test_allocation_check};
-    use crate::{endorsement_from_records, records_from_endorsement, BoxError};
-    use async_trait::async_trait;
-    use bitcoin::secp256k1::PublicKey;
-    use ln_resource_mgr::{AllocationCheck, ChannelSnapshot, EndorsementSignal, ReputationError};
-    use mockall::mock;
+    use crate::reputation_interceptor::HtlcAdd;
+    use crate::test_utils::{
+        get_random_keypair, setup_test_request, test_allocation_check, MockReputationInterceptor,
+    };
+    use crate::{endorsement_from_records, records_from_endorsement};
+    use ln_resource_mgr::EndorsementSignal;
     use mockall::predicate::function;
     use simln_lib::clock::SimulationClock;
-    use simln_lib::sim_node::{InterceptRequest, InterceptResolution, Interceptor};
+    use simln_lib::sim_node::{InterceptRequest, Interceptor};
     use tokio::sync::Mutex;
 
     use super::AttackInterceptor;
-
-    mock! {
-        ReputationInterceptor{}
-
-        #[async_trait]
-        impl Interceptor for ReputationInterceptor{
-            async fn intercept_htlc(&self, req: InterceptRequest);
-            async fn notify_resolution(&self,_res: InterceptResolution,) -> Result<(), Box<dyn Error + Send + Sync + 'static>>;
-            fn name(&self) -> String;
-        }
-
-        #[async_trait]
-        impl ReputationMonitor for ReputationInterceptor{
-            async fn list_channels(&self, node: PublicKey, access_ins: Instant) -> Result<HashMap<u64, ChannelSnapshot>, BoxError>;
-            async fn check_htlc_outcome(&self,htlc_add: HtlcAdd) -> Result<AllocationCheck, ReputationError>;
-        }
-    }
 
     fn setup_interceptor_test() -> AttackInterceptor<SimulationClock, MockReputationInterceptor> {
         let target_pubkey = get_random_keypair().1;

@@ -1,18 +1,39 @@
 use std::error::Error;
 use std::time::Instant;
 
+use crate::{records_from_endorsement, BoxError};
+use crate::reputation_interceptor::{BootstrapForward, HtlcAdd, ReputationMonitor};
+use async_trait::async_trait;
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use lightning::ln::PaymentHash;
 use ln_resource_mgr::{
-    AllocationCheck, BucketResources, EndorsementSignal, ForwardingOutcome, ProposedForward,
-    ReputationCheck, ResourceCheck,
+    AllocationCheck, BucketResources, ChannelSnapshot, EndorsementSignal, ForwardingOutcome,
+    ProposedForward, ReputationCheck, ReputationError, ResourceCheck,
 };
+use mockall::mock;
 use rand::{distributions::Uniform, Rng};
-use simln_lib::sim_node::{CustomRecords, ForwardingError, InterceptRequest};
+use simln_lib::sim_node::{
+    CustomRecords, ForwardingError, InterceptRequest, InterceptResolution, Interceptor,
+};
 use simln_lib::ShortChannelID;
+use std::collections::HashMap;
 
-use crate::records_from_endorsement;
-use crate::reputation_interceptor::BootstrapForward;
+mock! {
+    pub ReputationInterceptor{}
+
+    #[async_trait]
+    impl Interceptor for ReputationInterceptor{
+        async fn intercept_htlc(&self, req: InterceptRequest);
+        async fn notify_resolution(&self,_res: InterceptResolution) -> Result<(), Box<dyn Error + Send + Sync + 'static>>;
+        fn name(&self) -> String;
+    }
+
+    #[async_trait]
+    impl ReputationMonitor for ReputationInterceptor{
+        async fn list_channels(&self, node: PublicKey, access_ins: Instant) -> Result<HashMap<u64, ChannelSnapshot>, BoxError>;
+        async fn check_htlc_outcome(&self,htlc_add: HtlcAdd) -> Result<AllocationCheck, ReputationError>;
+    }
+}
 
 #[allow(dead_code)]
 pub fn get_random_bytes(size: usize) -> Vec<u8> {
