@@ -119,7 +119,7 @@ pub fn test_allocation_check(forward_succeeds: bool) -> AllocationCheck {
 
     assert!(
         matches!(
-            check.forwarding_outcome(0, EndorsementSignal::Endorsed, Reputation::Outgoing),
+            check.forwarding_outcome(0, EndorsementSignal::Endorsed, true, Reputation::Outgoing),
             ForwardingOutcome::Forward(_)
         ) == forward_succeeds
     );
@@ -140,6 +140,7 @@ pub fn test_proposed_forward(id: u64) -> ProposedForward {
         expiry_out_height: 40,
         added_at: Instant::now(),
         incoming_endorsed: EndorsementSignal::Endorsed,
+        upgradable_endorsement: true,
     }
 }
 

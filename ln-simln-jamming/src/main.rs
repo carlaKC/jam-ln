@@ -13,15 +13,17 @@ use ln_simln_jamming::parsing::{
 };
 use ln_simln_jamming::reputation_interceptor::ReputationInterceptor;
 use ln_simln_jamming::revenue_interceptor::{RevenueInterceptor, RevenueSnapshot};
-use ln_simln_jamming::{get_network_reputation, BoxError, NetworkReputation};
+use ln_simln_jamming::{
+    get_network_reputation, BoxError, NetworkReputation, ENDORSEMENT_TYPE, UPGRADABLE_TYPE,
+};
 use log::LevelFilter;
 use simln_lib::clock::Clock;
 use simln_lib::clock::SimulationClock;
 use simln_lib::interceptors::LatencyIntercepor;
-use simln_lib::sim_node::{Interceptor, SimulatedChannel};
+use simln_lib::sim_node::{CustomRecords, Interceptor, SimulatedChannel};
 use simln_lib::{Simulation, SimulationCfg};
 use simple_logger::SimpleLogger;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
@@ -199,11 +201,8 @@ async fn main() -> Result<(), BoxError> {
 
     check_reputation_status(&cli, &start_reputation)?;
 
-    let attack_interceptor = AttackInterceptor::new_for_network(
-        clock.clone(),
+    let attack_interceptor = AttackInterceptor::new(
         attacker_pubkey,
-        target_pubkey,
-        HashSet::from_iter(target_channels.keys().cloned()),
         reputation_interceptor.clone(),
         attack.clone(),
         shutdown.clone(),
@@ -283,15 +282,18 @@ async fn main() -> Result<(), BoxError> {
         .map(SimulatedChannel::from)
         .collect::<Vec<SimulatedChannel>>();
 
+    let custom_records =
+        CustomRecords::from([(UPGRADABLE_TYPE, vec![1]), (ENDORSEMENT_TYPE, vec![0])]);
+
     // Setup the simulated network with our fake graph.
     let (simulation, graph) = Simulation::new_with_sim_network(
         SimulationCfg::new(None, 3_800_000, 2.0, None, Some(13995354354227336701)),
         channels,
         vec![], // No activities, we want random activity!
         clock.clone(),
+        custom_records,
         interceptors,
-        listener,
-        shutdown,
+        (shutdown, listener),
     )
     .await
     .map_err(|e| anyhow::anyhow!(e))?;

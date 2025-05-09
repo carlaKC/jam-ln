@@ -423,6 +423,7 @@ impl ReputationManager for ForwardManager {
         if let Ok(bucket) = allocation_check.inner_forwarding_outcome(
             forward.amount_out_msat,
             forward.incoming_endorsed,
+            forward.upgradable_endorsement,
             self.params.reputation_check,
         ) {
             inner_lock.htlcs.add_htlc(

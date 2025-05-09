@@ -58,6 +58,7 @@ impl Serialize for Record {
             &self.decision.forwarding_outcome(
                 self.forward.amount_in_msat,
                 self.forward.incoming_endorsed,
+                true,
                 self.reputation,
             ),
         )?;

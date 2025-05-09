@@ -8,7 +8,7 @@ name = "reputation-builder"
 path = "src/bin/reputation_builder.rs"
 
 [dependencies]
-simln-lib = { git = "https://github.com/carlaKC/sim-ln", rev = "e55133e" }
+simln-lib = { git = "https://github.com/carlaKC/sim-ln", rev = "0e58f73" }
 ln-resource-mgr = { path = "../ln-resource-mgr" }
 bitcoin = { version = "0.30.1" }
 async-trait = "0.1.73"

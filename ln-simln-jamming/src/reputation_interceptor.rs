@@ -1,6 +1,8 @@
 use crate::analysis::ForwardReporter;
 use crate::clock::InstantClock;
-use crate::{endorsement_from_records, records_from_endorsement, BoxError};
+use crate::{
+    endorsement_from_records, records_from_endorsement, upgradable_from_records, BoxError,
+};
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use ln_resource_mgr::forward_manager::{
@@ -309,6 +311,7 @@ where
                             ))?,
                     )),
                     incoming_endorsed: EndorsementSignal::Unendorsed,
+                    upgradable_endorsement: true,
                 },
             }));
 
@@ -402,6 +405,7 @@ where
         let fwd_decision = allocation_check.forwarding_outcome(
             htlc_add.htlc.amount_out_msat,
             htlc_add.htlc.incoming_endorsed,
+            htlc_add.htlc.upgradable_endorsement,
             self.reputation_check,
         );
 
@@ -509,6 +513,7 @@ where
                 Ok(allocation_check.forwarding_outcome(
                     htlc_add.htlc.amount_out_msat,
                     htlc_add.htlc.incoming_endorsed,
+                    htlc_add.htlc.upgradable_endorsement,
                     self.reputation_check,
                 ))
             }
@@ -558,6 +563,7 @@ where
             expiry_out_height: req.outgoing_expiry_height,
             added_at: self.clock.now(),
             incoming_endorsed: endorsement_from_records(&req.incoming_custom_records),
+            upgradable_endorsement: upgradable_from_records(&req.incoming_custom_records),
         };
 
         let resp = self
@@ -777,7 +783,29 @@ mod tests {
 
         interceptor.intercept_htlc(request).await;
 
-        // should call add_htlc + return a reputation check that passes
+        // Should call add_htlc + return a reputation check that passes.
+        assert!(matches!(
+            endorsement_from_records(&receiver.recv().await.unwrap().unwrap().unwrap()),
+            EndorsementSignal::Endorsed
+        ));
+
+        // Test unendorsed htlc with sufficient reputation gets upgraded to endorsed.
+        let (interceptor, pubkeys) = setup_test_interceptor();
+        let (request, mut receiver) =
+            setup_test_request(pubkeys[0], 0, 1, EndorsementSignal::Unendorsed);
+
+        interceptor
+            .network_nodes
+            .lock()
+            .await
+            .get_mut(&pubkeys[0])
+            .unwrap()
+            .forward_manager
+            .expect_add_htlc()
+            .return_once(|_| Ok(test_allocation_check(true)));
+
+        interceptor.intercept_htlc(request).await;
+
         assert!(matches!(
             endorsement_from_records(&receiver.recv().await.unwrap().unwrap().unwrap()),
             EndorsementSignal::Endorsed

@@ -24,6 +24,10 @@ pub type BoxError = Box<dyn Error + Send + Sync + 'static>;
 /// The TLV type used to represent experimental endorsement signals.
 pub const ENDORSEMENT_TYPE: u64 = 106823;
 
+/// The TLV type used to represent upgradable endorsement signals. In real life this will be in
+/// the onion.
+pub const UPGRADABLE_TYPE: u64 = 106825;
+
 /// Converts a set of custom tlv records to an endorsement signal.
 pub fn endorsement_from_records(records: &CustomRecords) -> EndorsementSignal {
     match records.get(&ENDORSEMENT_TYPE) {
@@ -38,12 +42,23 @@ pub fn endorsement_from_records(records: &CustomRecords) -> EndorsementSignal {
     }
 }
 
-/// Converts an endorsement signal to custom records using the blip-04 experimental TLV.
+/// Converts a set of custom tlv records to a bool signaling if the endorsement signal is
+/// upgradable.
+pub fn upgradable_from_records(records: &CustomRecords) -> bool {
+    match records.get(&UPGRADABLE_TYPE) {
+        Some(upgradable) => upgradable.len() == 1 && upgradable[0] == 1,
+        None => false,
+    }
+}
+
+/// Converts an endorsement signal to custom records using the blip-04 experimental TLV. Note that
+/// we add by default the upgradable endorsement signal to the custom records returned.
 pub fn records_from_endorsement(endorsement: EndorsementSignal) -> CustomRecords {
+    let mut records = CustomRecords::default();
+    records.insert(UPGRADABLE_TYPE, vec![1]);
     match endorsement {
-        EndorsementSignal::Unendorsed => CustomRecords::default(),
+        EndorsementSignal::Unendorsed => records,
         EndorsementSignal::Endorsed => {
-            let mut records = CustomRecords::default();
             records.insert(ENDORSEMENT_TYPE, vec![1]);
             records
         }

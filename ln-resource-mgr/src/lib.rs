@@ -138,6 +138,8 @@ pub enum FailureReason {
     NoResources,
     /// The outgoing peer has insufficient reputation for the htlc to occupy protected resources.
     NoReputation,
+    /// The upgradable signal has been tampered with so we should fail back the htlc.
+    UpgradableSignalModified,
 }
 
 /// A snapshot of the incoming and outgoing reputation and resources available for a forward.
@@ -166,9 +168,15 @@ impl AllocationCheck {
         &self,
         htlc_amt_msat: u64,
         incoming_endorsed: EndorsementSignal,
+        incoming_upgradable: bool,
         reputation_check: Reputation,
     ) -> ForwardingOutcome {
-        match self.inner_forwarding_outcome(htlc_amt_msat, incoming_endorsed, reputation_check) {
+        match self.inner_forwarding_outcome(
+            htlc_amt_msat,
+            incoming_endorsed,
+            incoming_upgradable,
+            reputation_check,
+        ) {
             Ok(bucket) => match bucket {
                 ResourceBucketType::General => {
                     ForwardingOutcome::Forward(EndorsementSignal::Unendorsed)
@@ -189,8 +197,13 @@ impl AllocationCheck {
         &self,
         htlc_amt_msat: u64,
         incoming_endorsed: EndorsementSignal,
+        incoming_upgradable: bool,
         reputation_check: Reputation,
     ) -> Result<ResourceBucketType, FailureReason> {
+        if !incoming_upgradable && incoming_endorsed == EndorsementSignal::Endorsed {
+            return Err(FailureReason::UpgradableSignalModified);
+        }
+
         match incoming_endorsed {
             EndorsementSignal::Endorsed => {
                 if reputation_check.sufficient_reputation(self) {
@@ -224,6 +237,10 @@ impl AllocationCheck {
                 }
             }
             EndorsementSignal::Unendorsed => {
+                if reputation_check.sufficient_reputation(self) && incoming_upgradable {
+                    return Ok(ResourceBucketType::Protected);
+                }
+
                 if self
                     .resource_check
                     .general_bucket
@@ -344,6 +361,9 @@ impl Display for FailureReason {
         match self {
             FailureReason::NoResources => write!(f, "no resources"),
             FailureReason::NoReputation => write!(f, "no reputation"),
+            FailureReason::UpgradableSignalModified => {
+                write!(f, "upgradable signal has been modified")
+            }
         }
     }
 }
@@ -393,6 +413,7 @@ pub struct ProposedForward {
     pub expiry_out_height: u32,
     pub added_at: Instant,
     pub incoming_endorsed: EndorsementSignal,
+    pub upgradable_endorsement: bool,
 }
 
 impl Display for ProposedForward {
@@ -619,7 +640,7 @@ mod tests {
                 // Endorsed htlc will be granted access to congestion resources.
                 assert!(
                     check
-                        .inner_forwarding_outcome(10, EndorsementSignal::Endorsed, scheme)
+                        .inner_forwarding_outcome(10, EndorsementSignal::Endorsed, true, scheme)
                         .unwrap()
                         == ResourceBucketType::Congestion
                 );
@@ -627,7 +648,7 @@ mod tests {
                 // Unendorsed htlc will not be granted access to congestion resources.
                 assert!(
                     check
-                        .inner_forwarding_outcome(10, EndorsementSignal::Unendorsed, scheme)
+                        .inner_forwarding_outcome(10, EndorsementSignal::Unendorsed, true, scheme)
                         .err()
                         .unwrap()
                         == FailureReason::NoResources,
@@ -651,7 +672,7 @@ mod tests {
             |check: &AllocationCheck, scheme: Reputation| {
                 assert!(
                     check
-                        .inner_forwarding_outcome(10, EndorsementSignal::Endorsed, scheme)
+                        .inner_forwarding_outcome(10, EndorsementSignal::Endorsed, true, scheme)
                         .unwrap()
                         == ResourceBucketType::Protected,
                 );
@@ -661,12 +682,17 @@ mod tests {
         test_forwarding_outcome_protected_for_reputation(&check, Reputation::Outgoing);
         test_forwarding_outcome_protected_for_reputation(&check, Reputation::Bidirectional);
 
-        // Sufficient reputation and unendorsed will go in the general bucket.
+        // Unendorsed htlc with sufficient reputation gets upgraded so it goes in the protected bucket.
         assert!(
             check
-                .inner_forwarding_outcome(10, EndorsementSignal::Unendorsed, Reputation::Outgoing)
+                .inner_forwarding_outcome(
+                    10,
+                    EndorsementSignal::Unendorsed,
+                    true,
+                    Reputation::Bidirectional
+                )
                 .unwrap()
-                == ResourceBucketType::General,
+                == ResourceBucketType::Protected,
         );
     }
 
@@ -683,6 +709,7 @@ mod tests {
                 .inner_forwarding_outcome(
                     10,
                     EndorsementSignal::Endorsed,
+                    true,
                     Reputation::Bidirectional
                 )
                 .err()
@@ -699,6 +726,7 @@ mod tests {
                 .inner_forwarding_outcome(
                     10,
                     EndorsementSignal::Endorsed,
+                    true,
                     Reputation::Bidirectional
                 )
                 .err()
@@ -716,7 +744,12 @@ mod tests {
         // bucket
         assert!(
             check
-                .inner_forwarding_outcome(10, EndorsementSignal::Endorsed, Reputation::Incoming)
+                .inner_forwarding_outcome(
+                    10,
+                    EndorsementSignal::Endorsed,
+                    true,
+                    Reputation::Incoming
+                )
                 .unwrap()
                 == ResourceBucketType::General
         );
@@ -725,7 +758,7 @@ mod tests {
         let test_no_reputation = |check: &AllocationCheck, scheme: Reputation| {
             assert!(
                 check
-                    .inner_forwarding_outcome(10, EndorsementSignal::Endorsed, scheme)
+                    .inner_forwarding_outcome(10, EndorsementSignal::Endorsed, true, scheme)
                     .err()
                     .unwrap()
                     == FailureReason::NoReputation,
@@ -734,5 +767,37 @@ mod tests {
 
         test_no_reputation(&check, Reputation::Outgoing);
         test_no_reputation(&check, Reputation::Bidirectional);
+
+        // Unendorsed htlc with no reputation and available resources goes into general bucket.
+        assert!(
+            check
+                .inner_forwarding_outcome(
+                    10,
+                    EndorsementSignal::Unendorsed,
+                    true,
+                    Reputation::Bidirectional
+                )
+                .unwrap()
+                == ResourceBucketType::General
+        );
+    }
+
+    #[test]
+    fn test_inner_forwarding_outcome_modified_signal() {
+        let check = test_congestion_check();
+
+        // return error if htlc has an endorsement signal but is not marked as upgradable.
+        assert!(
+            check
+                .inner_forwarding_outcome(
+                    10,
+                    EndorsementSignal::Endorsed,
+                    false,
+                    Reputation::Bidirectional
+                )
+                .err()
+                .unwrap()
+                == FailureReason::UpgradableSignalModified
+        );
     }
 }

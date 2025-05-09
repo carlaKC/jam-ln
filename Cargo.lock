@@ -1741,7 +1741,7 @@ dependencies = [
 [[package]]
 name = "simln-lib"
 version = "0.1.0"
-source = "git+https://github.com/carlaKC/sim-ln?rev=e55133e#e55133e9f68f10f1608e24034cf19d0249c53603"
+source = "git+https://github.com/carlaKC/sim-ln?rev=0e58f73#0e58f73e4dd69ad6f5a56bfa8ea4af83b14b5a6f"
 dependencies = [
  "anyhow",
  "async-trait",
