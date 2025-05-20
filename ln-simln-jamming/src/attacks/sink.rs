@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
-use ln_resource_mgr::EndorsementSignal;
+use ln_resource_mgr::AccountableSignal;
 use simln_lib::clock::Clock;
 use simln_lib::sim_node::{ForwardingError, InterceptRequest};
 use simln_lib::NetworkParser;
@@ -14,7 +14,7 @@ use triggered::{Listener, Trigger};
 use crate::clock::InstantClock;
 use crate::reputation_interceptor::ReputationMonitor;
 use crate::{
-    endorsement_from_records, get_network_reputation, print_request, records_from_endorsement,
+    accountable_from_records, get_network_reputation, print_request, records_from_signal,
     send_intercept_result, BoxError, NetworkReputation,
 };
 
@@ -106,18 +106,20 @@ impl<C: Clock + InstantClock, R: ReputationMonitor + Send + Sync> SinkAttack<C, 
     }
 
     /// Intercepts payments flowing from target -> attacker, holding the htlc for the maximum allowable time to
-    /// trash its reputation if the htlc is endorsed. We do not use our underlying jamming mitigation interceptor
+    /// trash its reputation if the htlc is accountable. We do not use our underlying jamming mitigation interceptor
     /// at all because the attacker is not required to run the mitigation.
     async fn intercept_attacker_incoming(&self, req: InterceptRequest) {
-        // Exit early if not endorsed, no point in holding.
-        if endorsement_from_records(&req.incoming_custom_records) == EndorsementSignal::Unendorsed {
+        // Exit early if not accountable, no point in holding.
+        if accountable_from_records(&req.incoming_custom_records)
+            == AccountableSignal::Unaccountable
+        {
             log::info!(
-                "HTLC from target -> attacker not endorsed, releasing: {}",
+                "HTLC from target -> attacker not accountable, releasing: {}",
                 print_request(&req)
             );
             send_intercept_result!(
                 req,
-                Ok(Ok(records_from_endorsement(EndorsementSignal::Unendorsed))),
+                Ok(Ok(records_from_signal(AccountableSignal::Unaccountable))),
                 self.shutdown
             );
             return;
@@ -128,16 +130,16 @@ impl<C: Clock + InstantClock, R: ReputationMonitor + Send + Sync> SinkAttack<C, 
         let max_hold_secs = Duration::from_secs((req.incoming_expiry_height * 10 * 60).into());
 
         log::info!(
-            "HTLC from target -> attacker endorsed, holding for {:?}: {}",
+            "HTLC from target -> attacker accountable, holding for {:?}: {}",
             max_hold_secs,
             print_request(&req),
         );
 
-        // If the htlc is endorsed, then we go ahead and hold the htlc for as long as we can only exiting if we
+        // If the htlc is accountable, then we go ahead and hold the htlc for as long as we can only exiting if we
         // get a shutdown signal elsewhere.
         let resp = select! {
             _ = self.listener.clone() => Err(ForwardingError::InterceptorError("shutdown signal received".to_string().into())),
-            _ = self.clock.sleep(max_hold_secs) => Ok(records_from_endorsement(EndorsementSignal::Endorsed))
+            _ = self.clock.sleep(max_hold_secs) => Ok(records_from_signal(AccountableSignal::Accountable))
         };
 
         send_intercept_result!(req, Ok(resp), self.shutdown);
@@ -226,7 +228,7 @@ where
         // lose here, and it's probably best to remain in other nodes good pathfinding books.
         send_intercept_result!(
             req,
-            Ok(Ok(records_from_endorsement(endorsement_from_records(
+            Ok(Ok(records_from_signal(accountable_from_records(
                 &req.incoming_custom_records,
             )))),
             self.shutdown
@@ -267,9 +269,9 @@ mod tests {
     use crate::test_utils::{
         get_random_keypair, get_test_policy, setup_test_request, MockReputationInterceptor,
     };
-    use crate::{endorsement_from_records, NetworkReputation};
+    use crate::{accountable_from_records, NetworkReputation};
     use bitcoin::secp256k1::PublicKey;
-    use ln_resource_mgr::EndorsementSignal;
+    use ln_resource_mgr::AccountableSignal;
     use simln_lib::clock::SimulationClock;
     use simln_lib::NetworkParser;
     use tokio::sync::Mutex;
@@ -411,7 +413,7 @@ mod tests {
         let pubkey = get_random_keypair().1;
 
         // Request is not forwarded by the attacking node.
-        let (request, _) = setup_test_request(pubkey, 101, 100, EndorsementSignal::Unendorsed);
+        let (request, _) = setup_test_request(pubkey, 101, 100, AccountableSignal::Unaccountable);
         assert!(attack.intercept_attacker_htlc(request).await.is_err());
     }
 
@@ -424,7 +426,7 @@ mod tests {
             attack.attacker_pubkey,
             100,
             attacker_scid,
-            EndorsementSignal::Unendorsed,
+            AccountableSignal::Unaccountable,
         );
         assert!(attack
             .intercept_attacker_htlc(request.clone())
@@ -441,13 +443,13 @@ mod tests {
             attack.attacker_pubkey,
             101,
             100,
-            EndorsementSignal::Unendorsed,
+            AccountableSignal::Unaccountable,
         );
         assert!(attack.intercept_attacker_htlc(request).await.is_ok());
         assert!(receiver.recv().await.unwrap().unwrap().is_ok());
     }
 
-    /// Tests that unendorsed HTLCs incoming from the target are not held by the attacker.
+    /// Tests that unaccountable HTLCs incoming from the target are not held by the attacker.
     #[tokio::test]
     async fn test_intercept_attacker_incoming() {
         let (attack, attacker_scid) = setup_test_network();
@@ -455,15 +457,15 @@ mod tests {
             attack.attacker_pubkey,
             attacker_scid,
             100,
-            EndorsementSignal::Unendorsed,
+            AccountableSignal::Unaccountable,
         );
 
-        // Unendorsed HTLCs won't be held, they're just let through to help build our reputation.
+        // Unaccountable HTLCs won't be held, they're just let through to help build our reputation.
         assert!(attack.intercept_attacker_htlc(request).await.is_ok());
         assert!(receiver.recv().await.unwrap().unwrap().is_ok());
     }
 
-    /// Tests that endorsed HTLCs incoming from the target are held by the attacker.
+    /// Tests that accountable HTLCs incoming from the target are held by the attacker.
     #[tokio::test]
     async fn test_intercept_incoming_hold() {
         let (attack, attacker_scid) = setup_test_network();
@@ -471,7 +473,7 @@ mod tests {
             attack.attacker_pubkey,
             attacker_scid,
             100,
-            EndorsementSignal::Endorsed,
+            AccountableSignal::Accountable,
         );
 
         // Set our incoming expiry to zero so that our "hold" is actually zero in the test.
@@ -479,7 +481,10 @@ mod tests {
 
         assert!(attack.intercept_attacker_htlc(request).await.is_ok());
         let resp = receiver.recv().await.unwrap().unwrap().unwrap();
-        assert_eq!(endorsement_from_records(&resp), EndorsementSignal::Endorsed);
+        assert_eq!(
+            accountable_from_records(&resp),
+            AccountableSignal::Accountable
+        );
     }
 
     /// Tests stop conditions for simulation. Does not cover simulation_completed to avoid needing

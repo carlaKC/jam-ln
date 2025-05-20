@@ -1,6 +1,6 @@
 use bitcoin::secp256k1::PublicKey;
 use clap::Parser;
-use ln_resource_mgr::forward_manager::{ForwardManagerParams, Reputation};
+use ln_resource_mgr::forward_manager::ForwardManagerParams;
 use ln_resource_mgr::ReputationParams;
 use ln_simln_jamming::analysis::BatchForwardWriter;
 use ln_simln_jamming::attack_interceptor::AttackInterceptor;
@@ -14,7 +14,7 @@ use ln_simln_jamming::parsing::{
 use ln_simln_jamming::reputation_interceptor::ReputationInterceptor;
 use ln_simln_jamming::revenue_interceptor::{RevenueInterceptor, RevenueSnapshot};
 use ln_simln_jamming::{
-    get_network_reputation, BoxError, NetworkReputation, ENDORSEMENT_TYPE, UPGRADABLE_TYPE,
+    get_network_reputation, BoxError, NetworkReputation, ACCOUNTABLE_TYPE, UPGRADABLE_TYPE,
 };
 use log::LevelFilter;
 use simln_lib::clock::Clock;
@@ -80,14 +80,6 @@ async fn main() -> Result<(), BoxError> {
 
     let clock = Arc::new(SimulationClock::new(cli.clock_speedup)?);
 
-    let reputation_check = if cli.incoming_reputation_only {
-        Reputation::Incoming
-    } else if cli.outgoing_reputation_only {
-        Reputation::Outgoing
-    } else {
-        Reputation::Bidirectional
-    };
-
     // Use the channel jamming interceptor and latency for simulated payments.
     let latency_interceptor: Arc<dyn Interceptor> =
         Arc::new(LatencyIntercepor::new_poisson(150.0)?);
@@ -100,7 +92,6 @@ async fn main() -> Result<(), BoxError> {
             resolution_period: Duration::from_secs(90),
             expected_block_speed: Some(Duration::from_secs(10 * 60)),
         },
-        reputation_check,
         general_slot_portion: 30,
         general_liquidity_portion: 30,
         congestion_slot_portion: 20,
@@ -147,7 +138,6 @@ async fn main() -> Result<(), BoxError> {
         ReputationInterceptor::new_from_snapshot(
             forward_params,
             &sim_network,
-            reputation_check,
             reputation_snapshot,
             clock.clone(),
             Some(results_writer),
@@ -283,7 +273,7 @@ async fn main() -> Result<(), BoxError> {
         .collect::<Vec<SimulatedChannel>>();
 
     let custom_records =
-        CustomRecords::from([(UPGRADABLE_TYPE, vec![1]), (ENDORSEMENT_TYPE, vec![0])]);
+        CustomRecords::from([(UPGRADABLE_TYPE, vec![1]), (ACCOUNTABLE_TYPE, vec![0])]);
 
     // Setup the simulated network with our fake graph.
     let (simulation, graph) = Simulation::new_with_sim_network(

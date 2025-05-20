@@ -10,7 +10,7 @@ use std::{
 use clap::Parser;
 use csv::Writer;
 use ln_resource_mgr::{
-    forward_manager::{ForwardManager, ForwardManagerParams, Reputation},
+    forward_manager::{ForwardManager, ForwardManagerParams},
     ReputationParams,
 };
 use ln_simln_jamming::{
@@ -68,14 +68,6 @@ struct Cli {
     /// The alias of the attacking node.
     #[arg(long)]
     attacker_alias: Option<String>,
-
-    /// Bootstrap network with incoming reputation only.
-    #[arg(long)]
-    pub incoming_reputation_only: bool,
-
-    /// Bootstrap network with outgoing reputation only.
-    #[arg(long)]
-    pub outgoing_reputation_only: bool,
 }
 
 impl Cli {
@@ -142,14 +134,6 @@ async fn main() -> Result<(), BoxError> {
         }
     });
 
-    let reputation_check = if cli.incoming_reputation_only {
-        Reputation::Incoming
-    } else if cli.outgoing_reputation_only {
-        Reputation::Outgoing
-    } else {
-        Reputation::Bidirectional
-    };
-
     let (shutdown, _listener) = triggered::trigger();
     let clock = Arc::new(SimulationClock::new(1)?);
     let forward_params = ForwardManagerParams {
@@ -159,7 +143,6 @@ async fn main() -> Result<(), BoxError> {
             resolution_period: Duration::from_secs(90),
             expected_block_speed: Some(Duration::from_secs(10 * 60)),
         },
-        reputation_check,
         general_slot_portion: 30,
         general_liquidity_portion: 30,
         congestion_slot_portion: 20,
@@ -171,7 +154,6 @@ async fn main() -> Result<(), BoxError> {
         ReputationInterceptor::new_for_network(
             forward_params,
             &sim_network,
-            reputation_check,
             reputation_clock,
             None,
             shutdown,
@@ -208,7 +190,6 @@ async fn main() -> Result<(), BoxError> {
         "pubkey",
         "scid",
         "channel_capacity",
-        "incoming_reputation",
         "outgoing_reputation",
         "bidirectional_revenue",
     ])?;
@@ -223,7 +204,6 @@ async fn main() -> Result<(), BoxError> {
                 pubkey,
                 channel.0,
                 channel.1.capacity_msat,
-                channel.1.incoming_reputation,
                 channel.1.outgoing_reputation,
                 channel.1.bidirectional_revenue,
             ))?;

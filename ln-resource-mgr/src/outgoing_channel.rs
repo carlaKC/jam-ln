@@ -24,10 +24,10 @@ pub(super) struct OutgoingChannel {
     /// average over the reputation_window that the tracker is created with.
     outgoing_reputation: DecayingAverage,
 
-    /// The resources available for htlcs that are not endorsed, or are not sent by a peer with sufficient reputation.
+    /// The resources available for htlcs that are not accountable, or are not sent by a peer with sufficient reputation.
     pub(super) general_bucket: BucketParameters,
 
-    /// The resources available for htlcs that are endorsed from peers that do not have sufficient reputation. This
+    /// The resources available for htlcs that are accountable from peers that do not have sufficient reputation. This
     /// bucket is only used when the general bucket is full, and peers are limited to a single slot/liquidity block.
     pub(super) congestion_bucket: BucketParameters,
 }
@@ -79,13 +79,12 @@ impl OutgoingChannel {
         resolution: ForwardResolution,
         resolved_instant: Instant,
     ) -> Result<(), ReputationError> {
-        // Unendorsed payments only have a positive impact on reputation (no negative effective fees are applied),
-        // and endorsed payments
+        // Unaccountable payments only have a positive impact on reputation (no negative effective fees are applied)
         let settled = resolution == ForwardResolution::Settled;
         let effective_fees = self.params.effective_fees(
             in_flight.fee_msat,
             resolved_instant.sub(in_flight.added_instant),
-            in_flight.incoming_endorsed,
+            in_flight.accountable,
             settled,
         )?;
 
@@ -109,7 +108,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crate::htlc_manager::ReputationParams;
-    use crate::{EndorsementSignal, ForwardResolution, ResourceBucketType};
+    use crate::{AccountableSignal, ForwardResolution, ResourceBucketType};
 
     use super::{BucketParameters, InFlightHtlc, OutgoingChannel};
 
@@ -139,14 +138,14 @@ mod tests {
         .unwrap()
     }
 
-    fn get_test_htlc(endorsed: EndorsementSignal, fee_msat: u64) -> InFlightHtlc {
+    fn get_test_htlc(accountable: AccountableSignal, fee_msat: u64) -> InFlightHtlc {
         InFlightHtlc {
             outgoing_channel_id: 1,
             hold_blocks: 1000,
             outgoing_amt_msat: 2000,
             fee_msat,
             added_instant: Instant::now(),
-            incoming_endorsed: endorsed,
+            accountable,
             bucket: ResourceBucketType::General,
         }
     }
@@ -175,64 +174,64 @@ mod tests {
             (
                 1000,
                 fast_resolve,
-                EndorsementSignal::Endorsed,
+                AccountableSignal::Accountable,
                 true,
                 Ok(1000),
             ),
             (
                 1000,
                 slow_resolve,
-                EndorsementSignal::Endorsed,
+                AccountableSignal::Accountable,
                 true,
                 Ok(-2000),
             ),
             (
                 1000,
                 fast_resolve,
-                EndorsementSignal::Endorsed,
+                AccountableSignal::Accountable,
                 false,
                 Ok(0),
             ),
             (
                 1000,
                 slow_resolve,
-                EndorsementSignal::Endorsed,
+                AccountableSignal::Accountable,
                 false,
                 Ok(-3000),
             ),
             (
                 1000,
                 fast_resolve,
-                EndorsementSignal::Unendorsed,
+                AccountableSignal::Unaccountable,
                 true,
                 Ok(1000),
             ),
             (
                 1000,
                 slow_resolve,
-                EndorsementSignal::Unendorsed,
+                AccountableSignal::Unaccountable,
                 true,
                 Ok(0),
             ),
             (
                 1000,
                 fast_resolve,
-                EndorsementSignal::Unendorsed,
+                AccountableSignal::Unaccountable,
                 false,
                 Ok(0),
             ),
             (
                 1000,
                 slow_resolve,
-                EndorsementSignal::Unendorsed,
+                AccountableSignal::Unaccountable,
                 false,
                 Ok(0),
             ),
         ];
 
-        for (fee_msat, hold_time, endorsed, settled, expected) in cases {
-            let result = params.effective_fees(fee_msat, hold_time, endorsed, settled);
-            assert_eq!(result, expected, "Case failed: fee_msat={fee_msat:?}, hold_time={hold_time:?}, endorsed={endorsed:?}, settled={settled:?}");
+        for (fee_msat, hold_time, accountable, settled, expected) in cases {
+            let result = params.effective_fees(fee_msat, hold_time, accountable, settled);
+            assert_eq!(result, expected, "Case failed: fee_msat={fee_msat:?}, hold_time={hold_time:?}, accountable={accountable:?}, settled={settled:?}");
         }
     }
 
@@ -240,7 +239,7 @@ mod tests {
     #[test]
     fn test_remove_htlc() {
         let mut tracker = get_test_tracker();
-        let htlc_1 = get_test_htlc(EndorsementSignal::Endorsed, 1000);
+        let htlc_1 = get_test_htlc(AccountableSignal::Accountable, 1000);
 
         tracker
             .remove_outgoing_htlc(&htlc_1, ForwardResolution::Settled, htlc_1.added_instant)
@@ -251,7 +250,7 @@ mod tests {
             htlc_1.fee_msat as i64
         );
 
-        let htlc_2 = get_test_htlc(EndorsementSignal::Endorsed, 5000);
+        let htlc_2 = get_test_htlc(AccountableSignal::Accountable, 5000);
         tracker
             .remove_outgoing_htlc(
                 &htlc_2.clone(),

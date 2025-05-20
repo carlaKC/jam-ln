@@ -1,15 +1,13 @@
 use crate::analysis::ForwardReporter;
 use crate::clock::InstantClock;
-use crate::{
-    endorsement_from_records, records_from_endorsement, upgradable_from_records, BoxError,
-};
+use crate::{accountable_from_records, records_from_signal, upgradable_from_records, BoxError};
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use ln_resource_mgr::forward_manager::{
-    ForwardManager, ForwardManagerParams, Reputation, SimualtionDebugManager,
+    ForwardManager, ForwardManagerParams, SimualtionDebugManager,
 };
 use ln_resource_mgr::{
-    ChannelSnapshot, EndorsementSignal, ForwardResolution, ForwardingOutcome, HtlcRef,
+    AccountableSignal, ChannelSnapshot, ForwardResolution, ForwardingOutcome, HtlcRef,
     ProposedForward, ReputationError, ReputationManager,
 };
 use simln_lib::sim_node::{ForwardingError, InterceptRequest, InterceptResolution, Interceptor};
@@ -109,7 +107,6 @@ where
     M: ReputationManager,
 {
     network_nodes: Arc<Mutex<HashMap<PublicKey, Node<M>>>>,
-    reputation_check: Reputation,
     clock: Arc<dyn InstantClock + Send + Sync>,
     results: Option<Arc<Mutex<R>>>,
     shutdown: Trigger,
@@ -122,7 +119,6 @@ where
     pub fn new_for_network(
         params: ForwardManagerParams,
         edges: &[NetworkParser],
-        reputation_check: Reputation,
         clock: Arc<dyn InstantClock + Send + Sync>,
         results: Option<Arc<Mutex<R>>>,
         shutdown: Trigger,
@@ -173,7 +169,6 @@ where
 
         Ok(Self {
             network_nodes: Arc::new(Mutex::new(network_nodes)),
-            reputation_check,
             clock,
             results,
             shutdown,
@@ -183,7 +178,6 @@ where
     pub async fn new_from_snapshot(
         params: ForwardManagerParams,
         edges: &[NetworkParser],
-        reputation_check: Reputation,
         reputation_snapshot: HashMap<PublicKey, HashMap<u64, ChannelSnapshot>>,
         clock: Arc<dyn InstantClock + Send + Sync>,
         results: Option<Arc<Mutex<R>>>,
@@ -254,7 +248,6 @@ where
 
         Ok(Self {
             network_nodes: Arc::new(Mutex::new(network_nodes)),
-            reputation_check,
             clock,
             results,
             shutdown,
@@ -310,8 +303,8 @@ where
                                 bootstrap.last_timestamp_nanos, h.added_ns
                             ))?,
                     )),
-                    incoming_endorsed: EndorsementSignal::Unendorsed,
-                    upgradable_endorsement: true,
+                    incoming_accountable: AccountableSignal::Unaccountable,
+                    upgradable_accountability: true,
                 },
             }));
 
@@ -404,9 +397,8 @@ where
         // Once we have a forwarding decision, return successfully to the interceptor with the call.
         let fwd_decision = allocation_check.forwarding_outcome(
             htlc_add.htlc.amount_out_msat,
-            htlc_add.htlc.incoming_endorsed,
-            htlc_add.htlc.upgradable_endorsement,
-            self.reputation_check,
+            htlc_add.htlc.incoming_accountable,
+            htlc_add.htlc.upgradable_accountability,
         );
 
         if let Some(r) = &self.results {
@@ -417,7 +409,6 @@ where
                         htlc_add.forwarding_node,
                         allocation_check,
                         htlc_add.htlc.clone(),
-                        self.reputation_check,
                     )
                     .map_err(|e| ReputationError::ErrUnrecoverable(e.to_string()))?;
             }
@@ -431,9 +422,7 @@ where
         );
 
         match fwd_decision {
-            ForwardingOutcome::Forward(endorsement) => {
-                Ok(Ok(records_from_endorsement(endorsement)))
-            }
+            ForwardingOutcome::Forward(signal) => Ok(Ok(records_from_signal(signal))),
             ForwardingOutcome::Fail(reason) => Ok(Err(ForwardingError::InterceptorError(
                 reason.to_string().into(),
             ))),
@@ -512,9 +501,8 @@ where
 
                 Ok(allocation_check.forwarding_outcome(
                     htlc_add.htlc.amount_out_msat,
-                    htlc_add.htlc.incoming_endorsed,
-                    htlc_add.htlc.upgradable_endorsement,
-                    self.reputation_check,
+                    htlc_add.htlc.incoming_accountable,
+                    htlc_add.htlc.upgradable_accountability,
                 ))
             }
             Entry::Vacant(_) => Err(ReputationError::ErrUnrecoverable(format!(
@@ -539,8 +527,8 @@ where
             None => {
                 if let Err(e) = req
                     .response
-                    .send(Ok(Ok(records_from_endorsement(
-                        EndorsementSignal::Unendorsed,
+                    .send(Ok(Ok(records_from_signal(
+                        AccountableSignal::Unaccountable,
                     ))))
                     .await
                 {
@@ -562,8 +550,8 @@ where
             expiry_in_height: req.incoming_expiry_height,
             expiry_out_height: req.outgoing_expiry_height,
             added_at: self.clock.now(),
-            incoming_endorsed: endorsement_from_records(&req.incoming_custom_records),
-            upgradable_endorsement: upgradable_from_records(&req.incoming_custom_records),
+            incoming_accountable: accountable_from_records(&req.incoming_custom_records),
+            upgradable_accountability: upgradable_from_records(&req.incoming_custom_records),
         };
 
         let resp = self
@@ -616,9 +604,9 @@ where
 mod tests {
     use async_trait::async_trait;
     use bitcoin::secp256k1::PublicKey;
-    use ln_resource_mgr::forward_manager::{ForwardManager, ForwardManagerParams, Reputation};
+    use ln_resource_mgr::forward_manager::{ForwardManager, ForwardManagerParams};
     use ln_resource_mgr::{
-        AllocationCheck, ChannelSnapshot, EndorsementSignal, ForwardResolution, HtlcRef,
+        AccountableSignal, AllocationCheck, ChannelSnapshot, ForwardResolution, HtlcRef,
         ProposedForward, ReputationError, ReputationManager, ReputationParams,
     };
     use mockall::mock;
@@ -635,7 +623,7 @@ mod tests {
     use crate::clock::InstantClock;
     use crate::reputation_interceptor::{BoostrapRecords, BootstrapForward};
     use crate::test_utils::{get_random_keypair, setup_test_request, test_allocation_check};
-    use crate::{endorsement_from_records, BoxError};
+    use crate::{accountable_from_records, BoxError};
 
     use super::{Node, ReputationInterceptor, ReputationMonitor};
 
@@ -717,7 +705,6 @@ mod tests {
         (
             ReputationInterceptor {
                 network_nodes: Arc::new(Mutex::new(nodes)),
-                reputation_check: Reputation::Outgoing,
                 clock: Arc::new(SimulationClock::new(1).unwrap()),
                 results: None,
                 shutdown,
@@ -731,14 +718,14 @@ mod tests {
     async fn test_final_hop_intercept() {
         let (interceptor, pubkeys) = setup_test_interceptor();
         let (mut request, mut receiver) =
-            setup_test_request(pubkeys[0], 0, 1, EndorsementSignal::Unendorsed);
+            setup_test_request(pubkeys[0], 0, 1, AccountableSignal::Unaccountable);
 
         request.outgoing_channel_id = None;
         interceptor.intercept_htlc(request).await;
 
         assert!(matches!(
-            endorsement_from_records(&receiver.recv().await.unwrap().unwrap().unwrap()),
-            EndorsementSignal::Unendorsed
+            accountable_from_records(&receiver.recv().await.unwrap().unwrap().unwrap()),
+            AccountableSignal::Unaccountable
         ));
     }
 
@@ -746,8 +733,12 @@ mod tests {
     #[tokio::test]
     async fn test_unknown_intercept_node() {
         let (interceptor, _) = setup_test_interceptor();
-        let (request, mut receiver) =
-            setup_test_request(get_random_keypair().1, 0, 1, EndorsementSignal::Unendorsed);
+        let (request, mut receiver) = setup_test_request(
+            get_random_keypair().1,
+            0,
+            1,
+            AccountableSignal::Unaccountable,
+        );
 
         interceptor.intercept_htlc(request).await;
 
@@ -764,12 +755,12 @@ mod tests {
         ));
     }
 
-    /// Tests interception of a htlc that should be forwarded as endorsed.
+    /// Tests interception of a htlc that should be forwarded as accountable.
     #[tokio::test]
-    async fn test_forward_endorsed_htlc() {
+    async fn test_forward_accountable_htlc() {
         let (interceptor, pubkeys) = setup_test_interceptor();
         let (request, mut receiver) =
-            setup_test_request(pubkeys[0], 0, 1, EndorsementSignal::Endorsed);
+            setup_test_request(pubkeys[0], 0, 1, AccountableSignal::Accountable);
 
         interceptor
             .network_nodes
@@ -785,14 +776,14 @@ mod tests {
 
         // Should call add_htlc + return a reputation check that passes.
         assert!(matches!(
-            endorsement_from_records(&receiver.recv().await.unwrap().unwrap().unwrap()),
-            EndorsementSignal::Endorsed
+            accountable_from_records(&receiver.recv().await.unwrap().unwrap().unwrap()),
+            AccountableSignal::Accountable
         ));
 
-        // Test unendorsed htlc with sufficient reputation gets upgraded to endorsed.
+        // Test unaccountable htlc with sufficient reputation gets upgraded to accountable.
         let (interceptor, pubkeys) = setup_test_interceptor();
         let (request, mut receiver) =
-            setup_test_request(pubkeys[0], 0, 1, EndorsementSignal::Unendorsed);
+            setup_test_request(pubkeys[0], 0, 1, AccountableSignal::Unaccountable);
 
         interceptor
             .network_nodes
@@ -807,17 +798,17 @@ mod tests {
         interceptor.intercept_htlc(request).await;
 
         assert!(matches!(
-            endorsement_from_records(&receiver.recv().await.unwrap().unwrap().unwrap()),
-            EndorsementSignal::Endorsed
+            accountable_from_records(&receiver.recv().await.unwrap().unwrap().unwrap()),
+            AccountableSignal::Accountable
         ));
     }
 
-    /// Tests interception of a htlc that should be forwarded as unendorsed.
+    /// Tests interception of a htlc that should be forwarded as unaccountable.
     #[tokio::test]
-    async fn test_forward_unendorsed_htlc() {
+    async fn test_forward_unaccountable_htlc() {
         let (interceptor, pubkeys) = setup_test_interceptor();
         let (request, mut receiver) =
-            setup_test_request(pubkeys[0], 0, 1, EndorsementSignal::Unendorsed);
+            setup_test_request(pubkeys[0], 0, 1, AccountableSignal::Unaccountable);
 
         interceptor
             .network_nodes
@@ -833,8 +824,8 @@ mod tests {
 
         // should call add_htlc + return a reputation check that passes
         assert!(matches!(
-            endorsement_from_records(&receiver.recv().await.unwrap().unwrap().unwrap()),
-            EndorsementSignal::Unendorsed
+            accountable_from_records(&receiver.recv().await.unwrap().unwrap().unwrap()),
+            AccountableSignal::Unaccountable
         ));
     }
 
@@ -842,7 +833,8 @@ mod tests {
     #[tokio::test]
     async fn test_final_hop_notify() {
         let (interceptor, pubkeys) = setup_test_interceptor();
-        let (mut request, _) = setup_test_request(pubkeys[0], 0, 1, EndorsementSignal::Unendorsed);
+        let (mut request, _) =
+            setup_test_request(pubkeys[0], 0, 1, AccountableSignal::Unaccountable);
 
         request.outgoing_channel_id = None;
         interceptor
@@ -942,7 +934,6 @@ mod tests {
                 resolution_period: Duration::from_secs(90),
                 expected_block_speed: None,
             },
-            reputation_check: Reputation::Outgoing,
             general_slot_portion: 30,
             general_liquidity_portion: 30,
             congestion_slot_portion: 20,
@@ -958,13 +949,11 @@ mod tests {
         for edge in &edges {
             let node_1_snapshot = ChannelSnapshot {
                 capacity_msat: edge.capacity_msat,
-                incoming_reputation: 0,
                 outgoing_reputation: 0,
                 bidirectional_revenue: 0,
             };
             let node_2_snapshot = ChannelSnapshot {
                 capacity_msat: edge.capacity_msat,
-                incoming_reputation: 0,
                 outgoing_reputation: 0,
                 bidirectional_revenue: 0,
             };
@@ -992,7 +981,6 @@ mod tests {
             ReputationInterceptor::new_for_network(
                 params,
                 &edges,
-                Reputation::Outgoing,
                 Arc::new(SimulationClock::new(1).unwrap()),
                 None,
                 shutdown,
@@ -1057,7 +1045,6 @@ mod tests {
             ReputationInterceptor::new_for_network(
                 params,
                 &edges,
-                Reputation::Outgoing,
                 Arc::new(SimulationClock::new(1).unwrap()),
                 None,
                 shutdown,
@@ -1101,26 +1088,27 @@ mod tests {
                 != 0
         );
 
-        // An unendorsed payment in the non-jammed direction should be forwarded through unendorsed.
+        // An unaccountable payment in the non-jammed direction should be forwarded through
+        // unaccountable.
         let (request, mut receiver) = setup_test_request(
             edges[1].node_1.pubkey,
             bob_to_carol,
             alice_to_bob,
-            EndorsementSignal::Unendorsed,
+            AccountableSignal::Unaccountable,
         );
 
         interceptor.intercept_htlc(request).await;
         assert!(matches!(
-            endorsement_from_records(&receiver.recv().await.unwrap().unwrap().unwrap()),
-            EndorsementSignal::Unendorsed,
+            accountable_from_records(&receiver.recv().await.unwrap().unwrap().unwrap()),
+            AccountableSignal::Unaccountable,
         ));
 
-        // An unendorsed htlc using the jammed channel should be failed because there are no resources.
+        // An unaccountable htlc using the jammed channel should be failed because there are no resources.
         let (request, mut receiver) = setup_test_request(
             edges[1].node_1.pubkey,
             alice_to_bob,
             bob_to_carol,
-            EndorsementSignal::Unendorsed,
+            AccountableSignal::Unaccountable,
         );
 
         interceptor.intercept_htlc(request).await;
@@ -1143,7 +1131,6 @@ mod tests {
         > = ReputationInterceptor::new_from_snapshot(
             params,
             &edges,
-            Reputation::Outgoing,
             reputation_snapshot.clone(),
             clock.clone(),
             None,
@@ -1195,7 +1182,6 @@ mod tests {
         let edge = &edges[0];
         let node_1_snapshot = ChannelSnapshot {
             capacity_msat: edge.capacity_msat,
-            incoming_reputation: 0,
             outgoing_reputation: 0,
             bidirectional_revenue: 0,
         };
@@ -1210,7 +1196,6 @@ mod tests {
         > = ReputationInterceptor::new_from_snapshot(
             params,
             &edges,
-            Reputation::Outgoing,
             reputation_snapshot,
             Arc::new(SimulationClock::new(1).unwrap()),
             None,
@@ -1240,7 +1225,6 @@ mod tests {
         > = ReputationInterceptor::new_from_snapshot(
             params,
             &edges,
-            Reputation::Outgoing,
             reputation_snapshot,
             Arc::new(SimulationClock::new(1).unwrap()),
             None,
@@ -1271,7 +1255,6 @@ mod tests {
         > = ReputationInterceptor::new_from_snapshot(
             params,
             &edges,
-            Reputation::Outgoing,
             reputation_snapshot,
             Arc::new(SimulationClock::new(1).unwrap()),
             None,
@@ -1300,7 +1283,6 @@ mod tests {
         > = ReputationInterceptor::new_from_snapshot(
             params,
             &edges,
-            Reputation::Outgoing,
             reputation_snapshot,
             Arc::new(SimulationClock::new(1).unwrap()),
             None,

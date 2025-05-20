@@ -104,9 +104,9 @@ mod tests {
     use crate::attacks::JammingAttack;
     use crate::reputation_interceptor::HtlcAdd;
     use crate::test_utils::{get_random_keypair, setup_test_request, MockReputationInterceptor};
-    use crate::{records_from_endorsement, BoxError, NetworkReputation};
+    use crate::{records_from_signal, BoxError, NetworkReputation};
     use async_trait::async_trait;
-    use ln_resource_mgr::{EndorsementSignal, FailureReason, ForwardingOutcome};
+    use ln_resource_mgr::{AccountableSignal, FailureReason, ForwardingOutcome};
     use mockall::mock;
     use mockall::predicate::function;
     use simln_lib::sim_node::{InterceptRequest, Interceptor};
@@ -174,7 +174,7 @@ mod tests {
             interceptor.attacker_pubkey,
             0,
             5,
-            EndorsementSignal::Unendorsed,
+            AccountableSignal::Unaccountable,
         );
         interceptor.intercept_htlc(target_to_attacker).await;
 
@@ -183,25 +183,25 @@ mod tests {
             interceptor.attacker_pubkey,
             5,
             0,
-            EndorsementSignal::Unendorsed,
+            AccountableSignal::Unaccountable,
         );
         interceptor.intercept_htlc(attacker_to_target).await;
     }
 
     #[tokio::test]
-    async fn test_peer_to_target_endorsed() {
+    async fn test_peer_to_target_accountable() {
         let interceptor = setup_interceptor_test();
 
-        // Intercepted on target's peer: node -(5) -> peer -(1)-> target, endorsed payments just passed through.
+        // Intercepted on target's peer: node -(5) -> peer -(1)-> target, accountable payments just passed through.
         let peer_pubkey = get_random_keypair().1;
         let (peer_to_target, _) =
-            setup_test_request(peer_pubkey, 5, 1, EndorsementSignal::Endorsed);
+            setup_test_request(peer_pubkey, 5, 1, AccountableSignal::Accountable);
 
         mock_intercept_htlc(interceptor.reputation_interceptor.clone(), &peer_to_target).await;
         interceptor.intercept_htlc(peer_to_target).await;
     }
 
-    /// Tests that payments forwarded from peer -> target are optimistically upgraded to endorsed if they have
+    /// Tests that payments forwarded from peer -> target are optimistically upgraded to accountable if they have
     /// sufficient reputation.
     #[tokio::test]
     async fn test_peer_to_target_upgraded() {
@@ -209,9 +209,9 @@ mod tests {
 
         let peer_pubkey = get_random_keypair().1;
         let (peer_to_target, _) =
-            setup_test_request(peer_pubkey, 5, 1, EndorsementSignal::Unendorsed);
+            setup_test_request(peer_pubkey, 5, 1, AccountableSignal::Unaccountable);
 
-        // Expect a reputation check that passes, then pass the htlc on to the reputation interceptor endorsed.
+        // Expect a reputation check that passes, then pass the htlc on to the reputation interceptor accountable.
         interceptor
             .reputation_interceptor
             .lock()
@@ -221,23 +221,23 @@ mod tests {
                 req.htlc.incoming_ref.channel_id == peer_to_target.incoming_htlc.channel_id.into()
                     && req.htlc.outgoing_channel_id
                         == peer_to_target.outgoing_channel_id.unwrap().into()
-                    && req.htlc.incoming_endorsed == EndorsementSignal::Endorsed
+                    && req.htlc.incoming_accountable == AccountableSignal::Accountable
             }))
-            .return_once(|_| Ok(ForwardingOutcome::Forward(EndorsementSignal::Endorsed)));
+            .return_once(|_| Ok(ForwardingOutcome::Forward(AccountableSignal::Accountable)));
         mock_intercept_htlc(interceptor.reputation_interceptor.clone(), &peer_to_target).await;
 
         interceptor.intercept_htlc(peer_to_target).await;
     }
 
     /// Tests that payments forwarded from peer -> target are dropped if they don't have sufficient reputation to
-    /// be upgraded to endorsed.
+    /// be upgraded to accountable.
     #[tokio::test]
     async fn test_peer_to_target_general_jammed() {
         let interceptor = setup_interceptor_test();
 
         let peer_pubkey = get_random_keypair().1;
         let (peer_to_target, _) =
-            setup_test_request(peer_pubkey, 5, 1, EndorsementSignal::Unendorsed);
+            setup_test_request(peer_pubkey, 5, 1, AccountableSignal::Unaccountable);
 
         // Expect a reputation check that fails, then an interceptor response.
         interceptor
@@ -249,7 +249,7 @@ mod tests {
                 req.htlc.incoming_ref.channel_id == peer_to_target.incoming_htlc.channel_id.into()
                     && req.htlc.outgoing_channel_id
                         == peer_to_target.outgoing_channel_id.unwrap().into()
-                    && req.htlc.incoming_endorsed == EndorsementSignal::Endorsed
+                    && req.htlc.incoming_accountable == AccountableSignal::Accountable
             }))
             .return_once(|_| Ok(ForwardingOutcome::Fail(FailureReason::NoReputation)));
 
@@ -257,7 +257,7 @@ mod tests {
         interceptor.intercept_htlc(peer_to_target).await;
     }
 
-    /// Tests that forwards through the target node to its peers will be upgraded to endorsed.
+    /// Tests that forwards through the target node to its peers will be upgraded to accountable.
     #[tokio::test]
     async fn test_target_to_peer() {
         let interceptor = setup_interceptor_test();
@@ -267,17 +267,16 @@ mod tests {
             target_pubkey,
             1, // Honest channel
             2, // Honest channel
-            EndorsementSignal::Unendorsed,
+            AccountableSignal::Unaccountable,
         );
 
         let mut expected_req = target_forward.clone();
-        expected_req.incoming_custom_records =
-            records_from_endorsement(EndorsementSignal::Endorsed);
+        expected_req.incoming_custom_records = records_from_signal(AccountableSignal::Accountable);
         mock_intercept_htlc(interceptor.reputation_interceptor.clone(), &expected_req).await;
         interceptor.intercept_htlc(target_forward).await;
     }
 
-    /// Tests that forwards through the target node to the attacker will be upgraded to endorsed.
+    /// Tests that forwards through the target node to the attacker will be upgraded to accountable.
     #[tokio::test]
     async fn test_target_to_attacker() {
         let interceptor = setup_interceptor_test();
@@ -287,12 +286,11 @@ mod tests {
             target_pubkey,
             1, // Honest channel
             0, // Attacker
-            EndorsementSignal::Unendorsed,
+            AccountableSignal::Unaccountable,
         );
 
         let mut expected_req = target_forward.clone();
-        expected_req.incoming_custom_records =
-            records_from_endorsement(EndorsementSignal::Endorsed);
+        expected_req.incoming_custom_records = records_from_signal(AccountableSignal::Accountable);
         mock_intercept_htlc(interceptor.reputation_interceptor.clone(), &expected_req).await;
         interceptor.intercept_htlc(target_forward).await;
     }
@@ -304,7 +302,7 @@ mod tests {
 
         let target_pubkey = get_random_keypair().1;
         let (not_actually_attacker, _) =
-            setup_test_request(target_pubkey, 0, 3, EndorsementSignal::Endorsed);
+            setup_test_request(target_pubkey, 0, 3, AccountableSignal::Accountable);
 
         // This tests hangs; the target is actually jamming the attacker lol because we don't check the direction
         mock_intercept_htlc(
