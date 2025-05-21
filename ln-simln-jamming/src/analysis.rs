@@ -1,7 +1,6 @@
 use crate::BoxError;
 use bitcoin::secp256k1::PublicKey;
 use csv::WriterBuilder;
-use ln_resource_mgr::forward_manager::Reputation;
 use ln_resource_mgr::{AllocationCheck, ProposedForward};
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
@@ -17,14 +16,12 @@ pub trait ForwardReporter: Send + Sync {
         forwarding_node: PublicKey,
         decision: AllocationCheck,
         forward: ProposedForward,
-        reputation: Reputation,
     ) -> Result<(), BoxError>;
 }
 
 struct Record {
     forward: ProposedForward,
     decision: AllocationCheck,
-    reputation: Reputation,
     // Tracked with the record so that serialization can express a relative timestamp since the simulation started.
     start_ins: Instant,
 }
@@ -52,71 +49,27 @@ impl Serialize for Record {
         state.serialize_field("amount_out_msat", &self.forward.amount_out_msat)?;
         state.serialize_field("expiry_in_height", &self.forward.expiry_in_height)?;
         state.serialize_field("expiry_out_height", &self.forward.expiry_out_height)?;
-        state.serialize_field("incoming_endorsed", &self.forward.incoming_endorsed)?;
+        state.serialize_field("incoming_accountable", &self.forward.incoming_accountable)?;
         state.serialize_field(
             "forwarding_outcome",
             &self.decision.forwarding_outcome(
                 self.forward.amount_in_msat,
-                self.forward.incoming_endorsed,
+                self.forward.incoming_accountable,
                 true,
-                self.reputation,
             ),
         )?;
         state.serialize_field(
-            "rep_incoming_revenue_threshold",
-            &self
-                .decision
-                .reputation_check
-                .incoming_reputation
-                .revenue_threshold,
+            "revenue_threshold",
+            &self.decision.reputation_check.revenue_threshold,
         )?;
         state.serialize_field(
-            "rep_incoming_reputation",
-            &self
-                .decision
-                .reputation_check
-                .incoming_reputation
-                .reputation,
+            "outgoing_reputation",
+            &self.decision.reputation_check.reputation,
         )?;
+        state.serialize_field("htlc_risk", &self.decision.reputation_check.htlc_risk)?;
         state.serialize_field(
-            "rep_incoming_htlc_risk",
-            &self.decision.reputation_check.incoming_reputation.htlc_risk,
-        )?;
-        state.serialize_field(
-            "rep_incoming_in_flight_risk",
-            &self
-                .decision
-                .reputation_check
-                .incoming_reputation
-                .in_flight_total_risk,
-        )?;
-        state.serialize_field(
-            "rep_outgoing_revenue_threshold",
-            &self
-                .decision
-                .reputation_check
-                .outgoing_reputation
-                .revenue_threshold,
-        )?;
-        state.serialize_field(
-            "rep_outgoing_reputation",
-            &self
-                .decision
-                .reputation_check
-                .outgoing_reputation
-                .reputation,
-        )?;
-        state.serialize_field(
-            "rep_outgoing_htlc_risk",
-            &self.decision.reputation_check.outgoing_reputation.htlc_risk,
-        )?;
-        state.serialize_field(
-            "rep_outgoing_in_flight_risk",
-            &self
-                .decision
-                .reputation_check
-                .outgoing_reputation
-                .in_flight_total_risk,
+            "in_flight_risk",
+            &self.decision.reputation_check.in_flight_total_risk,
         )?;
         state.serialize_field(
             "slots_available",
@@ -211,13 +164,11 @@ impl ForwardReporter for BatchForwardWriter {
         forwarding_node: PublicKey,
         decision: AllocationCheck,
         forward: ProposedForward,
-        reputation: Reputation,
     ) -> Result<(), BoxError> {
         if let Some((records, _)) = self.nodes.get_mut(&forwarding_node) {
             records.push(Record {
                 decision,
                 forward,
-                reputation,
                 start_ins: self.start_ins,
             });
             self.record_count += 1;
@@ -233,8 +184,6 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::str::FromStr;
     use std::time::{Instant, SystemTime};
-
-    use ln_resource_mgr::forward_manager::Reputation;
 
     use crate::analysis::get_file;
     use crate::test_utils::{get_random_keypair, test_allocation_check, test_proposed_forward};
@@ -257,12 +206,7 @@ mod tests {
         // Tracked node reported.
         let tracked_forward = test_proposed_forward(0);
         writer
-            .report_forward(
-                node_0,
-                test_allocation_check(true),
-                tracked_forward.clone(),
-                Reputation::Bidirectional,
-            )
+            .report_forward(node_0, test_allocation_check(true), tracked_forward.clone())
             .unwrap();
         assert_eq!(writer.record_count, 1);
 
@@ -272,7 +216,6 @@ mod tests {
                 node_1,
                 test_allocation_check(true),
                 test_proposed_forward(1),
-                Reputation::Bidirectional,
             )
             .unwrap();
         assert_eq!(writer.record_count, 1);
@@ -307,7 +250,6 @@ mod tests {
                 node_0,
                 test_allocation_check(true),
                 test_proposed_forward(0),
-                Reputation::Bidirectional,
             )
             .unwrap();
         assert_eq!(writer.record_count, 1);
@@ -322,7 +264,6 @@ mod tests {
                 node_1,
                 test_allocation_check(true),
                 test_proposed_forward(1),
-                Reputation::Bidirectional,
             )
             .unwrap();
         writer.write().unwrap();
@@ -334,7 +275,6 @@ mod tests {
                 node_0,
                 test_allocation_check(true),
                 test_proposed_forward(2),
-                Reputation::Bidirectional,
             )
             .unwrap();
         assert_eq!(writer.record_count, 2);
@@ -348,7 +288,6 @@ mod tests {
                 node_0,
                 test_allocation_check(true),
                 test_proposed_forward(3),
-                Reputation::Bidirectional,
             )
             .unwrap();
         writer
@@ -356,7 +295,6 @@ mod tests {
                 node_0,
                 test_allocation_check(true),
                 test_proposed_forward(4),
-                Reputation::Bidirectional,
             )
             .unwrap();
         writer
@@ -364,7 +302,6 @@ mod tests {
                 node_0,
                 test_allocation_check(true),
                 test_proposed_forward(5),
-                Reputation::Bidirectional,
             )
             .unwrap();
 

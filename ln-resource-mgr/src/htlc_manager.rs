@@ -2,7 +2,7 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::{validate_msat, EndorsementSignal, HtlcRef, ReputationError, ResourceBucketType};
+use crate::{validate_msat, AccountableSignal, HtlcRef, ReputationError, ResourceBucketType};
 
 #[derive(Clone, Debug)]
 pub(super) struct InFlightHtlc {
@@ -11,7 +11,7 @@ pub(super) struct InFlightHtlc {
     pub(super) hold_blocks: u32,
     pub(super) outgoing_amt_msat: u64,
     pub(super) added_instant: Instant,
-    pub(super) incoming_endorsed: EndorsementSignal,
+    pub(super) accountable: AccountableSignal,
     pub(super) bucket: ResourceBucketType,
 }
 
@@ -45,12 +45,12 @@ impl ReputationParams {
         self.opportunity_cost(fee_msat, max_hold_time)
     }
 
-    /// Calculates the fee contribution of a htlc, based on its hold time, endorsement and resolution.
+    /// Calculates the fee contribution of a htlc, based on its hold time, accountability and resolution.
     pub(super) fn effective_fees(
         &self,
         fee_msat: u64,
         hold_time: Duration,
-        incoming_endorsed: EndorsementSignal,
+        accountable: AccountableSignal,
         settled: bool,
     ) -> Result<i64, ReputationError> {
         // If the htlc was successful, its fees contribute to our effective fee.
@@ -60,8 +60,8 @@ impl ReputationParams {
             i64::try_from(self.opportunity_cost(fee_msat, hold_time)).unwrap_or(i64::MAX),
         );
 
-        // Unendorsed htlcs do not have a negative impact on reputation.
-        if incoming_endorsed == EndorsementSignal::Unendorsed && effective_fees < 0 {
+        // Unaccountable htlcs do not have a negative impact on reputation.
+        if accountable == AccountableSignal::Unaccountable && effective_fees < 0 {
             return Ok(0);
         }
 
@@ -123,13 +123,13 @@ impl InFlightManager {
             ))
     }
 
-    /// Returns the total htlc risk of all the endorsed htlcs that a channel currently has in-flight on our channels.
+    /// Returns the total htlc risk of all the accountable htlcs that a channel currently has in-flight on our channels.
     pub(super) fn channel_in_flight_risk(&self, filter: ChannelFilter) -> u64 {
         self.in_flight
             .iter()
             .filter(|(k, v)| {
-                // Unendorsed htlcs do not contribute to risk, so no option is given to count them.
-                if v.incoming_endorsed == EndorsementSignal::Unendorsed {
+                // Unaccountable htlcs do not contribute to risk, so no option is given to count them.
+                if v.accountable == AccountableSignal::Unaccountable {
                     return false;
                 }
 
@@ -187,7 +187,7 @@ mod tests {
 
     use crate::htlc_manager::{ChannelFilter, InFlightManager};
     use crate::{
-        EndorsementSignal, HtlcRef, ReputationError, ReputationParams, ResourceBucketType,
+        AccountableSignal, HtlcRef, ReputationError, ReputationParams, ResourceBucketType,
     };
 
     use super::InFlightHtlc;
@@ -203,7 +203,7 @@ mod tests {
 
     fn get_test_htlc(
         outgoing_channel: u64,
-        incoming_endorsed: bool,
+        accountable: bool,
         bucket: ResourceBucketType,
         fee_msat: u64,
     ) -> InFlightHtlc {
@@ -213,10 +213,10 @@ mod tests {
             outgoing_amt_msat: 2000,
             fee_msat,
             added_instant: Instant::now(),
-            incoming_endorsed: if incoming_endorsed {
-                EndorsementSignal::Endorsed
+            accountable: if accountable {
+                AccountableSignal::Accountable
             } else {
-                EndorsementSignal::Unendorsed
+                AccountableSignal::Unaccountable
             },
             bucket,
         }
@@ -326,7 +326,7 @@ mod tests {
             0
         );
 
-        // Endorsed htlc contribute to in flight risk and count, 0 -> 1.
+        // Accountable htlc contribute to in flight risk and count, 0 -> 1.
         let htlc_1_ref = HtlcRef {
             channel_id: channel_0,
             htlc_index: 0,
@@ -336,7 +336,7 @@ mod tests {
             .params
             .htlc_risk(htlc_1.fee_msat, htlc_1.hold_blocks);
 
-        // Endorsed htlc contribute to in flight risk and count despite general bucket, 0 -> 1.
+        // Accountable htlc contribute to in flight risk and count despite general bucket, 0 -> 1.
         let htlc_2_ref = HtlcRef {
             channel_id: channel_1,
             htlc_index: 0,
@@ -346,14 +346,14 @@ mod tests {
             .params
             .htlc_risk(htlc_2.fee_msat, htlc_2.hold_blocks);
 
-        // Unendorsed htlc no contribution to in flight risk, 1 -> 2.
+        // Unaccountable htlc no contribution to in flight risk, 1 -> 2.
         let htlc_3_ref = HtlcRef {
             channel_id: channel_1,
             htlc_index: 1,
         };
         let htlc_3 = get_test_htlc(channel_2, false, ResourceBucketType::General, 100000);
 
-        // Endorsed htlc in congestion bucket still contributes to risk, 1 -> 2.
+        // Accountable htlc in congestion bucket still contributes to risk, 1 -> 2.
         let htlc_4_ref = HtlcRef {
             channel_id: channel_1,
             htlc_index: 2,
@@ -378,7 +378,7 @@ mod tests {
         );
         assert_eq!(
             tracker.channel_in_flight_risk(ChannelFilter::OutgoingChannel(channel_2)),
-            htlc_4_risk, // Unendorsed does not contribute to risk, so no htlc_3.
+            htlc_4_risk, // Unaccountable does not contribute to risk, so no htlc_3.
         );
 
         assert_eq!(
@@ -387,7 +387,7 @@ mod tests {
         );
         assert_eq!(
             tracker.channel_in_flight_risk(ChannelFilter::IncomingChannel(channel_1)),
-            htlc_2_risk + htlc_4_risk, // Unendorsed does not contribute to risk, so no htlc_3.
+            htlc_2_risk + htlc_4_risk, // Unaccountable does not contribute to risk, so no htlc_3.
         );
         assert_eq!(
             tracker.channel_in_flight_risk(ChannelFilter::IncomingChannel(channel_2)),
@@ -428,7 +428,7 @@ mod tests {
             0
         );
 
-        // Endorsed htlc 0 -> 1.
+        // Accountable htlc 0 -> 1.
         let htlc_1_ref = HtlcRef {
             channel_id: channel_0,
             htlc_index: 0,
@@ -466,8 +466,7 @@ mod tests {
             channel_id: channel_0,
             htlc_index: 1,
         };
-        let mut htlc_2 = get_test_htlc(channel_1, true, ResourceBucketType::Protected, 20);
-        htlc_2.incoming_endorsed = EndorsementSignal::Unendorsed;
+        let htlc_2 = get_test_htlc(channel_1, false, ResourceBucketType::Protected, 20);
 
         assert!(tracker.add_htlc(htlc_2_ref, htlc_2.clone()).is_ok());
         assert_eq!(
@@ -502,7 +501,7 @@ mod tests {
         assert!(tracker.congestion_eligible(channel_0));
         assert!(tracker.congestion_eligible(channel_1));
 
-        // Endorsed htlc 0 -> 1.
+        // Accountable htlc 0 -> 1.
         let htlc_1_ref = HtlcRef {
             channel_id: channel_0,
             htlc_index: 0,

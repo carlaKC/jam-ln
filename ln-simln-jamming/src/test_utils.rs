@@ -3,14 +3,13 @@ use std::error::Error;
 use std::time::Instant;
 
 use crate::reputation_interceptor::{BootstrapForward, HtlcAdd, ReputationMonitor};
-use crate::{records_from_endorsement, BoxError};
+use crate::{records_from_signal, BoxError};
 use async_trait::async_trait;
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use lightning::ln::PaymentHash;
-use ln_resource_mgr::forward_manager::Reputation;
 use ln_resource_mgr::{
-    AllocationCheck, BucketResources, ChannelSnapshot, EndorsementSignal, ForwardingOutcome,
-    ProposedForward, ReputationCheck, ReputationError, ReputationValues, ResourceCheck,
+    AccountableSignal, AllocationCheck, BucketResources, ChannelSnapshot, ForwardingOutcome,
+    ProposedForward, ReputationCheck, ReputationError, ResourceCheck,
 };
 use mockall::mock;
 use rand::{distributions::Uniform, Rng};
@@ -58,7 +57,7 @@ pub fn setup_test_request(
     forwarding_node: PublicKey,
     channel_in: u64,
     channel_out: u64,
-    incoming_endorsed: EndorsementSignal,
+    incoming_accountable: AccountableSignal,
 ) -> (
     InterceptRequest,
     tokio::sync::mpsc::Receiver<
@@ -75,7 +74,7 @@ pub fn setup_test_request(
                 channel_id: channel_in.into(),
                 index: 0,
             },
-            incoming_custom_records: records_from_endorsement(incoming_endorsed),
+            incoming_custom_records: records_from_signal(incoming_accountable),
             outgoing_channel_id: Some(ShortChannelID::from(channel_out)),
             incoming_amount_msat: 100,
             outgoing_amount_msat: 50,
@@ -88,17 +87,12 @@ pub fn setup_test_request(
 }
 
 pub fn test_allocation_check(forward_succeeds: bool) -> AllocationCheck {
-    let reputation_values = ReputationValues {
-        reputation: 100_000,
-        revenue_threshold: if forward_succeeds { 0 } else { 200_000 },
-        in_flight_total_risk: 0,
-        htlc_risk: 0,
-    };
-
     let check = AllocationCheck {
         reputation_check: ReputationCheck {
-            incoming_reputation: reputation_values.clone(),
-            outgoing_reputation: reputation_values,
+            reputation: 100_000,
+            revenue_threshold: if forward_succeeds { 0 } else { 200_000 },
+            in_flight_total_risk: 0,
+            htlc_risk: 0,
         },
         congestion_eligible: true,
         resource_check: ResourceCheck {
@@ -119,7 +113,7 @@ pub fn test_allocation_check(forward_succeeds: bool) -> AllocationCheck {
 
     assert!(
         matches!(
-            check.forwarding_outcome(0, EndorsementSignal::Endorsed, true, Reputation::Outgoing),
+            check.forwarding_outcome(0, AccountableSignal::Accountable, true),
             ForwardingOutcome::Forward(_)
         ) == forward_succeeds
     );
@@ -139,8 +133,8 @@ pub fn test_proposed_forward(id: u64) -> ProposedForward {
         expiry_in_height: 80,
         expiry_out_height: 40,
         added_at: Instant::now(),
-        incoming_endorsed: EndorsementSignal::Endorsed,
-        upgradable_endorsement: true,
+        incoming_accountable: AccountableSignal::Accountable,
+        upgradable_accountability: true,
     }
 }
 

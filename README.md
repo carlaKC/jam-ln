@@ -7,8 +7,8 @@ will:
 - Open up channels and forward payments as usual to bootstrap its
   reputation with a target node.
 - Slow jam the target's peers's general resources, so that all HTLCs
-  must be endorsed to reach the target.
-- Hold any endorsed HTLCs from the target with the goal of ruining its
+  must be accountable to reach the target.
+- Hold any accountable HTLCs from the target with the goal of ruining its
   reputation with its peers.
 
 ## Requirements
@@ -53,7 +53,7 @@ channels in the network have been around for at least the
 `reputation_window`.
 
 The simulation will then start, implementing the attack as follows:
-- General jamming the target's peers, so that only endorsed HTLCs
+- General jamming the target's peers, so that only accountable HTLCs
   reach the target node.
 - The attacking node will hold HTLCs for the maximum allowable period
   before risking a force close, then fail them back.
@@ -76,7 +76,7 @@ The simulation will shut down if:
   our best guess at how payments flow in the network.
 - Payments are generated with a fixed seed, but this is not perfectly
   deterministic in sim-ln.
-- The simulator implements "just in time" endorsement, bumping up
-  the endorsement signal of a htlc only if it is required.
+- The simulator implements "just in time" upgradable accountability, bumping up
+  the accountability signal of a htlc only if it is required.
 - At present the simulator only expects one channel between the target
   and attacking node.

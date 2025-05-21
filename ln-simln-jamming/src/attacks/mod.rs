@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use simln_lib::sim_node::InterceptRequest;
 
-use crate::{endorsement_from_records, records_from_endorsement, BoxError, NetworkReputation};
+use crate::{accountable_from_records, records_from_signal, BoxError, NetworkReputation};
 
 pub mod sink;
 
@@ -35,11 +35,11 @@ pub trait JammingAttack {
     /// actions on HTLCs. This function may block, as it is spawned in a task, but *must* eventually send a response to
     /// the request.
     ///
-    /// The default implementation will forward HTLCs immediately, copying whatever incoming endorsement signal it
+    /// The default implementation will forward HTLCs immediately, copying whatever incoming accountable signal it
     /// received.
     async fn intercept_attacker_htlc(&self, req: InterceptRequest) -> Result<(), BoxError> {
         req.response
-            .send(Ok(Ok(records_from_endorsement(endorsement_from_records(
+            .send(Ok(Ok(records_from_signal(accountable_from_records(
                 &req.incoming_custom_records,
             )))))
             .await
