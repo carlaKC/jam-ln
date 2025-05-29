@@ -1,4 +1,4 @@
-use crate::reputation_interceptor::{BoostrapRecords, BootstrapForward};
+use crate::reputation_interceptor::{BootstrapForward, BootstrapRecords};
 use crate::revenue_interceptor::RevenueEvent;
 use crate::BoxError;
 use bitcoin::secp256k1::PublicKey;
@@ -446,7 +446,7 @@ pub fn get_history_for_bootstrap(
     attacker_bootstrap: Duration,
     unfiltered_history: Vec<BootstrapForward>,
     attacker_channels: HashSet<u64>,
-) -> Result<BoostrapRecords, BoxError> {
+) -> Result<BootstrapRecords, BoxError> {
     let last_timestamp_nanos = unfiltered_history
         .iter()
         .max_by(|x, y| x.settled_ns.cmp(&y.settled_ns))
@@ -462,7 +462,7 @@ pub fn get_history_for_bootstrap(
     }
     let bootstrap_cutoff = last_timestamp_nanos - attacker_bootstrap.as_nanos() as u64;
 
-    Ok(BoostrapRecords {
+    Ok(BootstrapRecords {
         forwards: unfiltered_history
             .into_iter()
             .filter(|forward| {

@@ -22,7 +22,7 @@ use ln_simln_jamming::{
         DEFAULT_REPUTATION_MULTIPLIER, DEFAULT_REVENUE_FILENAME, DEFAULT_REVENUE_WINDOW_SECONDS,
         DEFAULT_SIM_FILE,
     },
-    reputation_interceptor::{BoostrapRecords, ReputationInterceptor, ReputationMonitor},
+    reputation_interceptor::{BootstrapRecords, ReputationInterceptor, ReputationMonitor},
     BoxError,
 };
 use log::LevelFilter;
@@ -120,7 +120,7 @@ async fn main() -> Result<(), BoxError> {
             .max_by(|x, y| x.settled_ns.cmp(&y.settled_ns))
             .ok_or("at least one entry required in bootstrap history")?
             .settled_ns;
-        BoostrapRecords {
+        BootstrapRecords {
             forwards: unfiltered_history,
             last_timestamp_nanos,
         }

@@ -40,7 +40,7 @@ enum BootstrapEvent {
     BootstrapResolve(HtlcResolve),
 }
 
-pub struct BoostrapRecords {
+pub struct BootstrapRecords {
     pub forwards: Vec<BootstrapForward>,
     pub last_timestamp_nanos: u64,
 }
@@ -270,7 +270,7 @@ where
     /// Bootstraps the reputation of nodes in the interceptor network using the historical forwards provided.
     pub async fn bootstrap_network_history(
         &mut self,
-        bootstrap: &BoostrapRecords,
+        bootstrap: &BootstrapRecords,
     ) -> Result<(), BoxError> {
         // We'll get all instants relative to the last timestamp we're given, so we get an instant now and track
         // the last timestamp in the set of forwards.
@@ -611,7 +611,7 @@ mod tests {
     };
     use mockall::mock;
     use simln_lib::clock::SimulationClock;
-    use simln_lib::sim_node::{ChannelPolicy, ForwardingError, InterceptResolution, Interceptor};
+    use simln_lib::sim_node::{ChannelPolicy, InterceptResolution, Interceptor};
     use simln_lib::{NetworkParser, ShortChannelID};
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -621,7 +621,7 @@ mod tests {
 
     use crate::analysis::BatchForwardWriter;
     use crate::clock::InstantClock;
-    use crate::reputation_interceptor::{BoostrapRecords, BootstrapForward};
+    use crate::reputation_interceptor::{BootstrapForward, BootstrapRecords};
     use crate::test_utils::{get_random_keypair, setup_test_request, test_allocation_check};
     use crate::{accountable_from_records, BoxError};
 
@@ -799,7 +799,7 @@ mod tests {
 
         assert!(matches!(
             accountable_from_records(&receiver.recv().await.unwrap().unwrap().unwrap()),
-            AccountableSignal::Accountable
+            AccountableSignal::Unaccountable
         ));
     }
 
@@ -1052,7 +1052,7 @@ mod tests {
             .unwrap();
 
         interceptor
-            .bootstrap_network_history(&BoostrapRecords {
+            .bootstrap_network_history(&BootstrapRecords {
                 forwards: bootstrap,
                 last_timestamp_nanos: 1_000_000,
             })
@@ -1103,7 +1103,8 @@ mod tests {
             AccountableSignal::Unaccountable,
         ));
 
-        // An unaccountable htlc using the jammed channel should be failed because there are no resources.
+        // An unaccountable htlc using the jammed channel would get access to congestion bucket and
+        // be upgraded to accountable.
         let (request, mut receiver) = setup_test_request(
             edges[1].node_1.pubkey,
             bob_to_carol,
@@ -1113,8 +1114,8 @@ mod tests {
 
         interceptor.intercept_htlc(request).await;
         assert!(matches!(
-            receiver.recv().await.unwrap().unwrap().err().unwrap(),
-            ForwardingError::InterceptorError(_),
+            accountable_from_records(&receiver.recv().await.unwrap().unwrap().unwrap()),
+            AccountableSignal::Accountable,
         ));
     }
 
