@@ -2,14 +2,14 @@
 use std::error::Error;
 use std::time::Instant;
 
-use crate::reputation_interceptor::{BootstrapForward, HtlcAdd, ReputationMonitor};
+use crate::reputation_interceptor::{BootstrapForward, ReputationMonitor};
 use crate::{records_from_signal, BoxError};
 use async_trait::async_trait;
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use lightning::ln::PaymentHash;
 use ln_resource_mgr::{
     AccountableSignal, AllocationCheck, BucketResources, ChannelSnapshot, ForwardingOutcome,
-    ProposedForward, ReputationCheck, ReputationError, ResourceCheck,
+    ProposedForward, ReputationCheck, ResourceCheck,
 };
 use mockall::mock;
 use rand::{distributions::Uniform, Rng};
@@ -33,7 +33,6 @@ mock! {
     #[async_trait]
     impl ReputationMonitor for ReputationInterceptor{
         async fn list_channels(&self, node: PublicKey, access_ins: Instant) -> Result<HashMap<u64, ChannelSnapshot>, BoxError>;
-        async fn check_htlc_outcome(&self,htlc_add: HtlcAdd) -> Result<ForwardingOutcome, ReputationError>;
     }
 }
 

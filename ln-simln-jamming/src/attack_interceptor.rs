@@ -102,11 +102,10 @@ mod tests {
     use std::sync::Arc;
 
     use crate::attacks::JammingAttack;
-    use crate::reputation_interceptor::HtlcAdd;
     use crate::test_utils::{get_random_keypair, setup_test_request, MockReputationInterceptor};
     use crate::{records_from_signal, BoxError, NetworkReputation};
     use async_trait::async_trait;
-    use ln_resource_mgr::{AccountableSignal, FailureReason, ForwardingOutcome};
+    use ln_resource_mgr::AccountableSignal;
     use mockall::mock;
     use mockall::predicate::function;
     use simln_lib::sim_node::{InterceptRequest, Interceptor};
@@ -211,21 +210,7 @@ mod tests {
         let (peer_to_target, _) =
             setup_test_request(peer_pubkey, 5, 1, AccountableSignal::Unaccountable);
 
-        // Expect a reputation check that passes, then pass the htlc on to the reputation interceptor accountable.
-        interceptor
-            .reputation_interceptor
-            .lock()
-            .await
-            .expect_check_htlc_outcome()
-            .with(function(move |req: &HtlcAdd| {
-                req.htlc.incoming_ref.channel_id == peer_to_target.incoming_htlc.channel_id.into()
-                    && req.htlc.outgoing_channel_id
-                        == peer_to_target.outgoing_channel_id.unwrap().into()
-                    && req.htlc.incoming_accountable == AccountableSignal::Accountable
-            }))
-            .return_once(|_| Ok(ForwardingOutcome::Forward(AccountableSignal::Accountable)));
         mock_intercept_htlc(interceptor.reputation_interceptor.clone(), &peer_to_target).await;
-
         interceptor.intercept_htlc(peer_to_target).await;
     }
 
@@ -238,20 +223,6 @@ mod tests {
         let peer_pubkey = get_random_keypair().1;
         let (peer_to_target, _) =
             setup_test_request(peer_pubkey, 5, 1, AccountableSignal::Unaccountable);
-
-        // Expect a reputation check that fails, then an interceptor response.
-        interceptor
-            .reputation_interceptor
-            .lock()
-            .await
-            .expect_check_htlc_outcome()
-            .with(function(move |req: &HtlcAdd| {
-                req.htlc.incoming_ref.channel_id == peer_to_target.incoming_htlc.channel_id.into()
-                    && req.htlc.outgoing_channel_id
-                        == peer_to_target.outgoing_channel_id.unwrap().into()
-                    && req.htlc.incoming_accountable == AccountableSignal::Accountable
-            }))
-            .return_once(|_| Ok(ForwardingOutcome::Fail(FailureReason::NoReputation)));
 
         mock_intercept_htlc(interceptor.reputation_interceptor.clone(), &peer_to_target).await;
         interceptor.intercept_htlc(peer_to_target).await;

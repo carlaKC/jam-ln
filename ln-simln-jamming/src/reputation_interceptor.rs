@@ -71,11 +71,6 @@ pub trait ReputationMonitor {
         node: PublicKey,
         access_ins: Instant,
     ) -> Result<HashMap<u64, ChannelSnapshot>, BoxError>;
-
-    async fn check_htlc_outcome(
-        &self,
-        htlc_add: HtlcAdd,
-    ) -> Result<ForwardingOutcome, ReputationError>;
 }
 
 struct Node<M>
@@ -480,36 +475,6 @@ where
             .forward_manager
             .list_channels(access_ins)
             .map_err(|e| e.into())
-    }
-
-    /// Checks the forwarding decision for a htlc without adding it to internal state.
-    async fn check_htlc_outcome(
-        &self,
-        htlc_add: HtlcAdd,
-    ) -> Result<ForwardingOutcome, ReputationError> {
-        match self
-            .network_nodes
-            .lock()
-            .await
-            .entry(htlc_add.forwarding_node)
-        {
-            Entry::Occupied(e) => {
-                let allocation_check = e
-                    .get()
-                    .forward_manager
-                    .get_forwarding_outcome(&htlc_add.htlc)?;
-
-                Ok(allocation_check.forwarding_outcome(
-                    htlc_add.htlc.amount_out_msat,
-                    htlc_add.htlc.incoming_accountable,
-                    htlc_add.htlc.upgradable_accountability,
-                ))
-            }
-            Entry::Vacant(_) => Err(ReputationError::ErrUnrecoverable(format!(
-                "node not found: {}",
-                htlc_add.forwarding_node,
-            ))),
-        }
     }
 }
 

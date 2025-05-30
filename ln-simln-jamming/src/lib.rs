@@ -177,13 +177,13 @@ fn print_request(req: &InterceptRequest) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::reputation_interceptor::{HtlcAdd, ReputationMonitor};
+    use crate::reputation_interceptor::ReputationMonitor;
     use crate::test_utils::get_random_keypair;
     use crate::{count_reputation_pairs, get_network_reputation};
     use crate::{BoxError, NetworkReputation};
     use async_trait::async_trait;
     use bitcoin::secp256k1::PublicKey;
-    use ln_resource_mgr::{ChannelSnapshot, ForwardingOutcome, ReputationError};
+    use ln_resource_mgr::ChannelSnapshot;
     use mockall::mock;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -196,7 +196,6 @@ mod tests {
         #[async_trait]
         impl ReputationMonitor for Monitor{
             async fn list_channels(&self, node: PublicKey, access_ins: Instant) -> Result<HashMap<u64, ChannelSnapshot>, BoxError>;
-            async fn check_htlc_outcome(&self,htlc_add: HtlcAdd) -> Result<ForwardingOutcome, ReputationError>;
         }
     }
 
