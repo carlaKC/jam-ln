@@ -144,6 +144,8 @@ impl Display for ForwardingOutcome {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum FailureReason {
+    /// The limit of general resources available to the outgoing channel has been hit.
+    GeneralResourceLimit,
     /// There is no space in the incoming channel's general resource bucket, so the htlc should be failed back.
     NoGeneralResources,
     /// There are no resources on the incoming channel, so the htlc should be failed back.
@@ -160,6 +162,8 @@ pub struct AllocationCheck {
     /// The reputation values used to compare the incoming channel's revenue to the outgoing channel's reputation for
     /// the htlc proposed.
     pub reputation_check: ReputationCheck,
+    /// Indicates whether the outgoing channel may use general resources for the HTLC.
+    pub general_eligible: bool,
     /// Indicates whether the outgoing channel is eligible to consume congestion resources.
     pub congestion_eligible: bool,
     /// The resources available on the incoming channel.
@@ -256,6 +260,8 @@ impl AllocationCheck {
                             .general_bucket
                             .resources_available(htlc_amt_msat)
                         {
+                            // TODO: should we limit high reputation peers to their allocated
+                            // general resources?
                             Ok(ResourceBucketType::General)
                         } else if self.congestion_eligible
                             && self.congestion_resources_available(htlc_amt_msat)
@@ -278,7 +284,11 @@ impl AllocationCheck {
                     .general_bucket
                     .resources_available(htlc_amt_msat)
                 {
-                    Ok(ResourceBucketType::General)
+                    if self.general_eligible {
+                        Ok(ResourceBucketType::General)
+                    } else {
+                        Err(FailureReason::GeneralResourceLimit)
+                    }
                 } else if self.reputation_check.sufficient_reputation() && incoming_upgradable {
                     // If the peer has reputation, use protected bucket.
                     Ok(ResourceBucketType::Protected)
@@ -393,6 +403,7 @@ impl BucketResources {
 impl Display for FailureReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            FailureReason::GeneralResourceLimit => write!(f, "general resource limit hit"),
             FailureReason::NoGeneralResources => write!(f, "no general resources"),
             FailureReason::NoResources => write!(f, "no resources"),
             FailureReason::NoReputation => write!(f, "no reputation"),
@@ -591,6 +602,7 @@ mod tests {
                 in_flight_total_risk: 0,
                 htlc_risk: 0,
             },
+            general_eligible: true,
             congestion_eligible: true,
             resource_check: ResourceCheck {
                 general_bucket: BucketResources {
