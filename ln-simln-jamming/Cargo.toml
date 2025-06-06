@@ -7,6 +7,10 @@ edition = "2021"
 name = "reputation-builder"
 path = "src/bin/reputation_builder.rs"
 
+[[bin]]
+name = "forward-builder"
+path = "src/bin/forward_builder.rs"
+
 [dependencies]
 simln-lib = { git = "https://github.com/carlaKC/sim-ln", rev = "0e58f73" }
 ln-resource-mgr = { path = "../ln-resource-mgr" }
