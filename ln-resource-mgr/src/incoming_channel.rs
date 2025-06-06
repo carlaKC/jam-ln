@@ -1,3 +1,6 @@
+use crate::restricted_bucket::RestrictedBucket;
+use crate::ReputationError;
+
 /// Describes the size of a resource bucket.
 #[derive(Clone, Debug)]
 pub struct BucketParameters {
@@ -20,19 +23,27 @@ pub(super) struct IncomingChannel {
     /// The resources available on the protected bucket. This will be used by htlcs that are
     /// accountable from peers that have sufficient reputation.
     pub(super) protected_bucket: BucketParameters,
+
+    pub(super) general_resources: RestrictedBucket,
 }
 
 impl IncomingChannel {
     pub(super) fn new(
+        scid: u64,
         general_bucket: BucketParameters,
         congestion_bucket: BucketParameters,
         protected_bucket: BucketParameters,
-    ) -> Self {
-        Self {
-            general_bucket,
+    ) -> Result<Self, ReputationError> {
+        Ok(Self {
+            general_bucket: general_bucket.clone(),
             congestion_bucket,
             protected_bucket,
-        }
+            general_resources: RestrictedBucket::new(
+                scid,
+                general_bucket.liquidity_msat,
+                general_bucket.slot_count,
+            )?,
+        })
     }
 
     pub(super) fn general_jam_channel(&mut self) {
@@ -40,5 +51,23 @@ impl IncomingChannel {
             slot_count: 0,
             liquidity_msat: 0,
         };
+    }
+
+    pub(super) fn general_eligible(
+        &mut self,
+        outgoing_scid: u64,
+        incoming_amt_msat: u64,
+    ) -> Result<bool, ReputationError> {
+        self.general_resources
+            .may_add_htlc(outgoing_scid, incoming_amt_msat)
+    }
+
+    pub(super) fn add_to_general(
+        &mut self,
+        outgoing_scid: u64,
+        incoming_amt_msat: u64,
+    ) -> Result<bool, ReputationError> {
+        self.general_resources
+            .add_htlc(outgoing_scid, incoming_amt_msat)
     }
 }

@@ -185,6 +185,9 @@ impl ForwardManagerImpl {
                     .htlcs
                     .htlc_risk(forward.fee_msat(), forward.expiry_in_height),
             },
+            general_eligible: incoming_channel
+                .incoming_direction
+                .general_eligible(forward.outgoing_channel_id, forward.amount_in_msat)?,
             // The outgoing channel can only use congestion resources if it hasn't recently misused congestion
             // resources and it doesn't currently have any htlcs using them.
             congestion_eligible: no_congestion_misuse
@@ -337,6 +340,7 @@ impl ReputationManager for ForwardManager {
                 v.insert(TrackedChannel {
                     capacity_msat,
                     incoming_direction: IncomingChannel::new(
+                        channel_id,
                         BucketParameters {
                             slot_count: general_slot_count,
                             liquidity_msat: general_liquidity_amount,
@@ -349,7 +353,7 @@ impl ReputationManager for ForwardManager {
                             slot_count: protected_slot_count,
                             liquidity_msat: protected_liquidity_amount,
                         },
-                    ),
+                    )?,
                     outgoing_direction: OutgoingChannel::new(
                         self.params.reputation_params,
                         outgoing_reputation,
@@ -401,6 +405,7 @@ impl ReputationManager for ForwardManager {
 
         let fwd_outcome = match fwd_outcome {
             Ok(fwd_sucess) => {
+                // TODO: we need to add to the incoming channel here but it's not avail
                 inner_lock.htlcs.add_htlc(
                     forward.incoming_ref,
                     InFlightHtlc {
@@ -438,6 +443,7 @@ impl ReputationManager for ForwardManager {
             .htlcs
             .remove_htlc(outgoing_channel, incoming_ref)?;
 
+        // TODO: remove from incoming channel
         inner_lock
             .channels
             .get_mut(&outgoing_channel)
