@@ -4,6 +4,7 @@ pub use htlc_manager::ReputationParams;
 mod htlc_manager;
 mod incoming_channel;
 mod outgoing_channel;
+mod restricted_bucket;
 
 use serde::Serialize;
 use std::collections::HashMap;
