@@ -93,6 +93,7 @@ pub fn test_allocation_check(forward_succeeds: bool) -> AllocationCheck {
             in_flight_total_risk: 0,
             htlc_risk: 0,
         },
+        general_eligible: true,
         congestion_eligible: true,
         resource_check: ResourceCheck {
             general_bucket: BucketResources {

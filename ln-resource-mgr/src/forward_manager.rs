@@ -185,6 +185,10 @@ impl ForwardManagerImpl {
                     .htlcs
                     .htlc_risk(forward.fee_msat(), forward.expiry_in_height),
             },
+            general_eligible: incoming_channel
+                .incoming_direction
+                .general_bucket
+                .may_add_htlc(forward.outgoing_channel_id, forward.amount_in_msat)?,
             // The outgoing channel can only use congestion resources if it hasn't recently misused congestion
             // resources and it doesn't currently have any htlcs using them.
             congestion_eligible: no_congestion_misuse
@@ -198,6 +202,7 @@ impl ForwardManagerImpl {
                     slots_available: incoming_channel
                         .incoming_direction
                         .general_bucket
+                        .params
                         .slot_count,
                     liquidity_used_msat: self.htlcs.bucket_in_flight_msat(
                         forward.incoming_ref.channel_id,
@@ -206,6 +211,7 @@ impl ForwardManagerImpl {
                     liquidity_available_msat: incoming_channel
                         .incoming_direction
                         .general_bucket
+                        .params
                         .liquidity_msat,
                 },
                 congestion_bucket: BucketResources {
@@ -337,6 +343,7 @@ impl ReputationManager for ForwardManager {
                 v.insert(TrackedChannel {
                     capacity_msat,
                     incoming_direction: IncomingChannel::new(
+                        channel_id,
                         BucketParameters {
                             slot_count: general_slot_count,
                             liquidity_msat: general_liquidity_amount,
@@ -349,7 +356,7 @@ impl ReputationManager for ForwardManager {
                             slot_count: protected_slot_count,
                             liquidity_msat: protected_liquidity_amount,
                         },
-                    ),
+                    )?,
                     outgoing_direction: OutgoingChannel::new(
                         self.params.reputation_params,
                         outgoing_reputation,
@@ -398,6 +405,23 @@ impl ReputationManager for ForwardManager {
 
         let fwd_outcome = match fwd_outcome {
             Ok(fwd_sucess) => {
+                // Add to our inner channel's bucket, failing if we can't add the HTLC. We've just
+                // checked our forwarding outcome and our state is locked so this should always
+                // succeed.
+                if fwd_sucess.bucket == ResourceBucketType::General
+                    && !inner_lock
+                        .channels
+                        .get_mut(&forward.incoming_ref.channel_id)
+                        .ok_or(ReputationError::ErrIncomingNotFound(
+                            forward.incoming_ref.channel_id,
+                        ))?
+                        .incoming_direction
+                        .general_bucket
+                        .add_htlc(forward.outgoing_channel_id, forward.amount_in_msat)?
+                {
+                    return Err(ReputationError::ErrUnrecoverable("Could not assign HTLC previously considered eligible with internal lock held - we have a bug!".to_string()));
+                }
+
                 inner_lock.htlcs.add_htlc(
                     forward.incoming_ref,
                     InFlightHtlc {
@@ -434,6 +458,18 @@ impl ReputationManager for ForwardManager {
         let in_flight = inner_lock
             .htlcs
             .remove_htlc(outgoing_channel, incoming_ref)?;
+
+        if in_flight.bucket == ResourceBucketType::General {
+            inner_lock
+                .channels
+                .get_mut(&incoming_ref.channel_id)
+                .ok_or(ReputationError::ErrIncomingNotFound(
+                    incoming_ref.channel_id,
+                ))?
+                .incoming_direction
+                .general_bucket
+                .remove_htlc(outgoing_channel, in_flight.incoming_amt_msat)?;
+        }
 
         inner_lock
             .channels
