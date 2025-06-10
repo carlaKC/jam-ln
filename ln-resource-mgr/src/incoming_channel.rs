@@ -19,7 +19,7 @@ pub struct BucketParameters {
 #[derive(Debug)]
 pub(super) struct IncomingChannel {
     /// The resources available for htlcs that are not accountable, or are not sent by a peer with sufficient reputation.
-    pub(super) general_bucket: BucketParameters,
+    pub(super) general_bucket: GeneralBucket,
 
     /// The resources available for htlcs that are accountable from peers that do not have sufficient reputation. This
     /// bucket is only used when the general bucket is full, and peers are limited to a single slot/liquidity block.
@@ -32,19 +32,20 @@ pub(super) struct IncomingChannel {
 
 impl IncomingChannel {
     pub(super) fn new(
+        scid: u64,
         general_bucket: BucketParameters,
         congestion_bucket: BucketParameters,
         protected_bucket: BucketParameters,
-    ) -> Self {
-        Self {
-            general_bucket,
+    ) -> Result<Self, ReputationError> {
+        Ok(Self {
+            general_bucket: GeneralBucket::new(scid, general_bucket)?,
             congestion_bucket,
             protected_bucket,
-        }
+        })
     }
 
     pub(super) fn general_jam_channel(&mut self) {
-        self.general_bucket = BucketParameters {
+        self.general_bucket.params = BucketParameters {
             slot_count: 0,
             liquidity_msat: 0,
         };
