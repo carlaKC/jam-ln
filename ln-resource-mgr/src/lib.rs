@@ -46,6 +46,8 @@ pub enum ReputationError {
     ErrChannelNotFound(u64),
     /// Channel capacity does not match capacity in channel snapshot.
     ErrChannelCapacityMismatch(u64, u64),
+    /// A HTLC has been removed from a bucket that doesn't hold enough for it to be removed.
+    ErrBucketTooEmpty(u64),
 }
 
 impl Error for ReputationError {}
@@ -97,6 +99,12 @@ impl Display for ReputationError {
             }
             ReputationError::ErrChannelCapacityMismatch(capacity, snapshot_capacity) => {
                 write!(f, "channel capacity {capacity} does not match snapshot capacity {snapshot_capacity}")
+            }
+            ReputationError::ErrBucketTooEmpty(amt_msat) => {
+                write!(
+                    f,
+                    "HTLC amount {amt_msat} has been removed from bucket that doesn't contain it"
+                )
             }
         }
     }
