@@ -143,17 +143,6 @@ fn count_reputation_pairs(
         .count())
 }
 
-/// Sends a result to an interception request.
-#[macro_export]
-macro_rules! send_intercept_result {
-    ($req:expr, $result:expr, $shutdown:expr) => {
-        if let Err(e) = $req.response.send($result).await {
-            log::error!("Could not send to interceptor: {e}");
-            $shutdown.trigger();
-        }
-    };
-}
-
 /// Prints the details of an interception request.
 fn print_request(req: &InterceptRequest) -> String {
     format!(

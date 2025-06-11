@@ -134,7 +134,6 @@ async fn main() -> Result<(), BoxError> {
         }
     });
 
-    let (shutdown, _listener) = triggered::trigger();
     let clock = Arc::new(SimulationClock::new(1)?);
     let forward_params = ForwardManagerParams {
         reputation_params: ReputationParams {
@@ -156,7 +155,6 @@ async fn main() -> Result<(), BoxError> {
             &sim_network,
             reputation_clock,
             None,
-            shutdown,
         )?;
 
     reputation_interceptor

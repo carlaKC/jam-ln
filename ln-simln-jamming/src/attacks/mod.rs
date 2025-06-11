@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
-use simln_lib::sim_node::InterceptRequest;
+use simln_lib::sim_node::{CustomRecords, ForwardingError, InterceptRequest};
 
 use crate::{accountable_from_records, records_from_signal, BoxError, NetworkReputation};
 
@@ -32,18 +32,17 @@ pub trait JammingAttack {
     }
 
     /// Called for evey HTLC that is forwarded through or to attacking nodes, to allow the attacker to take custom
-    /// actions on HTLCs. This function may block, as it is spawned in a task, but *must* eventually send a response to
-    /// the request.
+    /// actions on HTLCs. This function may block, as it is spawned in a task, but *must* eventually return a result.
     ///
     /// The default implementation will forward HTLCs immediately, copying whatever incoming accountable signal it
     /// received.
-    async fn intercept_attacker_htlc(&self, req: InterceptRequest) -> Result<(), BoxError> {
-        req.response
-            .send(Ok(Ok(records_from_signal(accountable_from_records(
-                &req.incoming_custom_records,
-            )))))
-            .await
-            .map_err(|e| e.into())
+    async fn intercept_attacker_htlc(
+        &self,
+        req: InterceptRequest,
+    ) -> Result<Result<CustomRecords, ForwardingError>, BoxError> {
+        return Ok(Ok(records_from_signal(accountable_from_records(
+            &req.incoming_custom_records,
+        ))));
     }
 
     /// Returns a boolean that indicates whether a shutdown condition for the simulation has been reached.

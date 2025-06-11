@@ -17,11 +17,12 @@ use ln_simln_jamming::{
     get_network_reputation, BoxError, NetworkReputation, ACCOUNTABLE_TYPE, UPGRADABLE_TYPE,
 };
 use log::LevelFilter;
+use sim_cli::parsing::{create_simulation_with_network, SimParams};
 use simln_lib::clock::Clock;
 use simln_lib::clock::SimulationClock;
-use simln_lib::interceptors::LatencyIntercepor;
-use simln_lib::sim_node::{CustomRecords, Interceptor, SimulatedChannel};
-use simln_lib::{Simulation, SimulationCfg};
+use simln_lib::latency_interceptor::LatencyIntercepor;
+use simln_lib::sim_node::{CustomRecords, Interceptor};
+use simln_lib::SimulationCfg;
 use simple_logger::SimpleLogger;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -31,7 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::select;
 use tokio::sync::Mutex;
-use tokio::task::JoinSet;
+use tokio_util::task::TaskTracker;
 
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
@@ -51,7 +52,7 @@ async fn main() -> Result<(), BoxError> {
     let SimNetwork { sim_network } =
         serde_json::from_str(&fs::read_to_string(cli.sim_file.as_path())?)?;
 
-    let mut tasks = JoinSet::new();
+    let tasks = TaskTracker::new();
     let (shutdown, listener) = triggered::trigger();
 
     // Match the target alias using pubkeys provided in sim network file, then collect the pubkeys of all the
@@ -141,7 +142,6 @@ async fn main() -> Result<(), BoxError> {
             reputation_snapshot,
             clock.clone(),
             Some(results_writer),
-            shutdown.clone(),
         )
         .await?,
     ));
@@ -163,7 +163,6 @@ async fn main() -> Result<(), BoxError> {
         risk_margin,
         reputation_interceptor.clone(),
         listener.clone(),
-        shutdown.clone(),
     )));
     let attack_setup = attack.lock().await.setup_for_network()?;
     reputation_interceptor
@@ -195,7 +194,6 @@ async fn main() -> Result<(), BoxError> {
         attacker_pubkey,
         reputation_interceptor.clone(),
         attack.clone(),
-        shutdown.clone(),
     );
 
     let attack_interceptor = Arc::new(attack_interceptor);
@@ -265,32 +263,30 @@ async fn main() -> Result<(), BoxError> {
         revenue_interceptor.clone(),
     ];
 
-    // Simulated channels for our simulated graph.
-    let channels = sim_network
-        .clone()
-        .into_iter()
-        .map(SimulatedChannel::from)
-        .collect::<Vec<SimulatedChannel>>();
-
     let custom_records =
         CustomRecords::from([(UPGRADABLE_TYPE, vec![1]), (ACCOUNTABLE_TYPE, vec![0])]);
 
     // Setup the simulated network with our fake graph.
-    let (simulation, graph) = Simulation::new_with_sim_network(
-        SimulationCfg::new(None, 3_800_000, 2.0, None, Some(13995354354227336701)),
-        channels,
-        vec![], // No activities, we want random activity!
-        clock.clone(),
-        custom_records,
+    let sim_params = SimParams {
+        nodes: vec![],
+        sim_network,
+        activity: vec![],
+        exclude: vec![],
+    };
+
+    let sim_cfg = SimulationCfg::new(None, 3_800_000, 2.0, None, Some(13995354354227336701));
+    let (simulation, validated_activities) = create_simulation_with_network(
+        sim_cfg,
+        &sim_params,
+        cli.clock_speedup,
+        tasks,
         interceptors,
-        (shutdown, listener),
+        custom_records,
     )
-    .await
-    .map_err(|e| anyhow::anyhow!(e))?;
+    .await?;
 
     // Run simulation until it shuts down, then wait for the graph to exit.
-    simulation.run().await?;
-    graph.lock().await.wait_for_shutdown().await;
+    simulation.run(&validated_activities).await?;
 
     // Write start and end state to a summary file.
     let end_reputation = get_network_reputation(

@@ -11,6 +11,6 @@ impl InstantClock for SimulationClock {
         let start_instant_std = self.get_start_instant().into();
         let elapsed = Instant::now().duration_since(start_instant_std);
 
-        start_instant_std.add(elapsed * self.get_speedup_multiplier())
+        start_instant_std.add(elapsed * self.get_speedup_multiplier().into())
     }
 }

@@ -8,7 +8,8 @@ name = "reputation-builder"
 path = "src/bin/reputation_builder.rs"
 
 [dependencies]
-simln-lib = { git = "https://github.com/carlaKC/sim-ln", rev = "0e58f73" }
+simln-lib = { git = "https://github.com/bitcoin-dev-project/sim-ln", rev = "9eedadb8175d9fd21750155e683c04cbe3685a9f" }
+sim-cli = { git = "https://github.com/bitcoin-dev-project/sim-ln", rev = "9eedadb8175d9fd21750155e683c04cbe3685a9f" }
 ln-resource-mgr = { path = "../ln-resource-mgr" }
 bitcoin = { version = "0.30.1" }
 async-trait = "0.1.73"
@@ -26,4 +27,5 @@ humantime = "2.1.0"
 futures = "0.3.31"
 rand = "0.8.5"
 mockall = "0.13.1"
-lightning = { version = "0.0.121" }
+lightning = { version = "0.0.123" }
+tokio-util = { version = "0.7.15", features = ["rt"] }

@@ -10,16 +10,17 @@ use ln_resource_mgr::{
     AccountableSignal, ChannelSnapshot, ForwardResolution, ForwardingOutcome, HtlcRef,
     ProposedForward, ReputationError, ReputationManager,
 };
-use simln_lib::sim_node::{ForwardingError, InterceptRequest, InterceptResolution, Interceptor};
-use simln_lib::NetworkParser;
+use sim_cli::parsing::NetworkParser;
+use simln_lib::sim_node::{
+    CriticalError, CustomRecords, ForwardingError, InterceptRequest, InterceptResolution,
+    Interceptor,
+};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::error::Error;
 use std::ops::Sub;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use triggered::Trigger;
 
 #[derive(Clone)]
 pub struct HtlcAdd {
@@ -104,7 +105,6 @@ where
     network_nodes: Arc<Mutex<HashMap<PublicKey, Node<M>>>>,
     clock: Arc<dyn InstantClock + Send + Sync>,
     results: Option<Arc<Mutex<R>>>,
-    shutdown: Trigger,
 }
 
 impl<R> ReputationInterceptor<R, ForwardManager>
@@ -116,7 +116,6 @@ where
         edges: &[NetworkParser],
         clock: Arc<dyn InstantClock + Send + Sync>,
         results: Option<Arc<Mutex<R>>>,
-        shutdown: Trigger,
     ) -> Result<Self, BoxError> {
         let mut network_nodes: HashMap<PublicKey, Node<ForwardManager>> = HashMap::new();
 
@@ -166,7 +165,6 @@ where
             network_nodes: Arc::new(Mutex::new(network_nodes)),
             clock,
             results,
-            shutdown,
         })
     }
 
@@ -176,7 +174,6 @@ where
         reputation_snapshot: HashMap<PublicKey, HashMap<u64, ChannelSnapshot>>,
         clock: Arc<dyn InstantClock + Send + Sync>,
         results: Option<Arc<Mutex<R>>>,
-        shutdown: Trigger,
     ) -> Result<Self, BoxError> {
         let mut network_nodes = HashMap::with_capacity(reputation_snapshot.len());
 
@@ -236,7 +233,7 @@ where
             != reputation_snapshot
                 .values()
                 .map(|chan_map| chan_map.len())
-                .sum()
+                .sum::<usize>()
         {
             return Err("number of channels in snapshot and network graph do not match".into());
         }
@@ -245,7 +242,6 @@ where
             network_nodes: Arc::new(Mutex::new(network_nodes)),
             clock,
             results,
-            shutdown,
         })
     }
 
@@ -366,7 +362,7 @@ where
         &self,
         htlc_add: HtlcAdd,
         report: bool,
-    ) -> Result<Result<HashMap<u64, Vec<u8>>, ForwardingError>, ReputationError> {
+    ) -> Result<Result<CustomRecords, ForwardingError>, ReputationError> {
         // If the forwarding node can't be found, we've hit a critical error and can't proceed.
         let (allocation_check, fwd_outcome, alias) = match self
             .network_nodes
@@ -415,17 +411,14 @@ where
             ForwardingOutcome::Forward(accountable_signal) => {
                 Ok(Ok(records_from_signal(accountable_signal)))
             }
-            ForwardingOutcome::Fail(reason) => Ok(Err(ForwardingError::InterceptorError(
-                reason.to_string().into(),
-            ))),
+            ForwardingOutcome::Fail(reason) => {
+                Ok(Err(ForwardingError::InterceptorError(reason.to_string())))
+            }
         }
     }
 
     /// Removes a htlc from the jamming interceptor, reporting its success/failure to the inner state machine.
-    async fn inner_resolve_htlc(
-        &self,
-        resolved_htlc: HtlcResolve,
-    ) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+    async fn inner_resolve_htlc(&self, resolved_htlc: HtlcResolve) -> Result<(), ReputationError> {
         log::info!(
             "Resolving htlc {}:{} on {} with outcome {}",
             resolved_htlc.incoming_htlc.channel_id,
@@ -446,9 +439,10 @@ where
                 resolved_htlc.forward_resolution,
                 resolved_htlc.resolved_ins,
             )?),
-            Entry::Vacant(_) => {
-                Err(format!("Node: {} not found", resolved_htlc.forwarding_node).into())
-            }
+            Entry::Vacant(_) => Err(ReputationError::ErrUnrecoverable(format!(
+                "Node: {} not found",
+                resolved_htlc.forwarding_node
+            ))),
         }
     }
 }
@@ -482,22 +476,15 @@ where
     M: ReputationManager + Send + Sync,
 {
     /// Implemented by HTLC interceptors that provide input on the resolution of HTLCs forwarded in the simulation.
-    async fn intercept_htlc(&self, req: InterceptRequest) {
+    async fn intercept_htlc(
+        &self,
+        req: InterceptRequest,
+    ) -> Result<Result<CustomRecords, ForwardingError>, CriticalError> {
         // If the intercept has no outgoing channel, we can just exit early because there's no action to be taken.
         let outgoing_channel_id = match req.outgoing_channel_id {
             Some(c) => c.into(),
             None => {
-                if let Err(e) = req
-                    .response
-                    .send(Ok(Ok(records_from_signal(
-                        AccountableSignal::Unaccountable,
-                    ))))
-                    .await
-                {
-                    log::error!("Failed to send response: {:?}", e);
-                    self.shutdown.trigger();
-                }
-                return;
+                return Ok(Ok(records_from_signal(AccountableSignal::Unaccountable)));
             }
         };
 
@@ -516,27 +503,18 @@ where
             upgradable_accountability: upgradable_from_records(&req.incoming_custom_records),
         };
 
-        let resp = self
-            .inner_add_htlc(
-                HtlcAdd {
-                    forwarding_node: req.forwarding_node,
-                    htlc,
-                },
-                true,
-            )
-            .await
-            .map_err(|e| e.into()); // into maps error enum to erased Box<dyn Error>
-
-        if let Err(e) = req.response.send(resp).await {
-            log::error!("Failed to send response: {:?}", e);
-            self.shutdown.trigger();
-        }
+        self.inner_add_htlc(
+            HtlcAdd {
+                forwarding_node: req.forwarding_node,
+                htlc,
+            },
+            true,
+        )
+        .await
+        .map_err(|e| CriticalError::InterceptorError(e.to_string()))
     }
 
-    async fn notify_resolution(
-        &self,
-        res: InterceptResolution,
-    ) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+    async fn notify_resolution(&self, res: InterceptResolution) -> Result<(), CriticalError> {
         // If there's not outgoing channel, we're notifying on the receiving node which doesn't need any action.
         let outgoing_channel_id = match res.outgoing_channel_id {
             Some(c) => c.into(),
@@ -554,6 +532,7 @@ where
             resolved_ins: self.clock.now(),
         })
         .await
+        .map_err(|e| CriticalError::InterceptorError(e.to_string()))
     }
 
     /// Returns an identifying name for the interceptor for logging, does not need to be unique.
@@ -572,9 +551,10 @@ mod tests {
         HtlcRef, ProposedForward, ReputationError, ReputationManager, ReputationParams,
     };
     use mockall::mock;
+    use sim_cli::parsing::NetworkParser;
     use simln_lib::clock::SimulationClock;
-    use simln_lib::sim_node::{ChannelPolicy, InterceptResolution, Interceptor};
-    use simln_lib::{NetworkParser, ShortChannelID};
+    use simln_lib::sim_node::{ChannelPolicy, CriticalError, InterceptResolution, Interceptor};
+    use simln_lib::ShortChannelID;
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
@@ -633,7 +613,6 @@ mod tests {
         ReputationInterceptor<BatchForwardWriter, MockForwardManager>,
         Vec<PublicKey>,
     ) {
-        let (shutdown, _) = triggered::trigger();
         let pubkeys = vec![
             get_random_keypair().1,
             get_random_keypair().1,
@@ -669,7 +648,6 @@ mod tests {
                 network_nodes: Arc::new(Mutex::new(nodes)),
                 clock: Arc::new(SimulationClock::new(1).unwrap()),
                 results: None,
-                shutdown,
             },
             pubkeys,
         )
@@ -679,14 +657,13 @@ mod tests {
     #[tokio::test]
     async fn test_final_hop_intercept() {
         let (interceptor, pubkeys) = setup_test_interceptor();
-        let (mut request, mut receiver) =
-            setup_test_request(pubkeys[0], 0, 1, AccountableSignal::Unaccountable);
+        let mut request = setup_test_request(pubkeys[0], 0, 1, AccountableSignal::Unaccountable);
 
         request.outgoing_channel_id = None;
-        interceptor.intercept_htlc(request).await;
+        let res = interceptor.intercept_htlc(request).await.unwrap().unwrap();
 
         assert!(matches!(
-            accountable_from_records(&receiver.recv().await.unwrap().unwrap().unwrap()),
+            accountable_from_records(&res),
             AccountableSignal::Unaccountable
         ));
     }
@@ -695,34 +672,22 @@ mod tests {
     #[tokio::test]
     async fn test_unknown_intercept_node() {
         let (interceptor, _) = setup_test_interceptor();
-        let (request, mut receiver) = setup_test_request(
+        let request = setup_test_request(
             get_random_keypair().1,
             0,
             1,
             AccountableSignal::Unaccountable,
         );
 
-        interceptor.intercept_htlc(request).await;
-
-        assert!(matches!(
-            receiver
-                .recv()
-                .await
-                .unwrap()
-                .err()
-                .unwrap()
-                .downcast_ref::<ReputationError>()
-                .unwrap(),
-            ReputationError::ErrUnrecoverable(_),
-        ));
+        let err = interceptor.intercept_htlc(request).await.err().unwrap();
+        assert!(matches!(err, CriticalError::InterceptorError(_),));
     }
 
     /// Tests interception of a htlc that should be forwarded as accountable.
     #[tokio::test]
     async fn test_forward_accountable_htlc() {
         let (interceptor, pubkeys) = setup_test_interceptor();
-        let (request, mut receiver) =
-            setup_test_request(pubkeys[0], 0, 1, AccountableSignal::Accountable);
+        let request = setup_test_request(pubkeys[0], 0, 1, AccountableSignal::Accountable);
 
         interceptor
             .network_nodes
@@ -744,18 +709,14 @@ mod tests {
             .expect_add_htlc()
             .return_once(|_| Ok(ForwardingOutcome::Forward(AccountableSignal::Accountable)));
 
-        interceptor.intercept_htlc(request).await;
+        let res = interceptor.intercept_htlc(request).await.unwrap().unwrap();
 
         // Should call add_htlc + return a reputation check that passes.
-        assert!(matches!(
-            accountable_from_records(&receiver.recv().await.unwrap().unwrap().unwrap()),
-            AccountableSignal::Accountable
-        ));
+        assert!(accountable_from_records(&res) == AccountableSignal::Accountable);
 
         // Test unaccountable htlc with sufficient reputation gets upgraded to accountable.
         let (interceptor, pubkeys) = setup_test_interceptor();
-        let (request, mut receiver) =
-            setup_test_request(pubkeys[0], 0, 1, AccountableSignal::Unaccountable);
+        let request = setup_test_request(pubkeys[0], 0, 1, AccountableSignal::Unaccountable);
 
         interceptor
             .network_nodes
@@ -777,20 +738,15 @@ mod tests {
             .expect_add_htlc()
             .return_once(|_| Ok(ForwardingOutcome::Forward(AccountableSignal::Accountable)));
 
-        interceptor.intercept_htlc(request).await;
-
-        assert!(matches!(
-            accountable_from_records(&receiver.recv().await.unwrap().unwrap().unwrap()),
-            AccountableSignal::Accountable
-        ));
+        let res = interceptor.intercept_htlc(request).await.unwrap().unwrap();
+        assert!(accountable_from_records(&res) == AccountableSignal::Accountable);
     }
 
     /// Tests interception of a htlc that should be forwarded as unaccountable.
     #[tokio::test]
     async fn test_forward_unaccountable_htlc() {
         let (interceptor, pubkeys) = setup_test_interceptor();
-        let (request, mut receiver) =
-            setup_test_request(pubkeys[0], 0, 1, AccountableSignal::Unaccountable);
+        let request = setup_test_request(pubkeys[0], 0, 1, AccountableSignal::Unaccountable);
 
         interceptor
             .network_nodes
@@ -812,21 +768,17 @@ mod tests {
             .expect_add_htlc()
             .return_once(|_| Ok(ForwardingOutcome::Forward(AccountableSignal::Unaccountable)));
 
-        interceptor.intercept_htlc(request).await;
+        let res = interceptor.intercept_htlc(request).await.unwrap().unwrap();
 
         // should call add_htlc + return a reputation check that passes
-        assert!(matches!(
-            accountable_from_records(&receiver.recv().await.unwrap().unwrap().unwrap()),
-            AccountableSignal::Unaccountable
-        ));
+        assert!(accountable_from_records(&res) == AccountableSignal::Unaccountable);
     }
 
     /// Tests that we do not notify resolution of last hop htlcs.
     #[tokio::test]
     async fn test_final_hop_notify() {
         let (interceptor, pubkeys) = setup_test_interceptor();
-        let (mut request, _) =
-            setup_test_request(pubkeys[0], 0, 1, AccountableSignal::Unaccountable);
+        let mut request = setup_test_request(pubkeys[0], 0, 1, AccountableSignal::Unaccountable);
 
         request.outgoing_channel_id = None;
         interceptor
@@ -902,7 +854,6 @@ mod tests {
             capacity_msat: 100_000,
             node_1: setup_test_policy(node_1),
             node_2: setup_test_policy(node_2),
-            forward_only: false,
         }
     }
 
@@ -966,7 +917,6 @@ mod tests {
     /// Tests that nodes are appropriately set up when an interceptor is created from a set of edges.
     #[tokio::test]
     async fn test_new_for_network_node_creation() {
-        let (shutdown, _) = triggered::trigger();
         let (params, edges, _) = setup_three_hop_network_edges();
 
         let interceptor: ReputationInterceptor<BatchForwardWriter, ForwardManager> =
@@ -975,7 +925,6 @@ mod tests {
                 &edges,
                 Arc::new(SimulationClock::new(1).unwrap()),
                 None,
-                shutdown,
             )
             .unwrap();
 
@@ -1011,7 +960,6 @@ mod tests {
     /// able to bootstrap reputation.
     #[tokio::test]
     async fn test_bootstrap_and_general_jam() {
-        let (shutdown, _) = triggered::trigger();
         let (params, edges, _) = setup_three_hop_network_edges();
 
         let bob_pk = edges[0].node_2.pubkey;
@@ -1039,7 +987,6 @@ mod tests {
                 &edges,
                 Arc::new(SimulationClock::new(1).unwrap()),
                 None,
-                shutdown,
             )
             .unwrap();
 
@@ -1082,39 +1029,32 @@ mod tests {
 
         // An unaccountable payment in the non-jammed direction should be forwarded through
         // unaccountable.
-        let (request, mut receiver) = setup_test_request(
+        let request = setup_test_request(
             edges[1].node_1.pubkey,
             alice_to_bob,
             bob_to_carol,
             AccountableSignal::Unaccountable,
         );
 
-        interceptor.intercept_htlc(request).await;
-        assert!(matches!(
-            accountable_from_records(&receiver.recv().await.unwrap().unwrap().unwrap()),
-            AccountableSignal::Unaccountable,
-        ));
+        let res = interceptor.intercept_htlc(request).await.unwrap().unwrap();
+        assert!(accountable_from_records(&res) == AccountableSignal::Unaccountable,);
 
         // An unaccountable htlc using the jammed channel would get access to congestion bucket and
         // be upgraded to accountable.
-        let (request, mut receiver) = setup_test_request(
+        let request = setup_test_request(
             edges[1].node_1.pubkey,
             bob_to_carol,
             alice_to_bob,
             AccountableSignal::Unaccountable,
         );
 
-        interceptor.intercept_htlc(request).await;
-        assert!(matches!(
-            accountable_from_records(&receiver.recv().await.unwrap().unwrap().unwrap()),
-            AccountableSignal::Accountable,
-        ));
+        let res = interceptor.intercept_htlc(request).await.unwrap().unwrap();
+        assert!(accountable_from_records(&res) == AccountableSignal::Accountable);
     }
 
     /// Tests starting interceptor from valid snapshot.
     #[tokio::test]
     async fn test_new_from_snapshot() {
-        let (shutdown, _) = triggered::trigger();
         let (params, edges, reputation_snapshot) = setup_three_hop_network_edges();
 
         let clock = Arc::new(SimulationClock::new(1).unwrap());
@@ -1127,7 +1067,6 @@ mod tests {
             reputation_snapshot.clone(),
             clock.clone(),
             None,
-            shutdown,
         )
         .await;
 
@@ -1165,7 +1104,6 @@ mod tests {
     /// Tests that an error is returned when the snapshot is missing a node.
     #[tokio::test]
     async fn test_new_from_snapshot_missing_node() {
-        let (shutdown, _) = triggered::trigger();
         let (params, edges, _) = setup_three_hop_network_edges();
 
         let mut reputation_snapshot: HashMap<PublicKey, HashMap<u64, ChannelSnapshot>> =
@@ -1192,7 +1130,6 @@ mod tests {
             reputation_snapshot,
             Arc::new(SimulationClock::new(1).unwrap()),
             None,
-            shutdown,
         )
         .await;
 
@@ -1202,7 +1139,6 @@ mod tests {
     /// Tests that an error is returned when the snapshot is missing a channel for a node.
     #[tokio::test]
     async fn test_new_from_snapshot_missing_channel() {
-        let (shutdown, _) = triggered::trigger();
         let (params, edges, _) = setup_three_hop_network_edges();
 
         let mut reputation_snapshot: HashMap<PublicKey, HashMap<u64, ChannelSnapshot>> =
@@ -1221,7 +1157,6 @@ mod tests {
             reputation_snapshot,
             Arc::new(SimulationClock::new(1).unwrap()),
             None,
-            shutdown,
         )
         .await;
 
@@ -1231,7 +1166,6 @@ mod tests {
     /// Tests that an error is returned when the snapshot has mismatched channel capacities.
     #[tokio::test]
     async fn test_new_from_snapshot_mismatched_capacity() {
-        let (shutdown, _) = triggered::trigger();
         let (params, edges, mut reputation_snapshot) = setup_three_hop_network_edges();
 
         // Modify the channel capacity to make it have a different value.
@@ -1251,7 +1185,6 @@ mod tests {
             reputation_snapshot,
             Arc::new(SimulationClock::new(1).unwrap()),
             None,
-            shutdown,
         )
         .await;
 
@@ -1261,7 +1194,6 @@ mod tests {
     /// Tests that an error is returned when the snapshot has a mismatched number of channels.
     #[tokio::test]
     async fn test_new_from_snapshot_mismatched_channel_count() {
-        let (shutdown, _) = triggered::trigger();
         let (params, edges, mut reputation_snapshot) = setup_three_hop_network_edges();
 
         // Remove a channel to make them have mismatched number of channels.
@@ -1279,7 +1211,6 @@ mod tests {
             reputation_snapshot,
             Arc::new(SimulationClock::new(1).unwrap()),
             None,
-            shutdown,
         )
         .await;
 

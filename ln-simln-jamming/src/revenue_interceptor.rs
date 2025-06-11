@@ -1,7 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
 use std::collections::{BinaryHeap, HashMap};
-use std::error::Error;
 use std::ops::{Add, Sub};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,7 +10,10 @@ use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use ln_resource_mgr::HtlcRef;
 use simln_lib::clock::Clock;
-use simln_lib::sim_node::{InterceptRequest, InterceptResolution, Interceptor};
+use simln_lib::sim_node::{
+    CriticalError, CustomRecords, ForwardingError, InterceptRequest, InterceptResolution,
+    Interceptor,
+};
 use tokio::select;
 use tokio::sync::Mutex;
 use triggered::{Listener, Trigger};
@@ -217,8 +219,11 @@ impl<C: InstantClock + Clock> RevenueInterceptor<C> {
 #[async_trait]
 impl<C: InstantClock + Clock> Interceptor for RevenueInterceptor<C> {
     /// RevenueInterceptor does not need to take any active action on incoming htlcs.
-    async fn intercept_htlc(&self, req: InterceptRequest) {
-        let resp = if req.forwarding_node == self.target_node {
+    async fn intercept_htlc(
+        &self,
+        req: InterceptRequest,
+    ) -> Result<Result<CustomRecords, ForwardingError>, CriticalError> {
+        if req.forwarding_node == self.target_node {
             match self
                 .target_revenue
                 .lock()
@@ -228,30 +233,23 @@ impl<C: InstantClock + Clock> Interceptor for RevenueInterceptor<C> {
                     channel_id: req.incoming_htlc.channel_id.into(),
                     htlc_index: req.incoming_htlc.index,
                 }) {
-                Entry::Occupied(_) => {
-                    Err(format!("duplicate incoming htlc index: {:?}", req.incoming_htlc).into())
-                }
+                Entry::Occupied(_) => Err(CriticalError::InterceptorError(format!(
+                    "duplicate incoming htlc index: {:?}",
+                    req.incoming_htlc
+                ))),
                 Entry::Vacant(e) => {
                     e.insert(req.incoming_amount_msat - req.outgoing_amount_msat);
-                    Ok(Ok(HashMap::new()))
+                    Ok(Ok(CustomRecords::new()))
                 }
             }
         } else {
-            Ok(Ok(HashMap::new()))
-        };
-
-        if let Err(e) = req.response.send(resp).await {
-            // TODO: select and handle error
-            println!("Failed to send response: {:?}", e);
+            Ok(Ok(CustomRecords::new()))
         }
     }
 
     /// Notifies the underlying jamming interceptor of htlc resolution, as our attacking interceptor doesn't need
     /// to handle notifications.
-    async fn notify_resolution(
-        &self,
-        res: InterceptResolution,
-    ) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+    async fn notify_resolution(&self, res: InterceptResolution) -> Result<(), CriticalError> {
         if res.forwarding_node == self.target_node {
             let mut target_revenue = self.target_revenue.lock().await;
 
@@ -266,7 +264,10 @@ impl<C: InstantClock + Clock> Interceptor for RevenueInterceptor<C> {
 
                     Ok(())
                 }
-                None => Err(format!("resolved htlc not found: {:?}", res.incoming_htlc).into()),
+                None => Err(CriticalError::InterceptorError(format!(
+                    "resolved htlc not found: {:?}",
+                    res.incoming_htlc
+                ))),
             }
         } else {
             Ok(())

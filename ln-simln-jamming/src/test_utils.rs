@@ -1,5 +1,4 @@
 #![cfg(test)]
-use std::error::Error;
 use std::time::Instant;
 
 use crate::reputation_interceptor::{BootstrapForward, ReputationMonitor};
@@ -14,8 +13,8 @@ use ln_resource_mgr::{
 use mockall::mock;
 use rand::{distributions::Uniform, Rng};
 use simln_lib::sim_node::{
-    ChannelPolicy, CustomRecords, ForwardingError, InterceptRequest, InterceptResolution,
-    Interceptor,
+    ChannelPolicy, CriticalError, CustomRecords, ForwardingError, InterceptRequest,
+    InterceptResolution, Interceptor,
 };
 use simln_lib::ShortChannelID;
 use std::collections::HashMap;
@@ -25,8 +24,8 @@ mock! {
 
     #[async_trait]
     impl Interceptor for ReputationInterceptor{
-        async fn intercept_htlc(&self, req: InterceptRequest);
-        async fn notify_resolution(&self,_res: InterceptResolution) -> Result<(), Box<dyn Error + Send + Sync + 'static>>;
+        async fn intercept_htlc(&self, req: InterceptRequest) -> Result<Result<CustomRecords, ForwardingError>, CriticalError>;
+        async fn notify_resolution(&self,_res: InterceptResolution) -> Result<(), CriticalError>;
         fn name(&self) -> String;
     }
 
@@ -57,32 +56,22 @@ pub fn setup_test_request(
     channel_in: u64,
     channel_out: u64,
     incoming_accountable: AccountableSignal,
-) -> (
-    InterceptRequest,
-    tokio::sync::mpsc::Receiver<
-        Result<Result<CustomRecords, ForwardingError>, Box<dyn Error + Send + Sync + 'static>>,
-    >,
-) {
-    let (response, receiver) = tokio::sync::mpsc::channel(1);
-
-    (
-        InterceptRequest {
-            forwarding_node,
-            payment_hash: PaymentHash([1; 32]),
-            incoming_htlc: simln_lib::sim_node::HtlcRef {
-                channel_id: channel_in.into(),
-                index: 0,
-            },
-            incoming_custom_records: records_from_signal(incoming_accountable),
-            outgoing_channel_id: Some(ShortChannelID::from(channel_out)),
-            incoming_amount_msat: 100,
-            outgoing_amount_msat: 50,
-            incoming_expiry_height: 600_010,
-            outgoing_expiry_height: 600_000,
-            response,
+) -> InterceptRequest {
+    InterceptRequest {
+        forwarding_node,
+        payment_hash: PaymentHash([1; 32]),
+        incoming_htlc: simln_lib::sim_node::HtlcRef {
+            channel_id: channel_in.into(),
+            index: 0,
         },
-        receiver,
-    )
+        incoming_custom_records: records_from_signal(incoming_accountable),
+        outgoing_channel_id: Some(ShortChannelID::from(channel_out)),
+        incoming_amount_msat: 100,
+        outgoing_amount_msat: 50,
+        incoming_expiry_height: 600_010,
+        outgoing_expiry_height: 600_000,
+        shutdown_listener: triggered::trigger().1,
+    }
 }
 
 pub fn test_allocation_check(forward_succeeds: bool) -> AllocationCheck {

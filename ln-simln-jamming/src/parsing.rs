@@ -7,7 +7,7 @@ use csv::{ReaderBuilder, StringRecord};
 use humantime::Duration as HumanDuration;
 use ln_resource_mgr::ChannelSnapshot;
 use serde::{Deserialize, Serialize};
-use simln_lib::NetworkParser;
+use sim_cli::parsing::NetworkParser;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek};
@@ -102,7 +102,7 @@ pub struct Cli {
 
     /// Speed up multiplier to add to the wall clock to run the simulation faster.
     #[arg(long, default_value = DEFAULT_CLOCK_SPEEDUP)]
-    pub clock_speedup: u32,
+    pub clock_speedup: u16,
 
     /// The htlc amount that a peer must be able to get accountable to be considered as having a good reputation, expressed
     /// in msat. This will be converted to a fee using a base fee of 1000 msat and a proportional charge of 0.01% of the

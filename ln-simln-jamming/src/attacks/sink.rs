@@ -1,21 +1,21 @@
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use ln_resource_mgr::AccountableSignal;
+use sim_cli::parsing::NetworkParser;
 use simln_lib::clock::Clock;
-use simln_lib::sim_node::{ForwardingError, InterceptRequest};
-use simln_lib::NetworkParser;
+use simln_lib::sim_node::{CustomRecords, ForwardingError, InterceptRequest};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::select;
 use tokio::sync::Mutex;
-use triggered::{Listener, Trigger};
+use triggered::Listener;
 
 use crate::clock::InstantClock;
 use crate::reputation_interceptor::ReputationMonitor;
 use crate::{
-    accountable_from_records, get_network_reputation, print_request, records_from_signal,
-    send_intercept_result, BoxError, NetworkReputation,
+    accountable_from_records, get_network_reputation, print_request, records_from_signal, BoxError,
+    NetworkReputation,
 };
 
 use super::{JammingAttack, NetworkSetup};
@@ -39,7 +39,6 @@ where
     risk_margin: u64,
     reputation_monitor: Arc<Mutex<R>>,
     listener: Listener,
-    shutdown: Trigger,
 }
 
 impl<C: Clock + InstantClock, R: ReputationMonitor + Send + Sync> SinkAttack<C, R> {
@@ -52,7 +51,6 @@ impl<C: Clock + InstantClock, R: ReputationMonitor + Send + Sync> SinkAttack<C, 
         risk_margin: u64,
         reputation_monitor: Arc<Mutex<R>>,
         listener: Listener,
-        shutdown: Trigger,
     ) -> Self {
         Self {
             clock,
@@ -76,7 +74,6 @@ impl<C: Clock + InstantClock, R: ReputationMonitor + Send + Sync> SinkAttack<C, 
             risk_margin,
             reputation_monitor,
             listener,
-            shutdown,
         }
     }
 
@@ -108,7 +105,10 @@ impl<C: Clock + InstantClock, R: ReputationMonitor + Send + Sync> SinkAttack<C, 
     /// Intercepts payments flowing from target -> attacker, holding the htlc for the maximum allowable time to
     /// trash its reputation if the htlc is accountable. We do not use our underlying jamming mitigation interceptor
     /// at all because the attacker is not required to run the mitigation.
-    async fn intercept_attacker_incoming(&self, req: InterceptRequest) {
+    async fn intercept_attacker_incoming(
+        &self,
+        req: InterceptRequest,
+    ) -> Result<CustomRecords, ForwardingError> {
         // Exit early if not accountable, no point in holding.
         if accountable_from_records(&req.incoming_custom_records)
             == AccountableSignal::Unaccountable
@@ -117,12 +117,8 @@ impl<C: Clock + InstantClock, R: ReputationMonitor + Send + Sync> SinkAttack<C, 
                 "HTLC from target -> attacker not accountable, releasing: {}",
                 print_request(&req)
             );
-            send_intercept_result!(
-                req,
-                Ok(Ok(records_from_signal(AccountableSignal::Unaccountable))),
-                self.shutdown
-            );
-            return;
+
+            return Ok(records_from_signal(AccountableSignal::Unaccountable));
         }
 
         // Get maximum hold time assuming 10 minute blocks, assuming a zero block height (simulator doesn't track
@@ -137,12 +133,10 @@ impl<C: Clock + InstantClock, R: ReputationMonitor + Send + Sync> SinkAttack<C, 
 
         // If the htlc is accountable, then we go ahead and hold the htlc for as long as we can only exiting if we
         // get a shutdown signal elsewhere.
-        let resp = select! {
-            _ = self.listener.clone() => Err(ForwardingError::InterceptorError("shutdown signal received".to_string().into())),
+        select! {
+            _ = self.listener.clone() => Err(ForwardingError::InterceptorError("shutdown signal received".to_string())),
             _ = self.clock.sleep(max_hold_secs) => Ok(records_from_signal(AccountableSignal::Accountable))
-        };
-
-        send_intercept_result!(req, Ok(resp), self.shutdown);
+        }
     }
 }
 
@@ -192,7 +186,10 @@ where
         })
     }
 
-    async fn intercept_attacker_htlc(&self, req: InterceptRequest) -> Result<(), BoxError> {
+    async fn intercept_attacker_htlc(
+        &self,
+        req: InterceptRequest,
+    ) -> Result<Result<CustomRecords, ForwardingError>, BoxError> {
         if req.forwarding_node != self.attacker_pubkey {
             return Err(format!(
                 "intercept_attacker_htlc received forward not on attacking node: {}",
@@ -206,35 +203,23 @@ where
             .target_channels
             .contains_key(&req.incoming_htlc.channel_id.into())
         {
-            self.intercept_attacker_incoming(req).await;
-            return Ok(());
+            return Ok(self.intercept_attacker_incoming(req).await);
         }
 
         // If the payment is going to the target node, we'll drop it to deprive them of the revenue.
         if let Some(outgoing_channel) = req.outgoing_channel_id {
             if self.target_channels.contains_key(&outgoing_channel.into()) {
-                send_intercept_result!(
-                    req,
-                    Ok(Err(ForwardingError::InterceptorError(
-                        "attacker failing".into()
-                    ))),
-                    self.shutdown
-                );
-                return Ok(());
+                return Ok(Err(ForwardingError::InterceptorError(
+                    "attacker failing".into(),
+                )));
             }
         }
 
         // Otherwise, we're forwarding a payment unrelated to the target so we'll just forward it - there's nothing to
         // lose here, and it's probably best to remain in other nodes good pathfinding books.
-        send_intercept_result!(
-            req,
-            Ok(Ok(records_from_signal(accountable_from_records(
-                &req.incoming_custom_records,
-            )))),
-            self.shutdown
-        );
-
-        Ok(())
+        Ok(Ok(records_from_signal(accountable_from_records(
+            &req.incoming_custom_records,
+        ))))
     }
 
     async fn simulation_completed(
@@ -272,8 +257,9 @@ mod tests {
     use crate::{accountable_from_records, NetworkReputation};
     use bitcoin::secp256k1::PublicKey;
     use ln_resource_mgr::AccountableSignal;
+    use sim_cli::parsing::NetworkParser;
     use simln_lib::clock::SimulationClock;
-    use simln_lib::NetworkParser;
+    use simln_lib::sim_node::ForwardingError;
     use tokio::sync::Mutex;
 
     use super::SinkAttack;
@@ -283,7 +269,7 @@ mod tests {
         attacker: PublicKey,
         network: &[NetworkParser],
     ) -> SinkAttack<SimulationClock, MockReputationInterceptor> {
-        let (shutdown, listener) = triggered::trigger();
+        let (_shutdown, listener) = triggered::trigger();
 
         SinkAttack::new(
             Arc::new(SimulationClock::new(1).unwrap()),
@@ -293,7 +279,6 @@ mod tests {
             0,
             Arc::new(Mutex::new(MockReputationInterceptor::new())),
             listener,
-            shutdown,
         )
     }
 
@@ -316,21 +301,18 @@ mod tests {
                 capacity_msat: 100_000,
                 node_1: get_test_policy(target),
                 node_2: get_test_policy(regular_1),
-                forward_only: false,
             },
             NetworkParser {
                 scid: 1.into(),
                 capacity_msat: 100_000,
                 node_1: get_test_policy(target),
                 node_2: get_test_policy(regular_2),
-                forward_only: false,
             },
             NetworkParser {
                 scid: 2.into(),
                 capacity_msat: 100_000,
                 node_1: get_test_policy(target),
                 node_2: get_test_policy(attacker),
-                forward_only: false,
             },
         ];
 
@@ -350,35 +332,30 @@ mod tests {
                 capacity_msat: 100_000,
                 node_1: get_test_policy(target),
                 node_2: get_test_policy(regular_1),
-                forward_only: false,
             },
             NetworkParser {
                 scid: 1.into(),
                 capacity_msat: 100_000,
                 node_1: get_test_policy(target),
                 node_2: get_test_policy(regular_2),
-                forward_only: false,
             },
             NetworkParser {
                 scid: 2.into(),
                 capacity_msat: 100_000,
                 node_1: get_test_policy(target),
                 node_2: get_test_policy(attacker),
-                forward_only: false,
             },
             NetworkParser {
                 scid: 2.into(),
                 capacity_msat: 100_000,
                 node_1: get_test_policy(attacker),
                 node_2: get_test_policy(regular_1),
-                forward_only: false,
             },
             NetworkParser {
                 scid: 4.into(),
                 capacity_msat: 100_000,
                 node_1: get_test_policy(target),
                 node_2: get_test_policy(attacker),
-                forward_only: false,
             },
         ];
 
@@ -413,7 +390,7 @@ mod tests {
         let pubkey = get_random_keypair().1;
 
         // Request is not forwarded by the attacking node.
-        let (request, _) = setup_test_request(pubkey, 101, 100, AccountableSignal::Unaccountable);
+        let request = setup_test_request(pubkey, 101, 100, AccountableSignal::Unaccountable);
         assert!(attack.intercept_attacker_htlc(request).await.is_err());
     }
 
@@ -422,38 +399,48 @@ mod tests {
     #[tokio::test]
     async fn test_intercept_attacker_outgoing() {
         let (attack, attacker_scid) = setup_test_network();
-        let (mut request, mut receiver) = setup_test_request(
+        let mut request = setup_test_request(
             attack.attacker_pubkey,
             100,
             attacker_scid,
             AccountableSignal::Unaccountable,
         );
-        assert!(attack
-            .intercept_attacker_htlc(request.clone())
-            .await
-            .is_ok());
-        assert!(receiver.recv().await.unwrap().unwrap().is_err());
+
+        assert!(matches!(
+            attack
+                .intercept_attacker_htlc(request.clone())
+                .await
+                .unwrap()
+                .err()
+                .unwrap(),
+            ForwardingError::InterceptorError(_)
+        ));
 
         // Receives to the attacker or forwards unrelated to the target succeed.
         request.outgoing_channel_id = None;
-        assert!(attack.intercept_attacker_htlc(request).await.is_ok());
-        assert!(receiver.recv().await.unwrap().unwrap().is_ok());
+        assert!(
+            attack
+                .intercept_attacker_htlc(request.clone())
+                .await
+                .unwrap()
+                .unwrap()
+                == request.incoming_custom_records
+        );
 
-        let (request, mut receiver) = setup_test_request(
+        let request = setup_test_request(
             attack.attacker_pubkey,
             101,
             100,
             AccountableSignal::Unaccountable,
         );
         assert!(attack.intercept_attacker_htlc(request).await.is_ok());
-        assert!(receiver.recv().await.unwrap().unwrap().is_ok());
     }
 
     /// Tests that unaccountable HTLCs incoming from the target are not held by the attacker.
     #[tokio::test]
     async fn test_intercept_attacker_incoming() {
         let (attack, attacker_scid) = setup_test_network();
-        let (request, mut receiver) = setup_test_request(
+        let request = setup_test_request(
             attack.attacker_pubkey,
             attacker_scid,
             100,
@@ -461,15 +448,15 @@ mod tests {
         );
 
         // Unaccountable HTLCs won't be held, they're just let through to help build our reputation.
-        assert!(attack.intercept_attacker_htlc(request).await.is_ok());
-        assert!(receiver.recv().await.unwrap().unwrap().is_ok());
+        let res = attack.intercept_attacker_htlc(request).await;
+        assert!(res.unwrap().is_ok());
     }
 
     /// Tests that accountable HTLCs incoming from the target are held by the attacker.
     #[tokio::test]
     async fn test_intercept_incoming_hold() {
         let (attack, attacker_scid) = setup_test_network();
-        let (mut request, mut receiver) = setup_test_request(
+        let mut request = setup_test_request(
             attack.attacker_pubkey,
             attacker_scid,
             100,
@@ -479,12 +466,12 @@ mod tests {
         // Set our incoming expiry to zero so that our "hold" is actually zero in the test.
         request.incoming_expiry_height = 0;
 
-        assert!(attack.intercept_attacker_htlc(request).await.is_ok());
-        let resp = receiver.recv().await.unwrap().unwrap().unwrap();
-        assert_eq!(
-            accountable_from_records(&resp),
-            AccountableSignal::Accountable
-        );
+        let res = attack
+            .intercept_attacker_htlc(request)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(accountable_from_records(&res) == AccountableSignal::Accountable);
     }
 
     /// Tests stop conditions for simulation. Does not cover simulation_completed to avoid needing
