@@ -67,7 +67,7 @@ pub(super) struct GeneralBucket {
     /// Maps short channel IDs to the slot indexes that a candidate channel is granted access to.
     //
     // A u16 is used so that we can account for the possiblity that we assign our protocol max of
-    // 483 slots, this can be changed to a u8 when only deling with V3 channels.
+    // 483 slots, this can be changed to a u8 when only dealing with V3 channels.
     candidate_slots: HashMap<u64, [u16; ASSIGNED_SLOTS]>,
 }
 
@@ -97,7 +97,7 @@ impl GeneralBucket {
     }
 
     /// Produces the set of slots that a channel has permission to use.
-    /// Assumes that [`self.htlc_slots`] was been initialized with values set for each slot.
+    /// Assumes that [`self.htlc_slots`] has been initialized with values set for each slot.
     /// Retries up to ASSIGNED_SLOTS * 2 times to avoid duplicates, then fails (as it's highly
     /// improbably that we can't get non-duplicates after that many attempts).
     fn get_candidate_slots(
