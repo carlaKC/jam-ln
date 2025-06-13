@@ -60,9 +60,9 @@ pub(super) struct GeneralBucket {
     pub(super) params: BucketParameters,
     /// Short channel ID that represents the channel that the bucket belongs to.
     scid: u64,
-    /// Tracks the occupancy of HTLC slots in the channel.
+    /// Tracks the occupancy of HTLC slots in the bucket.
     htlc_slots: Vec<bool>,
-    /// Tracks the amount of liquidity allocated to each slot in the channel.
+    /// Tracks the amount of liquidity allocated to each slot in the bucket.
     slot_size_msat: u64,
     /// Maps short channel IDs to the slot indexes that a candidate channel is granted access to.
     //
