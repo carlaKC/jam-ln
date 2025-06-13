@@ -231,12 +231,10 @@ impl GeneralBucket {
         candidate_scid: u64,
         amount_msat: u64,
     ) -> Result<bool, ReputationError> {
-        let available_slots =
-            if let Some(slots) = self.get_usable_slots(candidate_scid, amount_msat)? {
-                slots
-            } else {
-                return Ok(false);
-            };
+        let available_slots = match self.get_usable_slots(candidate_scid, amount_msat)? {
+            Some(slots) => slots,
+            None => return Ok(false),
+        };
 
         // Once we know there's enough liquidity available for the HTLC, we can go ahead and
         // reserve the slots we need.
