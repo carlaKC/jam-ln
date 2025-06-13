@@ -128,7 +128,7 @@ impl GeneralBucket {
                 data.extend_from_slice(&self.scid.to_be_bytes());
                 data.extend_from_slice(&candidate_scid.to_be_bytes());
                 let i_offset = data.len();
-                data.resize(data.len() + 8, 0);
+                data.resize(data.len() + 1, 0);
 
                 let max_attempts = ASSIGNED_SLOTS * 2;
                 for attempt in 0..max_attempts {
@@ -136,8 +136,7 @@ impl GeneralBucket {
                         break;
                     }
 
-                    let i_bytes = (attempt as u64).to_be_bytes();
-                    data[i_offset..i_offset + 8].copy_from_slice(&i_bytes);
+                    data[i_offset] = attempt as u8;
                     let hash = Sha256dHash::hash(&data);
 
                     // It's okay to just use the first 8 bytes because we're just using this
