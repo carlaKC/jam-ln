@@ -96,6 +96,12 @@ impl GeneralBucket {
         })
     }
 
+    /// Removes a channel from internal state, returning a boolean indicating whether anything
+    /// was remove from state.
+    pub(super) fn remove_channel(&mut self, candidate_scid: u64) -> bool {
+        self.candidate_slots.remove(&candidate_scid).is_some()
+    }
+
     /// Produces the set of slots that a channel has permission to use.
     /// Assumes that [`self.htlc_slots`] has been initialized with values set for each slot.
     /// Retries up to ASSIGNED_SLOTS * 2 times to avoid duplicates, then fails (as it's highly
@@ -291,6 +297,15 @@ mod tests {
         assert_eq!(bucket.slot_size_msat, 10_000);
         assert_eq!(bucket.htlc_slots.len(), 100);
         assert!(bucket.htlc_slots.iter().all(|b| !*b));
+    }
+
+    #[test]
+    fn test_channel_already_removed() {
+        let scid = 456;
+        let mut bucket = GeneralBucket::new(123, TEST_BUCKET_PARAMS).unwrap();
+        bucket.add_htlc(scid, 1).unwrap();
+        assert!(bucket.remove_channel(scid));
+        assert!(!bucket.remove_channel(scid));
     }
 
     #[test]
