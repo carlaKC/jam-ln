@@ -363,16 +363,13 @@ impl ReputationManager for ForwardManager {
     }
 
     fn remove_channel(&self, channel_id: u64) -> Result<(), ReputationError> {
-        match self
-            .inner
+        self.inner
             .lock()
             .map_err(|e| ReputationError::ErrUnrecoverable(e.to_string()))?
             .channels
             .remove(&channel_id)
-        {
-            Some(_) => Ok(()),
-            None => Err(ReputationError::ErrChannelNotFound(channel_id)),
-        }
+            .ok_or(ReputationError::ErrChannelNotFound(channel_id))
+            .map(|_| ())
     }
 
     fn get_allocation_snapshot(
