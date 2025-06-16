@@ -96,14 +96,13 @@ impl GeneralBucket {
         })
     }
 
-    /// Produces the set of slots that a channel has permission to use.
-    /// Assumes that [`self.htlc_slots`] has been initialized with values set for each slot.
-    /// Retries up to ASSIGNED_SLOTS * 2 times to avoid duplicates, then fails (as it's highly
-    /// improbably that we can't get non-duplicates after that many attempts).
-    fn get_candidate_slots(
-        &mut self,
-        candidate_scid: u64,
-    ) -> Result<[u16; ASSIGNED_SLOTS], ReputationError> {
+    /// Assigns the set of slots that a channel has permission to use. Returns
+    /// [`ReputationError::ErrChannelExists`] if the channel has already been added.
+    ///
+    // Assumes that [`self.htlc_slots`] has been initialized with values set for each slot.
+    // Retries up to ASSIGNED_SLOTS * 2 times to avoid duplicates, then fails (as it's highly
+    // improbably that we can't get non-duplicates after that many attempts).
+    pub(super) fn add_channel(&mut self, candidate_scid: u64) -> Result<(), ReputationError> {
         if candidate_scid == self.scid {
             return Err(ReputationError::ErrUnrecoverable(format!(
                 "can't self-assign slots: {}",
@@ -112,7 +111,7 @@ impl GeneralBucket {
         }
 
         match self.candidate_slots.entry(candidate_scid) {
-            Entry::Occupied(entry) => Ok(*entry.get()),
+            Entry::Occupied(_) => Err(ReputationError::ErrChannelExists(candidate_scid)),
             Entry::Vacant(entry) => {
                 let mut rng = rand::rng();
                 let mut salt = [0u8; 32];
@@ -180,9 +179,18 @@ impl GeneralBucket {
                 }
 
                 entry.insert(result);
-                Ok(result)
+                Ok(())
             }
         }
+    }
+
+    /// Removes a channel from internal state, returning [`ReputationError::ErrChannelNotFound`]
+    /// if it was not added using [`add_channel`].
+    pub(super) fn remove_channel(&mut self, candidate_scid: u64) -> Result<(), ReputationError> {
+        self.candidate_slots
+            .remove(&candidate_scid)
+            .ok_or(ReputationError::ErrChannelNotFound(candidate_scid))
+            .map(|_| ())
     }
 
     /// Returns the number of liquidity slots a HTLC requires.
@@ -192,16 +200,20 @@ impl GeneralBucket {
 
     /// Returns the indexes of a set of slots that can hold the payment amount provided.
     fn get_usable_slots(
-        &mut self,
+        &self,
         candidate_scid: u64,
         amount_msat: u64,
     ) -> Result<Option<Vec<u16>>, ReputationError> {
         let required_slot_count = self.required_slot_count(amount_msat);
-        let slots = self.get_candidate_slots(candidate_scid)?;
+        let slots = self
+            .candidate_slots
+            .get(&candidate_scid)
+            .ok_or(ReputationError::ErrChannelNotFound(candidate_scid))?;
 
         let available_slots: Vec<u16> = slots
-            .into_iter()
-            .filter(|&index| !self.htlc_slots[index as usize])
+            .iter()
+            .filter(|&index| !self.htlc_slots[*index as usize])
+            .copied()
             .collect();
 
         if (available_slots.len() as u64) < required_slot_count {
@@ -217,7 +229,7 @@ impl GeneralBucket {
     }
 
     pub(super) fn may_add_htlc(
-        &mut self,
+        &self,
         candidate_scid: u64,
         amount_msat: u64,
     ) -> Result<bool, ReputationError> {
@@ -252,10 +264,18 @@ impl GeneralBucket {
         amount_msat: u64,
     ) -> Result<(), ReputationError> {
         let required_slot_count = self.required_slot_count(amount_msat);
-        let slots = self.get_candidate_slots(candidate_scid)?;
+        let slots =
+            self.candidate_slots
+                .get(&candidate_scid)
+                .ok_or(ReputationError::ErrUnrecoverable(format!(
+                    "slots not assigned for {} using add_channel",
+                    candidate_scid
+                )))?;
+
         let occupied_slots: Vec<u16> = slots
-            .into_iter()
-            .filter(|&index| self.htlc_slots[index as usize])
+            .iter()
+            .filter(|&index| self.htlc_slots[*index as usize])
+            .copied()
             .collect();
 
         if (occupied_slots.len() as u64) < required_slot_count {
@@ -306,38 +326,76 @@ mod tests {
     }
 
     #[test]
-    fn test_candidate_slots_existing() {
-        let mut bucket = GeneralBucket::new(123, TEST_BUCKET_PARAMS).unwrap();
+    fn test_channel_already_added() {
         let scid = 456;
-        let slots = [1, 2, 3, 4, 5];
-        bucket.candidate_slots.insert(scid, slots);
-        assert_eq!(slots, bucket.get_candidate_slots(scid).unwrap())
+        let mut bucket = GeneralBucket::new(123, TEST_BUCKET_PARAMS).unwrap();
+        bucket.add_channel(scid).unwrap();
+        assert!(matches!(
+            bucket.add_channel(scid),
+            Err(ReputationError::ErrChannelExists(_))
+        ));
+    }
+
+    #[test]
+    fn test_channel_already_removed() {
+        let scid = 456;
+        let mut bucket = GeneralBucket::new(123, TEST_BUCKET_PARAMS).unwrap();
+        bucket.add_channel(scid).unwrap();
+        bucket.remove_channel(scid).unwrap();
+
+        assert!(matches!(
+            bucket.remove_channel(scid),
+            Err(ReputationError::ErrChannelNotFound(_))
+        ));
     }
 
     #[test]
     fn test_candidate_slots_self() {
-        let bucket_scid = 123;
-        let mut bucket = GeneralBucket::new(bucket_scid, TEST_BUCKET_PARAMS).unwrap();
+        let scid = 123;
+        let mut bucket = GeneralBucket::new(scid, TEST_BUCKET_PARAMS).unwrap();
         assert!(matches!(
-            bucket.get_candidate_slots(bucket_scid),
+            bucket.add_channel(scid),
             Err(ReputationError::ErrUnrecoverable(_))
         ));
     }
 
     #[test]
-    fn test_get_candidate_slots_consistency() {
+    fn test_may_add_htlc() {
+        let scid = 456;
         let mut bucket = GeneralBucket::new(123, TEST_BUCKET_PARAMS).unwrap();
+
+        assert!(matches!(
+            bucket.may_add_htlc(scid, 1),
+            Err(ReputationError::ErrChannelNotFound(_))
+        ));
+
+        bucket.add_channel(scid).unwrap();
+        assert!(bucket.may_add_htlc(scid, 1).unwrap());
+
+		for _ in 0..ASSIGNED_SLOTS {
+			assert!(bucket.may_add_htlc(scid, 1).unwrap());
+			bucket.add_htlc(scid, 1).unwrap();
+		}
+
+        assert!(!bucket.may_add_htlc(scid, 1).unwrap());
+    }
+
+    #[test]
+    fn test_get_candidate_slots_consistency() {
         let scid = 789;
-        let slots1 = bucket.get_candidate_slots(scid).unwrap();
-        let slots2 = bucket.get_candidate_slots(scid).unwrap();
+        let mut bucket = GeneralBucket::new(123, TEST_BUCKET_PARAMS).unwrap();
+        let slots1 = bucket.add_channel(scid).unwrap();
+        bucket.candidate_slots.remove(&scid);
+        let slots2 = bucket.add_channel(scid).unwrap();
         assert_eq!(slots1, slots2);
     }
 
     #[test]
     fn test_get_candidate_slots_within_bounds_and_unique() {
-        let mut bucket = GeneralBucket::new(123, TEST_BUCKET_PARAMS).unwrap();
         let scid = 789;
-        let slots = bucket.get_candidate_slots(scid).unwrap();
+        let mut bucket = GeneralBucket::new(123, TEST_BUCKET_PARAMS).unwrap();
+        bucket.add_channel(scid).unwrap();
+        let slots = bucket.get_usable_slots(scid, 1).unwrap().unwrap();
         for &slot in &slots {
             assert!((slot as usize) < bucket.htlc_slots.len());
         }
@@ -347,8 +405,9 @@ mod tests {
 
     #[test]
     fn test_add_htlc_successful_allocation() {
-        let mut bucket = GeneralBucket::new(123, TEST_BUCKET_PARAMS).unwrap();
         let scid = 456;
+        let mut bucket = GeneralBucket::new(123, TEST_BUCKET_PARAMS).unwrap();
+        bucket.add_channel(scid).unwrap();
         let htlc_amt = 1000;
 
         for _ in 0..ASSIGNED_SLOTS {
@@ -367,8 +426,9 @@ mod tests {
     /// Tests that a single HTLC is allowed to take up all liquidity for all slots.
     #[test]
     fn test_liquidity_one_htlc() {
-        let mut bucket = GeneralBucket::new(123, TEST_BUCKET_PARAMS).unwrap();
         let scid = 345;
+        let mut bucket = GeneralBucket::new(123, TEST_BUCKET_PARAMS).unwrap();
+        bucket.add_channel(scid).unwrap();
 
         let max_htlc = bucket.slot_size_msat * ASSIGNED_SLOTS as u64;
         assert!(bucket.add_htlc(scid, max_htlc).unwrap());
@@ -382,8 +442,9 @@ mod tests {
     /// share that liquidity.
     #[test]
     fn test_partial_liquidity_usage() {
-        let mut bucket = GeneralBucket::new(123, TEST_BUCKET_PARAMS).unwrap();
         let scid = 345;
+        let mut bucket = GeneralBucket::new(123, TEST_BUCKET_PARAMS).unwrap();
+        bucket.add_channel(scid).unwrap();
 
         let half_allocation = bucket.slot_size_msat * ASSIGNED_SLOTS as u64 / 2;
         assert!(bucket.add_htlc(scid, half_allocation).unwrap());
@@ -402,8 +463,9 @@ mod tests {
 
     #[test]
     fn test_insufficient_liquidity() {
-        let mut bucket = GeneralBucket::new(123, TEST_BUCKET_PARAMS).unwrap();
         let scid = 345;
+        let mut bucket = GeneralBucket::new(123, TEST_BUCKET_PARAMS).unwrap();
+        bucket.add_channel(scid).unwrap();
         let htlc_too_big = bucket.slot_size_msat * ASSIGNED_SLOTS as u64 * 2;
 
         assert!(!bucket.add_htlc(scid, htlc_too_big).unwrap());
