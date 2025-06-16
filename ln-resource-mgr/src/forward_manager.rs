@@ -370,9 +370,25 @@ impl ReputationManager for ForwardManager {
     }
 
     fn remove_channel(&self, channel_id: u64) -> Result<(), ReputationError> {
-        self.inner
+        let mut inner_lock = self
+            .inner
             .lock()
-            .map_err(|e| ReputationError::ErrUnrecoverable(e.to_string()))?
+            .map_err(|e| ReputationError::ErrUnrecoverable(e.to_string()))?;
+
+        // Stop tracking this channel in all our other channels, to clean up any state that we
+        // no longer need.
+        for (scid, channel) in inner_lock.channels.iter_mut() {
+            if *scid == channel_id {
+                continue;
+            }
+
+            let _ = channel
+                .incoming_direction
+                .general_bucket
+                .remove_channel(channel_id);
+        }
+
+        inner_lock
             .channels
             .remove(&channel_id)
             .ok_or(ReputationError::ErrChannelNotFound(channel_id))
