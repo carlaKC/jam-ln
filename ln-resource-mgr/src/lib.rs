@@ -248,10 +248,16 @@ impl AllocationCheck {
         incoming_upgradable: bool,
     ) -> Result<ResourceBucketType, FailureReason> {
         match incoming_accountable {
+            // When a HTLC is accountable, our reputation will be impacted by its resolution so
+            // we drop it if the outgoing peer does not have sufficient reputation. The HTLC is
+            // otherwise eligible to use any other bucket, provided it meets its restrictions.
+            // We prefer the protected bucket so that we leave more space in general for peers
+            // that don't have reputation, but will fall back in the unlikely case where
+            // protected is full. We keep our eligibility requirements for general and congestion
+            // buckets because it's possible that this peer is the one that's filling up our
+            // resources, so we don't do them any additional favors beyond protected resources.
             AccountableSignal::Accountable => {
                 if self.reputation_check.sufficient_reputation() {
-                    // If the htlc is accountable and the peer has reputation, assign to protected
-                    // bucket.
                     if self
                         .resource_check
                         .protected_bucket
@@ -259,16 +265,12 @@ impl AllocationCheck {
                     {
                         Ok(ResourceBucketType::Protected)
                     } else {
-                        // In the unlikely case that the protected bucket is full but there are
-                        // slots available in either general or congestion buckets, assign it
-                        // there.
                         if self
                             .resource_check
                             .general_bucket
                             .resources_available(htlc_amt_msat)
+                            && self.general_eligible
                         {
-                            // TODO: should we limit high reputation peers to their allocated
-                            // general resources?
                             Ok(ResourceBucketType::General)
                         } else if self.congestion_eligible
                             && self.congestion_resources_available(htlc_amt_msat)
@@ -279,31 +281,27 @@ impl AllocationCheck {
                         }
                     }
                 } else {
-                    // If our node will be held accountable for the resolution of the htlc but the
-                    // peer does not have reputation, we fail it.
                     Err(FailureReason::NoReputation)
                 }
             }
+            // When a HTLC is unaccountable, we have the option to upgrade it to accountable and
+            // use protected resources if the peer has sufficient reputation. We'll only do this
+            // if the peer can't use general resources, as upgrading to accountable will subject
+            // downstream forwarding to stricter conditions (ie, being dropped if there isn't
+            // reputation down the path).
             AccountableSignal::Unaccountable => {
-                // Assign to general bucket if there are general resources available.
                 if self
                     .resource_check
                     .general_bucket
                     .resources_available(htlc_amt_msat)
+                    && self.general_eligible
                 {
-                    if self.general_eligible {
-                        Ok(ResourceBucketType::General)
-                    } else {
-                        Err(FailureReason::GeneralResourceLimit)
-                    }
+                    Ok(ResourceBucketType::General)
                 } else if self.reputation_check.sufficient_reputation() && incoming_upgradable {
-                    // If the peer has reputation, use protected bucket.
                     Ok(ResourceBucketType::Protected)
                 } else if self.congestion_eligible
                     && self.congestion_resources_available(htlc_amt_msat)
                 {
-                    // If no general resources available and peer does not have reputation, we
-                    // check congestion resources.
                     Ok(ResourceBucketType::Congestion)
                 } else {
                     Err(FailureReason::NoGeneralResources)
