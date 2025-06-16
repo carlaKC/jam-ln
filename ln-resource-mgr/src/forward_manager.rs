@@ -291,14 +291,14 @@ impl ReputationManager for ForwardManager {
         add_ins: Instant,
         channel_reputation: Option<ChannelSnapshot>,
     ) -> Result<(), ReputationError> {
-        match self
+        let mut inner_lock = self
             .inner
             .lock()
-            .map_err(|e| ReputationError::ErrUnrecoverable(e.to_string()))?
-            .channels
-            .entry(channel_id)
-        {
-            Entry::Occupied(_) => Err(ReputationError::ErrChannelExists(channel_id)),
+            .map_err(|e| ReputationError::ErrUnrecoverable(e.to_string()))?;
+
+        let existing_channels: Vec<u64> = inner_lock.channels.keys().copied().collect();
+        match inner_lock.channels.entry(channel_id) {
+            Entry::Occupied(_) => return Err(ReputationError::ErrChannelExists(channel_id)),
             Entry::Vacant(v) => {
                 let general_slot_count = 483 * self.params.general_slot_portion as u16 / 100;
                 let general_liquidity_amount =
@@ -340,46 +340,79 @@ impl ReputationManager for ForwardManager {
                     None => RevenueAverage::new(&self.params.reputation_params, add_ins),
                 };
 
+                let mut incoming_direction = IncomingChannel::new(
+                    channel_id,
+                    BucketParameters {
+                        slot_count: general_slot_count,
+                        liquidity_msat: general_liquidity_amount,
+                    },
+                    BucketParameters {
+                        slot_count: congestion_slot_count,
+                        liquidity_msat: congestion_liquidity_amount,
+                    },
+                    BucketParameters {
+                        slot_count: protected_slot_count,
+                        liquidity_msat: protected_liquidity_amount,
+                    },
+                )?;
+
+                // Add all existing channels as possible counterparties in our general bucket.
+                for scid in existing_channels {
+                    incoming_direction.general_bucket.add_channel(scid)?;
+                }
+
                 v.insert(TrackedChannel {
                     capacity_msat,
-                    incoming_direction: IncomingChannel::new(
-                        channel_id,
-                        BucketParameters {
-                            slot_count: general_slot_count,
-                            liquidity_msat: general_liquidity_amount,
-                        },
-                        BucketParameters {
-                            slot_count: congestion_slot_count,
-                            liquidity_msat: congestion_liquidity_amount,
-                        },
-                        BucketParameters {
-                            slot_count: protected_slot_count,
-                            liquidity_msat: protected_liquidity_amount,
-                        },
-                    )?,
+                    incoming_direction,
                     outgoing_direction: OutgoingChannel::new(
                         self.params.reputation_params,
                         outgoing_reputation,
                     )?,
                     bidirectional_revenue: revenue,
                 });
-
-                Ok(())
             }
+        };
+
+        // Track this new channel in all other channels, to potentially be used as an outgoing
+        // forwarding partner in the general bucket.
+        for (scid, channel) in inner_lock.channels.iter_mut() {
+            if *scid == channel_id {
+                continue;
+            }
+
+            channel
+                .incoming_direction
+                .general_bucket
+                .add_channel(channel_id)?;
         }
+
+        Ok(())
     }
 
     fn remove_channel(&self, channel_id: u64) -> Result<(), ReputationError> {
-        match self
+        let mut inner_lock = self
             .inner
             .lock()
-            .map_err(|e| ReputationError::ErrUnrecoverable(e.to_string()))?
+            .map_err(|e| ReputationError::ErrUnrecoverable(e.to_string()))?;
+
+        // Stop tracking this channel in all our other channels, to clean up any state that we
+        // no longer need.
+        for (scid, channel) in inner_lock.channels.iter_mut() {
+            if *scid == channel_id {
+                continue;
+            }
+
+            channel
+                .incoming_direction
+                .general_bucket
+                .remove_channel(channel_id)?;
+        }
+
+        inner_lock
             .channels
             .remove(&channel_id)
-        {
-            Some(_) => Ok(()),
-            None => Err(ReputationError::ErrChannelNotFound(channel_id)),
-        }
+            .ok_or(ReputationError::ErrChannelNotFound(channel_id))
+            .map(|_| ())
     }
 
     fn get_allocation_snapshot(
