@@ -151,11 +151,11 @@ impl Display for ForwardingOutcome {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum FailureReason {
-    /// The limit of general resources available to the outgoing channel has been hit.
-    GeneralResourceLimit,
-    /// There is no space in the incoming channel's general resource bucket, so the htlc should be failed back.
+    /// There is no space in the incoming channel's general resource bucket, which is all the HTLC
+    /// is eligible to use, so the htlc should be failed back.
     NoGeneralResources,
-    /// There are no resources on the incoming channel, so the htlc should be failed back.
+    /// There are no resources on the incoming channel, on any resource bucket, so the htlc should
+    /// be failed back.
     NoResources,
     /// The outgoing peer has insufficient reputation for the htlc to occupy protected resources.
     NoReputation,
@@ -247,6 +247,16 @@ impl AllocationCheck {
         incoming_accountable: AccountableSignal,
         incoming_upgradable: bool,
     ) -> Result<ResourceBucketType, FailureReason> {
+        let protected_resources_available = self
+            .resource_check
+            .protected_bucket
+            .resources_available(htlc_amt_msat);
+
+        let general_resources_available = self
+            .resource_check
+            .general_bucket
+            .resources_available(htlc_amt_msat);
+
         match incoming_accountable {
             // When a HTLC is accountable, our reputation will be impacted by its resolution so
             // we drop it if the outgoing peer does not have sufficient reputation. The HTLC is
@@ -258,19 +268,10 @@ impl AllocationCheck {
             // resources, so we don't do them any additional favors beyond protected resources.
             AccountableSignal::Accountable => {
                 if self.reputation_check.sufficient_reputation() {
-                    if self
-                        .resource_check
-                        .protected_bucket
-                        .resources_available(htlc_amt_msat)
-                    {
+                    if protected_resources_available {
                         Ok(ResourceBucketType::Protected)
                     } else {
-                        if self
-                            .resource_check
-                            .general_bucket
-                            .resources_available(htlc_amt_msat)
-                            && self.general_eligible
-                        {
+                        if general_resources_available && self.general_eligible {
                             Ok(ResourceBucketType::General)
                         } else if self.congestion_eligible
                             && self.congestion_resources_available(htlc_amt_msat)
@@ -290,14 +291,12 @@ impl AllocationCheck {
             // downstream forwarding to stricter conditions (ie, being dropped if there isn't
             // reputation down the path).
             AccountableSignal::Unaccountable => {
-                if self
-                    .resource_check
-                    .general_bucket
-                    .resources_available(htlc_amt_msat)
-                    && self.general_eligible
-                {
+                if general_resources_available && self.general_eligible {
                     Ok(ResourceBucketType::General)
-                } else if self.reputation_check.sufficient_reputation() && incoming_upgradable {
+                } else if self.reputation_check.sufficient_reputation()
+                    && protected_resources_available
+                    && incoming_upgradable
+                {
                     Ok(ResourceBucketType::Protected)
                 } else if self.congestion_eligible
                     && self.congestion_resources_available(htlc_amt_msat)
@@ -408,7 +407,6 @@ impl BucketResources {
 impl Display for FailureReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FailureReason::GeneralResourceLimit => write!(f, "general resource limit hit"),
             FailureReason::NoGeneralResources => write!(f, "no general resources"),
             FailureReason::NoResources => write!(f, "no resources"),
             FailureReason::NoReputation => write!(f, "no reputation"),
