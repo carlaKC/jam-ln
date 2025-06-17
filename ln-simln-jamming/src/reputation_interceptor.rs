@@ -10,7 +10,7 @@ use ln_resource_mgr::{
     AccountableSignal, ChannelSnapshot, ForwardResolution, ForwardingOutcome, HtlcRef,
     ProposedForward, ReputationError, ReputationManager,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sim_cli::parsing::NetworkParser;
 use simln_lib::sim_node::{
     CriticalError, CustomRecords, ForwardingError, InterceptRequest, InterceptResolution,
@@ -48,7 +48,7 @@ pub struct BootstrapRecords {
 }
 
 /// Provides details of a htlc forward that is used to bootstrap reputation values for the network.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BootstrapForward {
     pub incoming_amt: u64,
     pub outgoing_amt: u64,
