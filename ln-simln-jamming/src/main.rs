@@ -1,5 +1,6 @@
 use bitcoin::secp256k1::PublicKey;
 use clap::Parser;
+use lightning::ln::features::NodeFeatures;
 use ln_resource_mgr::forward_manager::ForwardManagerParams;
 use ln_resource_mgr::ReputationParams;
 use ln_simln_jamming::analysis::BatchForwardWriter;
@@ -17,12 +18,14 @@ use ln_simln_jamming::{
     get_network_reputation, BoxError, NetworkReputation, ACCOUNTABLE_TYPE, UPGRADABLE_TYPE,
 };
 use log::LevelFilter;
-use sim_cli::parsing::{create_simulation_with_network, SimParams};
+use sim_cli::parsing::{create_simulation_with_network, NetworkParser, SimParams};
 use simln_lib::clock::Clock;
 use simln_lib::clock::SimulationClock;
 use simln_lib::latency_interceptor::LatencyIntercepor;
-use simln_lib::sim_node::{CustomRecords, Interceptor};
-use simln_lib::SimulationCfg;
+use simln_lib::sim_node::{
+    populate_network_graph, CustomRecords, Interceptor, SimGraph, SimNode, SimulatedChannel,
+};
+use simln_lib::{NodeInfo, SimulationCfg, SimulationError};
 use simple_logger::SimpleLogger;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -172,6 +175,8 @@ async fn main() -> Result<(), BoxError> {
         .jam_channels(&attack_setup.general_jammed_nodes)
         .await?;
 
+    let sink_custom_actions = Arc::clone(&attack);
+
     // Do some preliminary checks on our reputation state - there isn't much point in running if we haven't built up
     // some reputation.
     let target_pubkey_map: HashMap<u64, PublicKey> =
@@ -270,7 +275,7 @@ async fn main() -> Result<(), BoxError> {
     // Setup the simulated network with our fake graph.
     let sim_params = SimParams {
         nodes: vec![],
-        sim_network,
+        sim_network: sim_network.clone(),
         activity: vec![],
         exclude: vec![],
     };
@@ -285,6 +290,18 @@ async fn main() -> Result<(), BoxError> {
         custom_records,
     )
     .await?;
+
+    let attacker_nodes = attacker_nodes(sim_network, &[attacker_pubkey]).await?;
+    let attacker_actions_shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        if let Err(e) = sink_custom_actions
+            .run_custom_actions(attacker_nodes, listener.clone())
+            .await
+        {
+            log::error!("Error running custom attacker actions: {e}");
+            attacker_actions_shutdown.trigger();
+        }
+    });
 
     // Run simulation until it shuts down, then wait for the graph to exit.
     simulation.run(&validated_activities).await?;
@@ -346,6 +363,54 @@ fn check_reputation_status(cli: &Cli, status: &NetworkReputation) -> Result<(), 
     }
 
     Ok(())
+}
+
+async fn attacker_nodes<'a>(
+    network: Vec<NetworkParser>,
+    attacker_nodes: &[PublicKey],
+) -> Result<HashMap<PublicKey, SimNode<'a, SimGraph>>, BoxError> {
+    let channels = network
+        .clone()
+        .into_iter()
+        .map(SimulatedChannel::from)
+        .collect::<Vec<SimulatedChannel>>();
+
+    // Setup a simulation graph that will handle propagation of payments through the network
+    let simulation_graph = Arc::new(Mutex::new(
+        SimGraph::new(
+            channels.clone(),
+            TaskTracker::new(),
+            vec![],
+            CustomRecords::new(),
+            triggered::trigger(),
+        )
+        .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
+    ));
+
+    let clock = Arc::new(SimulationClock::new(1)?);
+
+    let routing_graph = Arc::new(
+        populate_network_graph(channels, clock.clone())
+            .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
+    );
+
+    let mut nodes = HashMap::new();
+    for attacker in attacker_nodes {
+        let simulation_graph = Arc::clone(&simulation_graph);
+        let routing_graph = Arc::clone(&routing_graph);
+
+        let mut features = NodeFeatures::empty();
+        features.set_keysend_optional();
+        let node_info = NodeInfo {
+            pubkey: *attacker,
+            alias: String::new(),
+            features,
+        };
+        let node = SimNode::new(node_info, simulation_graph, routing_graph);
+        nodes.insert(*attacker, node);
+    }
+
+    Ok(nodes)
 }
 
 #[allow(clippy::too_many_arguments)]

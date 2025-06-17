@@ -1,10 +1,14 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
-use simln_lib::sim_node::{CustomRecords, ForwardingError, InterceptRequest};
+use simln_lib::sim_node::{CustomRecords, ForwardingError, InterceptRequest, SimGraph, SimNode};
+use triggered::Listener;
 
 use crate::{accountable_from_records, records_from_signal, BoxError, NetworkReputation};
 
 pub mod sink;
+pub mod utils;
 
 pub struct NetworkSetup {
     /// The identifier for channel edges that should be general jammed during the simulation.
@@ -43,6 +47,19 @@ pub trait JammingAttack {
         return Ok(Ok(records_from_signal(accountable_from_records(
             &req.incoming_custom_records,
         ))));
+    }
+
+    /// Intended to be executed in a separate background task to perform custom actions on the
+    /// provided attacker nodes. It can be used to enable attacker to initiate custom payments
+    /// along a specific route for jamming with [`SimNode::send_to_route`] method.
+    ///
+    /// [`SimNode::send_to_route`]: simln_lib::sim_node::SimNode::send_to_route
+    async fn run_custom_actions<'a>(
+        &self,
+        _attacker_nodes: HashMap<PublicKey, SimNode<'a, SimGraph>>,
+        _shutdown_listener: Listener,
+    ) -> Result<(), BoxError> {
+        Ok(())
     }
 
     /// Returns a boolean that indicates whether a shutdown condition for the simulation has been reached.
