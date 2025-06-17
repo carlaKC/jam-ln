@@ -1,4 +1,5 @@
 use crate::BoxError;
+use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use csv::WriterBuilder;
 use ln_resource_mgr::{AllocationCheck, ProposedForward};
@@ -10,8 +11,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 /// Implemented to report forwards for analytics and data recording.
+#[async_trait]
 pub trait ForwardReporter: Send + Sync {
-    fn report_forward(
+    async fn report_forward(
         &mut self,
         forwarding_node: PublicKey,
         decision: AllocationCheck,
@@ -157,9 +159,10 @@ fn write_records_for_node(path: PathBuf, records: &[Record]) -> Result<(), BoxEr
     writer.flush().map_err(|e| e.into())
 }
 
+#[async_trait]
 impl ForwardReporter for BatchForwardWriter {
     /// Queues a forward for write to disk if it's one of the nodes that we're interested in.
-    fn report_forward(
+    async fn report_forward(
         &mut self,
         forwarding_node: PublicKey,
         decision: AllocationCheck,
@@ -191,8 +194,8 @@ mod tests {
     use super::{BatchForwardWriter, ForwardReporter};
 
     /// Tests that only forwards on nodes of interest are queued for writing.
-    #[test]
-    fn test_report_forward() {
+    #[tokio::test]
+    async fn test_report_forward() {
         let node_0 = get_random_keypair().1;
         let node_1 = get_random_keypair().1;
 
@@ -207,6 +210,7 @@ mod tests {
         let tracked_forward = test_proposed_forward(0);
         writer
             .report_forward(node_0, test_allocation_check(true), tracked_forward.clone())
+            .await
             .unwrap();
         assert_eq!(writer.record_count, 1);
 
@@ -217,6 +221,7 @@ mod tests {
                 test_allocation_check(true),
                 test_proposed_forward(1),
             )
+            .await
             .unwrap();
         assert_eq!(writer.record_count, 1);
 
@@ -227,8 +232,8 @@ mod tests {
 
     /// Tests flushing of records to disk, using the current time to ensure a unique filename that can be cleaned up
     /// after.
-    #[test]
-    fn test_write_records() {
+    #[tokio::test]
+    async fn test_write_records() {
         let node_0 = get_random_keypair().1;
         let node_1 = get_random_keypair().1;
 
@@ -251,6 +256,7 @@ mod tests {
                 test_allocation_check(true),
                 test_proposed_forward(0),
             )
+            .await
             .unwrap();
         assert_eq!(writer.record_count, 1);
 
@@ -265,6 +271,7 @@ mod tests {
                 test_allocation_check(true),
                 test_proposed_forward(1),
             )
+            .await
             .unwrap();
         writer.write().unwrap();
         assert!(!Path::new(&filename).exists());
@@ -276,6 +283,7 @@ mod tests {
                 test_allocation_check(true),
                 test_proposed_forward(2),
             )
+            .await
             .unwrap();
         assert_eq!(writer.record_count, 2);
 
@@ -289,6 +297,7 @@ mod tests {
                 test_allocation_check(true),
                 test_proposed_forward(3),
             )
+            .await
             .unwrap();
         writer
             .report_forward(
@@ -296,6 +305,7 @@ mod tests {
                 test_allocation_check(true),
                 test_proposed_forward(4),
             )
+            .await
             .unwrap();
         writer
             .report_forward(
@@ -303,6 +313,7 @@ mod tests {
                 test_allocation_check(true),
                 test_proposed_forward(5),
             )
+            .await
             .unwrap();
 
         writer.write().unwrap();
