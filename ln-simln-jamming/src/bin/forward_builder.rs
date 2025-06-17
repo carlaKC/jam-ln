@@ -1,9 +1,10 @@
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use clap::Parser;
-use ln_resource_mgr::forward_manager::{ForwardManager, ForwardManagerParams};
-use ln_resource_mgr::HtlcRef;
-use ln_simln_jamming::analysis::BatchForwardWriter;
+use ln_resource_mgr::forward_manager::ForwardManagerParams;
+use ln_resource_mgr::{AllocationCheck, ProposedForward};
+use ln_simln_jamming::analysis::ForwardReporter;
+use ln_simln_jamming::clock::InstantClock;
 use ln_simln_jamming::parsing::{
     parse_duration, SimNetwork, DEFAULT_REPUTATION_DIR, DEFAULT_SIM_FILE,
 };
@@ -13,12 +14,10 @@ use log::LevelFilter;
 use simln_lib::batched_writer::BatchedWriter;
 use simln_lib::clock::{Clock, SimulationClock};
 use simln_lib::sim_node::{
-    ln_node_from_graph, populate_network_graph, CriticalError, CustomRecords, ForwardingError,
-    InterceptRequest, InterceptResolution, Interceptor, SimGraph, SimulatedChannel,
+    ln_node_from_graph, populate_network_graph, CustomRecords, SimGraph, SimulatedChannel,
 };
 use simln_lib::{Simulation, SimulationCfg};
 use simple_logger::SimpleLogger;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -86,21 +85,20 @@ async fn main() -> Result<(), BoxError> {
 
     // Create a reputation interceptor without any bootstrap (since here we're creating the
     // bootstrap itself, we just want to run with reputation active).
-    let reputation_interceptor = Arc::new(ReputationInterceptor::<
-        BatchForwardWriter,
-        ForwardManager,
-    >::new_for_network(
+    let reputation_interceptor = Arc::new(ReputationInterceptor::new_for_network(
         ForwardManagerParams::default(),
         &sim_network,
         clock.clone(),
-        None,
+        Some(Arc::new(Mutex::new(BootstrapWriter::new(
+            clock.clone(),
+            cli.output_dir,
+        )?))),
     )?);
 
-    let writer_interceptor = Arc::new(ForwardWriter::new(clock.clone(), cli.output_dir)?);
     let simulation_graph = Arc::new(Mutex::new(SimGraph::new(
         channels.clone(),
         tasks.clone(),
-        vec![writer_interceptor, reputation_interceptor],
+        vec![reputation_interceptor],
         CustomRecords::from([(UPGRADABLE_TYPE, vec![1]), (ACCOUNTABLE_TYPE, vec![0])]),
         (shutdown_trigger.clone(), shutdown_listener.clone()),
     )?));
@@ -133,128 +131,57 @@ async fn main() -> Result<(), BoxError> {
     Ok(())
 }
 
-struct ForwardWriter<C> {
-    // Tracks all the currently in-flight HTLCs, reusing the [`BootstrapForward`] struct for
-    // convenience. One shortcoming of this approach is that we need to set `settled_ns` to zero
-    // when we first store the payment.
-    in_flight: Mutex<HashMap<PublicKey, HashMap<HtlcRef, BootstrapForward>>>,
+// Writes all forwards to disk in batches.
+struct BootstrapWriter<C> {
     clock: Arc<C>,
     batch_writer: Mutex<BatchedWriter>,
 }
 
-impl<C> ForwardWriter<C>
+impl<C> BootstrapWriter<C>
 where
-    C: Clock,
+    C: Clock + InstantClock + Send + Sync,
 {
     fn new(clock: Arc<C>, dir: PathBuf) -> Result<Self, BoxError> {
-        Ok(ForwardWriter {
-            in_flight: Mutex::new(HashMap::new()),
-            clock: clock.clone(),
+        Ok(BootstrapWriter {
+            clock,
             batch_writer: Mutex::new(BatchedWriter::new(dir, DEFAULT_FWD_FILE.into(), 500)?),
         })
     }
 }
 
 #[async_trait]
-impl<C> Interceptor for ForwardWriter<C>
+impl<C> ForwardReporter for BootstrapWriter<C>
 where
-    C: Clock + Send + Sync,
+    C: Clock + InstantClock + Send + Sync,
 {
-    async fn intercept_htlc(
-        &self,
-        req: InterceptRequest,
-    ) -> Result<Result<CustomRecords, ForwardingError>, CriticalError> {
-        // We only care about writing forwards, not final receives.
-        let outgoing_scid = if let Some(scid) = req.outgoing_channel_id {
-            scid
-        } else {
-            return Ok(Ok(CustomRecords::new()));
-        };
+    async fn report_forward(
+        &mut self,
+        forwarding_node: PublicKey,
+        _: AllocationCheck,
+        forward: ProposedForward,
+    ) -> Result<(), BoxError> {
+        let settled_ns = Clock::now(&*self.clock)
+            .duration_since(UNIX_EPOCH)?
+            .as_nanos() as u64;
 
-        let mut lock = self.in_flight.lock().await;
-        let in_flight = match lock.entry(req.forwarding_node) {
-            Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => e.insert(HashMap::new()),
-        };
-
-        match in_flight.entry(HtlcRef {
-            channel_id: req.incoming_htlc.channel_id.into(),
-            htlc_index: req.incoming_htlc.index,
-        }) {
-            Entry::Occupied(_) => {
-                return Err(CriticalError::InterceptorError(format!(
-                    "duplicate incoming htlc {:?}",
-                    req.incoming_htlc,
-                )))
-            }
-            Entry::Vacant(v) => {
-                v.insert(BootstrapForward {
-                    incoming_amt: req.incoming_amount_msat,
-                    outgoing_amt: req.outgoing_amount_msat,
-                    incoming_expiry: req.incoming_expiry_height,
-                    outgoing_expiry: req.outgoing_expiry_height,
-                    added_ns: self
-                        .clock
-                        .now()
-                        .duration_since(UNIX_EPOCH)
-                        .map_err(|e| {
-                            CriticalError::InterceptorError(format!("clock error: {}", e))
-                        })?
-                        .as_nanos() as u64,
-                    // Note: we just set this to zero now, because we don't have a settle time.
-                    settled_ns: 0,
-                    forwarding_node: req.forwarding_node,
-                    channel_in_id: req.incoming_htlc.channel_id.into(),
-                    channel_out_id: outgoing_scid.into(),
-                });
-            }
-        }
-
-        Ok(Ok(CustomRecords::new()))
-    }
-
-    async fn notify_resolution(&self, res: InterceptResolution) -> Result<(), CriticalError> {
-        if res.outgoing_channel_id.is_none() {
-            return Ok(());
-        }
-
-        let mut in_flight = self
-            .in_flight
-            .lock()
-            .await
-            .get_mut(&res.forwarding_node)
-            .ok_or(CriticalError::InterceptorError(format!(
-                "forwarding node: {} not found",
-                res.forwarding_node
-            )))?
-            .remove(&HtlcRef {
-                channel_id: res.incoming_htlc.channel_id.into(),
-                htlc_index: res.incoming_htlc.index,
-            })
-            .ok_or(CriticalError::InterceptorError(format!(
-                "forward not found in flight: {:?}",
-                res.incoming_htlc
-            )))?;
-
-        assert_eq!(in_flight.settled_ns, 0);
-
-        in_flight.settled_ns = self
-            .clock
-            .now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| CriticalError::InterceptorError(format!("clock error: {}", e)))?
+        let nanos_since_added = InstantClock::now(&*self.clock)
+            .duration_since(forward.added_at)
             .as_nanos() as u64;
 
         self.batch_writer
             .lock()
             .await
-            .queue(in_flight)
-            .map_err(|e| CriticalError::InterceptorError(format!("could not queue item: {}", e)))?;
-
-        Ok(())
-    }
-
-    fn name(&self) -> String {
-        "forward writer".to_string()
+            .queue(BootstrapForward {
+                incoming_amt: forward.amount_in_msat,
+                outgoing_amt: forward.amount_out_msat,
+                incoming_expiry: forward.expiry_in_height,
+                outgoing_expiry: forward.expiry_out_height,
+                added_ns: settled_ns - nanos_since_added,
+                settled_ns,
+                forwarding_node,
+                channel_in_id: forward.incoming_ref.channel_id,
+                channel_out_id: forward.outgoing_channel_id,
+            })
+            .map_err(|e| e.into())
     }
 }
