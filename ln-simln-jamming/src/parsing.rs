@@ -283,7 +283,7 @@ pub async fn history_from_file(
             let mut csv_reader = csv::Reader::from_reader(reader);
             let mut first_record = StringRecord::new();
             csv_reader.read_record(&mut first_record)?;
-            let incoming_add_ts: u64 = first_record[2].parse()?;
+            let incoming_add_ts: u64 = first_record[4].parse()?;
             Some(incoming_add_ts.add(duration.as_nanos() as u64))
         } else {
             None
@@ -313,39 +313,15 @@ pub async fn history_from_file(
             };
 
             let mut forwards = Vec::new();
-            for result in csv_reader.records() {
-                let record: StringRecord = result?;
-
-                // We can skip 6/7 because they're outgoing timestamps, we only care about when the htlc is fully removed
-                // from the incoming link (for simplicity's sake).
-                let incoming_amt: u64 = record[0].parse()?;
-                let incoming_expiry: u32 = record[1].parse()?;
-                let incoming_add_ts: u64 = record[2].parse()?;
-                let incoming_remove_ts: u64 = record[3].parse()?;
-                let outgoing_amt: u64 = record[4].parse()?;
-                let outgoing_expiry: u32 = record[5].parse()?;
-                let forwarding_node = PublicKey::from_slice(&hex::decode(&record[8])?)?;
-                let channel_in_id: u64 = record[10].parse()?;
-                let channel_out_id: u64 = record[11].parse()?;
+            for result in csv_reader.deserialize() {
+                let forward: BootstrapForward = result?;
 
                 // If we're filtering cut off any htlc that was in flight at the cutoff point.
                 if let Some(cutoff) = filter_cutoff {
-                    if incoming_add_ts > cutoff || incoming_remove_ts > cutoff {
+                    if forward.added_ns > cutoff || forward.settled_ns > cutoff {
                         break;
                     }
                 }
-
-                let forward = BootstrapForward {
-                    incoming_amt,
-                    outgoing_amt,
-                    incoming_expiry,
-                    outgoing_expiry,
-                    added_ns: incoming_add_ts,
-                    settled_ns: incoming_remove_ts,
-                    forwarding_node,
-                    channel_in_id,
-                    channel_out_id,
-                };
 
                 forwards.push(forward);
             }
