@@ -135,7 +135,7 @@ async fn main() -> Result<(), BoxError> {
     let bootstrap_revenue: u64 =
         std::fs::read_to_string(reputation_dir.join(DEFAULT_REVENUE_FILENAME))?.parse()?;
 
-    let reputation_interceptor = Arc::new(Mutex::new(
+    let reputation_interceptor = Arc::new(
         ReputationInterceptor::new_from_snapshot(
             forward_params,
             &sim_network,
@@ -144,7 +144,7 @@ async fn main() -> Result<(), BoxError> {
             Some(results_writer),
         )
         .await?,
-    ));
+    );
 
     // Reputation is assessed for a channel pair and a specific HTLC that's being proposed. To assess whether pairs
     // have reputation, we'll use LND's default fee policy to get the HTLC risk for our configured htlc size and hold
@@ -167,8 +167,6 @@ async fn main() -> Result<(), BoxError> {
 
     let attack_setup = attack.setup_for_network()?;
     reputation_interceptor
-        .lock()
-        .await
         .jam_channels(&attack_setup.general_jammed_nodes)
         .await?;
 

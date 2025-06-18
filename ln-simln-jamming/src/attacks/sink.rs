@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::select;
-use tokio::sync::Mutex;
 use triggered::Listener;
 
 use crate::clock::InstantClock;
@@ -37,7 +36,7 @@ where
     attacker_pubkey: PublicKey,
     target_channels: HashMap<u64, (PublicKey, String)>,
     risk_margin: u64,
-    reputation_monitor: Arc<Mutex<R>>,
+    reputation_monitor: Arc<R>,
     listener: Listener,
 }
 
@@ -49,7 +48,7 @@ impl<C: Clock + InstantClock, R: ReputationMonitor + Send + Sync> SinkAttack<C, 
         target_pubkey: PublicKey,
         attacker_pubkey: PublicKey,
         risk_margin: u64,
-        reputation_monitor: Arc<Mutex<R>>,
+        reputation_monitor: Arc<R>,
         listener: Listener,
     ) -> Self {
         Self {
@@ -260,7 +259,6 @@ mod tests {
     use sim_cli::parsing::NetworkParser;
     use simln_lib::clock::SimulationClock;
     use simln_lib::sim_node::ForwardingError;
-    use tokio::sync::Mutex;
 
     use super::SinkAttack;
 
@@ -277,7 +275,7 @@ mod tests {
             target,
             attacker,
             0,
-            Arc::new(Mutex::new(MockReputationInterceptor::new())),
+            Arc::new(MockReputationInterceptor::new()),
             listener,
         )
     }

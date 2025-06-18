@@ -11,7 +11,7 @@ use ln_resource_mgr::{
     ProposedForward, ReputationCheck, ResourceCheck,
 };
 use mockall::mock;
-use rand::{distributions::Uniform, Rng};
+use rand::Rng;
 use simln_lib::sim_node::{
     ChannelPolicy, CriticalError, CustomRecords, ForwardingError, InterceptRequest,
     InterceptResolution, Interceptor,
@@ -36,10 +36,10 @@ mock! {
 }
 
 pub fn get_random_bytes(size: usize) -> Vec<u8> {
-    rand::thread_rng()
-        .sample_iter(Uniform::new(u8::MIN, u8::MAX))
-        .take(size)
-        .collect()
+    let mut rng = rand::rng();
+    let mut bytes = vec![0u8; size];
+    rng.fill(&mut bytes[..]);
+    bytes.to_vec()
 }
 
 pub fn get_random_keypair() -> (SecretKey, PublicKey) {

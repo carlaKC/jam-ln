@@ -24,8 +24,7 @@ csv = "1.3.1"
 hex = "0.4.3"
 clap = { version = "4.0", features = ["derive"] }
 humantime = "2.1.0"
-futures = "0.3.31"
-rand = "0.8.5"
+rand = "0.9.1"
 mockall = "0.13.1"
 lightning = { version = "0.0.123" }
 tokio-util = { version = "0.7.15", features = ["rt"] }
