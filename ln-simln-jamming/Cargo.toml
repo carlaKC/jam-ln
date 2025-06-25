@@ -7,6 +7,10 @@ edition = "2021"
 name = "reputation-builder"
 path = "src/bin/reputation_builder.rs"
 
+[[bin]]
+name = "forward-builder"
+path = "src/bin/forward_builder.rs"
+
 [dependencies]
 simln-lib = { git = "https://github.com/bitcoin-dev-project/sim-ln", rev = "698b3186eb1e157ae43504889a4e3ed654368cd9" }
 sim-cli = { git = "https://github.com/bitcoin-dev-project/sim-ln", rev = "698b3186eb1e157ae43504889a4e3ed654368cd9" }
