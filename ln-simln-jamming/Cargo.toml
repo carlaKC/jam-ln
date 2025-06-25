@@ -8,8 +8,8 @@ name = "reputation-builder"
 path = "src/bin/reputation_builder.rs"
 
 [dependencies]
-simln-lib = { git = "https://github.com/bitcoin-dev-project/sim-ln", rev = "49d5ae439c646132872c66e74408eebd4b2d30f1" }
-sim-cli = { git = "https://github.com/bitcoin-dev-project/sim-ln", rev = "49d5ae439c646132872c66e74408eebd4b2d30f1" }
+simln-lib = { git = "https://github.com/bitcoin-dev-project/sim-ln", rev = "698b3186eb1e157ae43504889a4e3ed654368cd9" }
+sim-cli = { git = "https://github.com/bitcoin-dev-project/sim-ln", rev = "698b3186eb1e157ae43504889a4e3ed654368cd9" }
 ln-resource-mgr = { path = "../ln-resource-mgr" }
 bitcoin = { version = "0.30.1" }
 async-trait = "0.1.73"
