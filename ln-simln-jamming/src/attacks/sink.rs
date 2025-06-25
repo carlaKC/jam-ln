@@ -186,6 +186,8 @@ where
         })
     }
 
+	/// Intercepts attacker forwads from the target node to jam them, otherwise forwards unrelated
+	/// traffic in the hopes of continuing to be chosen in pathfinding (it can't hurt).
     async fn intercept_attacker_htlc(
         &self,
         req: InterceptRequest,
@@ -220,6 +222,15 @@ where
         Ok(Ok(records_from_signal(accountable_from_records(
             &req.incoming_custom_records,
         ))))
+    }
+
+    /// Errors if called, because sink attacks rely on passive payment forwarding and should not
+    /// receive any payments themselves.
+    async fn intercept_attacker_receive(
+        &self,
+        _req: InterceptRequest,
+    ) -> Result<Result<CustomRecords, ForwardingError>, BoxError> {
+        return Err("HTLC receive not expected in passive sink attack".into());
     }
 
     async fn simulation_completed(

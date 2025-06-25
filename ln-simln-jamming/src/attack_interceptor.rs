@@ -54,14 +54,13 @@ where
         &self,
         req: InterceptRequest,
     ) -> Result<Result<CustomRecords, ForwardingError>, CriticalError> {
-        // Intercept payments on the attacking node. If they're incoming from the target, jam them. Otherwise just
-        // fail other htlcs, they're not that interesting to us.
         if req.forwarding_node == self.attacker_pubkey {
-            return self
-                .attack
-                .intercept_attacker_htlc(req)
-                .await
-                .map_err(|e| CriticalError::InterceptorError(e.to_string()));
+            return match req.outgoing_channel_id {
+                Some(_) => self.attack.intercept_attacker_htlc(req),
+                None => self.attack.intercept_attacker_receive(req),
+            }
+            .await
+            .map_err(|e| CriticalError::InterceptorError(e.to_string()));
         }
 
         // If attacker is not involved, use jamming interceptor to implement reputation and
@@ -121,6 +120,7 @@ mod tests {
         impl JammingAttack for Attack {
             fn setup_for_network(&self) -> Result<crate::attacks::NetworkSetup, BoxError>;
             async fn intercept_attacker_htlc(&self, req: InterceptRequest) -> Result<Result<CustomRecords, ForwardingError>, BoxError>;
+            async fn intercept_attacker_receive(&self,_req: InterceptRequest) -> Result<Result<CustomRecords, ForwardingError>, BoxError>;
             async fn run_custom_actions(&self, attacker_nodes: HashMap<String, Arc<tokio::sync::Mutex<SimNode<SimGraph>>>>, shutdown_listener: Listener) -> Result<(), BoxError>;
             async fn simulation_completed(&self, _start_reputation: NetworkReputation) -> Result<bool, BoxError>;
         }
