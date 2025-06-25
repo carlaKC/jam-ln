@@ -36,8 +36,10 @@ pub trait JammingAttack {
         })
     }
 
-    /// Called for evey HTLC that is forwarded through or to attacking nodes, to allow the attacker to take custom
+    /// Called for evey HTLC that is forwarded through an attacking nodes, to allow the attacker to take custom
     /// actions on HTLCs. This function may block, as it is spawned in a task, but *must* eventually return a result.
+    /// [`InterceptRequest::outgoing_channel_id`] can safely be unwrapped because this intercept is exclusively used
+    /// for forwards that have an outgoing channel.
     ///
     /// The default implementation will forward HTLCs immediately, copying whatever incoming accountable signal it
     /// received.
@@ -48,6 +50,18 @@ pub trait JammingAttack {
         return Ok(Ok(records_from_signal(accountable_from_records(
             &req.incoming_custom_records,
         ))));
+    }
+
+    /// Called for evey HTLC that is received on an attacking nodes, to allow the attacker to take custom actions
+    /// on HTLCs. This function may block, as it is spawned in a task, but *must* eventually return a result.
+    ///
+    /// The default implementation will forward HTLCs immediately with no custom records attached (as there's
+    /// no outgoing htlc to attach them to anyway).
+    async fn intercept_attacker_receive(
+        &self,
+        _req: InterceptRequest,
+    ) -> Result<Result<CustomRecords, ForwardingError>, BoxError> {
+        return Ok(Ok(CustomRecords::default()));
     }
 
     /// Intended to be executed in a separate background task to perform custom actions on the
