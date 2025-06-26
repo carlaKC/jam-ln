@@ -127,7 +127,7 @@ impl ForwardManagerParams {
 }
 
 /// Defines special actions that can be taken during a simulation that wouldn't otherwise be used in regular operation.
-pub trait SimualtionDebugManager {
+pub trait SimulationDebugManager {
     fn general_jam_channel(&self, channel: u64) -> Result<(), ReputationError>;
 }
 
@@ -269,7 +269,7 @@ impl ForwardManager {
     }
 }
 
-impl SimualtionDebugManager for ForwardManager {
+impl SimulationDebugManager for ForwardManager {
     fn general_jam_channel(&self, channel: u64) -> Result<(), ReputationError> {
         self.inner
             .lock()
@@ -558,7 +558,7 @@ mod tests {
 
     use super::{ForwardManagerParams, RevenueAverage};
     use crate::{
-        forward_manager::{ForwardManager, SimualtionDebugManager},
+        forward_manager::{ForwardManager, SimulationDebugManager},
         AccountableSignal, ChannelSnapshot, FailureReason, ForwardingOutcome, HtlcRef,
         ProposedForward, ReputationError, ReputationManager, ReputationParams,
     };

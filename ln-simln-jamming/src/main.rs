@@ -12,7 +12,7 @@ use ln_simln_jamming::parsing::{
     find_alias_by_pubkey, find_pubkey_by_alias, reputation_snapshot_from_file, Cli, SimNetwork,
     DEFAULT_REPUTATION_FILENAME, DEFAULT_REVENUE_FILENAME,
 };
-use ln_simln_jamming::reputation_interceptor::ReputationInterceptor;
+use ln_simln_jamming::reputation_interceptor::{GeneralChannelJammer, ReputationInterceptor};
 use ln_simln_jamming::revenue_interceptor::{RevenueInterceptor, RevenueSnapshot};
 use ln_simln_jamming::{
     get_network_reputation, BoxError, NetworkReputation, ACCOUNTABLE_TYPE, UPGRADABLE_TYPE,
@@ -167,11 +167,13 @@ async fn main() -> Result<(), BoxError> {
     ));
 
     let attack_setup = attack.setup_for_network()?;
-    reputation_interceptor
-        .lock()
-        .await
-        .jam_channels(&attack_setup.general_jammed_nodes)
-        .await?;
+    for (channel, pubkey) in attack_setup.general_jammed_nodes.iter() {
+        reputation_interceptor
+            .lock()
+            .await
+            .jam_channel(pubkey, *channel)
+            .await?;
+    }
 
     let attack_custom_actions = Arc::clone(&attack);
 
