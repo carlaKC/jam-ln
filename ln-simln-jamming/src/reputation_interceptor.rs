@@ -76,7 +76,7 @@ pub trait ReputationMonitor {
 
 struct Node<M>
 where
-    M: ReputationManager,
+    M: ReputationManager + SimulationDebugManager,
 {
     forward_manager: M,
     alias: String,
@@ -84,7 +84,7 @@ where
 
 impl<M> Node<M>
 where
-    M: ReputationManager,
+    M: ReputationManager + SimulationDebugManager,
 {
     fn new(forward_manager: M, alias: String) -> Self {
         Node {
@@ -100,7 +100,7 @@ where
 pub struct ReputationInterceptor<R, M>
 where
     R: ForwardReporter,
-    M: ReputationManager,
+    M: ReputationManager + SimulationDebugManager,
 {
     network_nodes: Arc<Mutex<HashMap<PublicKey, Node<M>>>>,
     clock: Arc<dyn InstantClock + Send + Sync>,
@@ -245,19 +245,6 @@ where
         })
     }
 
-    pub async fn jam_channels(&self, general_jammed: &[(u64, PublicKey)]) -> Result<(), BoxError> {
-        for (channel, pubkey) in general_jammed.iter() {
-            self.network_nodes
-                .lock()
-                .await
-                .get_mut(pubkey)
-                .ok_or(format!("jammed node: {} not found", pubkey))?
-                .forward_manager
-                .general_jam_channel(*channel)?;
-        }
-        Ok(())
-    }
-
     /// Bootstraps the reputation of nodes in the interceptor network using the historical forwards provided.
     pub async fn bootstrap_network_history(
         &mut self,
@@ -350,10 +337,33 @@ where
     }
 }
 
+#[async_trait]
+pub trait GeneralChannelJammer {
+    async fn jam_channel(&self, pubkey: &PublicKey, channel: u64) -> Result<(), BoxError>;
+}
+
+#[async_trait]
+impl<R, M> GeneralChannelJammer for ReputationInterceptor<R, M>
+where
+    R: ForwardReporter,
+    M: ReputationManager + SimulationDebugManager + Send,
+{
+    async fn jam_channel(&self, pubkey: &PublicKey, channel: u64) -> Result<(), BoxError> {
+        self.network_nodes
+            .lock()
+            .await
+            .get_mut(pubkey)
+            .ok_or(format!("jammed node: {} not found", pubkey))?
+            .forward_manager
+            .general_jam_channel(channel)
+            .map_err(|e| e.into())
+    }
+}
+
 impl<R, M> ReputationInterceptor<R, M>
 where
     R: ForwardReporter,
-    M: ReputationManager,
+    M: ReputationManager + SimulationDebugManager,
 {
     /// Adds a htlc forward to the jamming interceptor, performing forwarding checks and returning the decided
     /// forwarding outcome for the htlc. Callers should fail if the outer result is an error, because an unexpected
@@ -451,7 +461,7 @@ where
 impl<R, M> ReputationMonitor for ReputationInterceptor<R, M>
 where
     R: ForwardReporter,
-    M: ReputationManager + Send,
+    M: ReputationManager + Send + SimulationDebugManager,
 {
     async fn list_channels(
         &self,
@@ -473,7 +483,7 @@ where
 impl<R, M> Interceptor for ReputationInterceptor<R, M>
 where
     R: ForwardReporter,
-    M: ReputationManager + Send + Sync,
+    M: ReputationManager + Send + Sync + SimulationDebugManager,
 {
     /// Implemented by HTLC interceptors that provide input on the resolution of HTLCs forwarded in the simulation.
     async fn intercept_htlc(
@@ -545,7 +555,9 @@ where
 mod tests {
     use async_trait::async_trait;
     use bitcoin::secp256k1::PublicKey;
-    use ln_resource_mgr::forward_manager::{ForwardManager, ForwardManagerParams};
+    use ln_resource_mgr::forward_manager::{
+        ForwardManager, ForwardManagerParams, SimulationDebugManager,
+    };
     use ln_resource_mgr::{
         AccountableSignal, AllocationCheck, ChannelSnapshot, ForwardResolution, ForwardingOutcome,
         HtlcRef, ProposedForward, ReputationError, ReputationManager, ReputationParams,
@@ -563,7 +575,7 @@ mod tests {
 
     use crate::analysis::BatchForwardWriter;
     use crate::clock::InstantClock;
-    use crate::reputation_interceptor::{BootstrapForward, BootstrapRecords};
+    use crate::reputation_interceptor::{BootstrapForward, BootstrapRecords, GeneralChannelJammer};
     use crate::test_utils::{get_random_keypair, setup_test_request, test_allocation_check};
     use crate::{accountable_from_records, BoxError};
 
@@ -571,6 +583,10 @@ mod tests {
 
     mock! {
         ForwardManager{}
+
+        impl SimulationDebugManager for ForwardManager {
+            fn general_jam_channel(&self, channel: u64) -> Result<(), ReputationError>;
+        }
 
         #[async_trait]
         impl ReputationManager for ForwardManager{
@@ -997,8 +1013,9 @@ mod tests {
             })
             .await
             .unwrap();
+
         interceptor
-            .jam_channels(&[(bob_to_carol, edges[1].node_1.pubkey)])
+            .jam_channel(&edges[1].node_1.pubkey, bob_to_carol)
             .await
             .unwrap();
 
