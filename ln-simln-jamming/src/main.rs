@@ -284,7 +284,7 @@ async fn main() -> Result<(), BoxError> {
     let (simulation, validated_activities, sim_nodes) = create_simulation_with_network(
         sim_cfg,
         &sim_params,
-        cli.clock_speedup,
+        clock.clone(),
         tasks,
         interceptors,
         custom_records,

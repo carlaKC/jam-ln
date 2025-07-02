@@ -118,6 +118,23 @@ pub struct ForwardManagerParams {
     pub congestion_liquidity_portion: u8,
 }
 
+impl Default for ForwardManagerParams {
+    fn default() -> Self {
+        ForwardManagerParams {
+            reputation_params: ReputationParams {
+                revenue_window: Duration::from_secs(60 * 60 * 24 * 14),
+                reputation_multiplier: 12,
+                resolution_period: Duration::from_secs(90),
+                expected_block_speed: Some(Duration::from_secs(10 * 60)),
+            },
+            general_slot_portion: 30,
+            general_liquidity_portion: 30,
+            congestion_slot_portion: 20,
+            congestion_liquidity_portion: 20,
+        }
+    }
+}
+
 impl ForwardManagerParams {
     /// Returns the opportunity cost for the htlc amount and expiry provided, assuming 10 minute blocks.
     pub fn htlc_opportunity_cost(&self, fee_msat: u64, expiry: u32) -> u64 {
