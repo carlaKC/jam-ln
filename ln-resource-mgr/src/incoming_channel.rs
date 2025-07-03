@@ -437,4 +437,26 @@ mod tests {
 
         assert!(!bucket.add_htlc(scid, htlc_too_big).unwrap());
     }
+
+    /// Demonstrates a bug where adding htlcs which share a common slot and then removing them
+    /// in the reverse order causes a failure.
+    #[test]
+    fn test_duplicate_remove_bug() {
+        let mut bucket = GeneralBucket::new(123, TEST_BUCKET_PARAMS).unwrap();
+        let scid_1 = 345;
+        let scid_2 = 678;
+
+        bucket.candidate_slots.insert(scid_1, [0, 3, 4, 5, 7]);
+        bucket.candidate_slots.insert(scid_2, [0, 1, 2, 6, 7]);
+
+        let htlc_amt = bucket.slot_size_msat * 2;
+        assert!(bucket.add_htlc(scid_1, htlc_amt).unwrap());
+        assert!(bucket.add_htlc(scid_2, htlc_amt).unwrap());
+
+        bucket.remove_htlc(scid_2, htlc_amt).unwrap();
+        assert!(matches!(
+            bucket.remove_htlc(scid_1, htlc_amt),
+            Err(ReputationError::ErrBucketTooEmpty(_))
+        ));
+    }
 }
