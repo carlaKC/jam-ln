@@ -321,7 +321,8 @@ pub struct Cli {
 
 impl Cli {
     pub fn validate(&self) -> Result<ForwardManagerParams, BoxError> {
-        if self.target_reputation_percent == 0 || self.target_reputation_percent > 100 {
+        //if self.target_reputation_percent == 0 || self.target_reputation_percent > 100 {
+        if self.target_reputation_percent > 100 {
             return Err(format!(
                 "target reputation percent {} must be in (0;100]",
                 self.target_reputation_percent

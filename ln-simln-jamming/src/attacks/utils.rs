@@ -117,7 +117,6 @@ pub async fn build_reputation<C: Clock + InstantClock, R: ReputationMonitor>(
     let mut htlc_risk = 0;
     for path in route.paths.iter_mut() {
         total_fees_paid += path.hops.iter().map(|hop| hop.fee_msat).sum::<u64>();
-
         let target_hop = match path
             .hops
             .iter_mut()
