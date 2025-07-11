@@ -13,8 +13,8 @@ use ln_simln_jamming::{
     analysis::BatchForwardWriter,
     clock::InstantClock,
     parsing::{
-        get_history_for_bootstrap, history_from_file, parse_duration, SimulationFiles,
-        NetworkParams, ReputationParams,
+        get_history_for_bootstrap, history_from_file, parse_duration, NetworkParams,
+        ReputationParams, SimulationFiles,
     },
     reputation_interceptor::{BootstrapRecords, ReputationInterceptor, ReputationMonitor},
     BoxError,
@@ -50,14 +50,27 @@ async fn main() -> Result<(), BoxError> {
     let network_dir = SimulationFiles::new(cli.network.network_dir.clone())?;
     let (attacker_pubkey, target_pubkey) = (network_dir.attacker.1, network_dir.target.1);
 
+    // If no attacker bootstrap period is specified, we can just use the traffic from peacetime
+    // projections to bootstrap peaceful nodes in the network. This may provide a quicker start
+    // for some attacks because you do not need to generate the second traffic file.
+    let traffic_file = if cli.attacker_bootstrap.is_some() {
+        &network_dir.attacktime_traffic()
+    } else {
+        &network_dir.peacetime_traffic()
+    };
+
     let unfiltered_history = history_from_file(
-        &network_dir.attacktime_traffic(),
+        traffic_file,
         Some(forward_params.reputation_params.revenue_window),
     )
     .await?;
 
     // filter bootstrap records if attacker alias and bootstrap provided
     let bootstrap = if let Some(bootstrap_dur) = cli.attacker_bootstrap {
+        if bootstrap_dur.is_zero() {
+            return Err("zero attacker_bootstrap is invalid, do not specify option".into());
+        }
+
         let target_to_attacker = match network_dir.sim_network.iter().find(|&channel| {
             (channel.node_1.pubkey == target_pubkey && channel.node_2.pubkey == attacker_pubkey)
                 || (channel.node_1.pubkey == attacker_pubkey
@@ -114,8 +127,7 @@ async fn main() -> Result<(), BoxError> {
         node_pubkeys.insert(chan.node_2.pubkey);
     }
 
-    let (network_file, target_revenue) =
-        network_dir.reputation_summary(cli.attacker_bootstrap);
+    let (network_file, target_revenue) = network_dir.reputation_summary(cli.attacker_bootstrap);
 
     let mut target_revenue = File::create(target_revenue)?;
     write!(target_revenue, "{}", bootstrap_revenue)?;
