@@ -1,6 +1,3 @@
-*.json
-*.csv
 target
 data
-results
-reputation-snapshots
+results/*
