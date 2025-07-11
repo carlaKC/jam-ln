@@ -10,7 +10,7 @@ use ln_resource_mgr::ChannelSnapshot;
 use serde::{Deserialize, Serialize};
 use sim_cli::parsing::NetworkParser;
 use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufReader, Read, Seek};
 use std::ops::Add;
 use std::path::PathBuf;
@@ -19,24 +19,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::task::{self, JoinSet};
-
-/// Default file used to describe the network being simulated.
-pub const DEFAULT_SIM_FILE: &str = "./simln.json";
-
-/// Default file used to bootstrap reputation.
-pub const DEFAULT_BOOTSTRAP_FILE: &str = "./bootstrap.csv";
-
-/// Default directory to look for reputation snapshot and revenue files.
-pub const DEFAULT_REPUTATION_DIR: &str = "./reputation-snapshots";
-
-/// Filename used used to write reputation snapshot data.
-pub const DEFAULT_REPUTATION_FILENAME: &str = "reputation-snapshot.csv";
-
-/// Filename used to write the target revenue.
-pub const DEFAULT_REVENUE_FILENAME: &str = "target-revenue.txt";
-
-/// Default file used to imitate peacetime revenue
-pub const DEFAULT_PEACETIME_FILE: &str = "./peacetime.csv";
 
 /// Default percent of good reputation pairs the target requires.
 pub const DEFAULT_TARGET_REP_PERCENT: &str = "50";
@@ -60,9 +42,6 @@ pub const DEFAULT_ATTACKER_POLL_SECONDS: &str = "300";
 
 /// The default batch size for writing results to disk.
 pub const DEFAULT_RESULT_BATCH_SIZE: &str = "500";
-
-/// The default location to output results files.
-const DEFAULT_RESULTS_DIR: &str = ".";
 
 #[derive(Clone, Parser)]
 pub struct ReputationParams {
@@ -88,26 +67,136 @@ impl From<ReputationParams> for ForwardManagerParams {
     }
 }
 
+#[derive(Clone, Parser)]
+pub struct NetworkParams {
+    /// The directory containing all files required for the simulation.
+    #[arg(long)]
+    pub network_dir: PathBuf,
+}
+
+/// Describes a network of files used to run a simulation.
+pub struct SimulationFiles {
+    /// The network directory that contains all files required for the simulation.
+    dir: PathBuf,
+
+    /// The graph that the simulation will run on.
+    pub sim_network: Vec<NetworkParser>,
+
+    /// The details of the attacking node.
+    pub attacker: (String, PublicKey),
+
+    /// The details of the target node.
+    pub target: (String, PublicKey),
+}
+
+impl SimulationFiles {
+    /// Reads simulation relevant files and creates and directories necessary for the simulation.
+    pub fn new(network_dir: PathBuf) -> Result<Self, BoxError> {
+        // We don't actually need to use this file, but if it's not present the simulation has
+        // probably been set up incorrectly (because you need to generate peacetime traffic
+        // from this file).
+        let _ = &fs::read_to_string(network_dir.join("peacetime_network.json"))
+            .map_err(|e| format!("could not find peacetime_network.json: {}", e))?;
+
+        let SimNetwork { sim_network } = serde_json::from_str(
+            &fs::read_to_string(network_dir.join("attacktime_network.json"))
+                .map_err(|e| format!("could not find attacktime_network.json: {}", e))?,
+        )?;
+
+        // In future commits, we'll allow multiple attacker aliases. For now, read a CSV and enforce
+        // that there's only one attacker present.
+        let attacker_list = fs::read_to_string(network_dir.join("attacker.csv")).map_err(|e| {
+            format!(
+                "attacker.csv file containing attacker alias not found: {}",
+                e
+            )
+        })?;
+        let attacker_aliases: Vec<&str> = attacker_list.trim().split(',').collect();
+
+        if attacker_aliases.len() != 1 {
+            return Err(format!(
+                "expected on attacker alias, got: {}",
+                attacker_aliases.len()
+            )
+            .into());
+        }
+
+        let attacker_alias = attacker_aliases
+            .first()
+            .ok_or("No attacker alias found in file")?;
+
+        // We only allow one target node, but if there are multiple aliases in this file we'll
+        // fail to find the pubkey by alias below.
+        let target_alias = fs::read_to_string(network_dir.join("target.txt"))
+            .map_err(|e| format!("target.txt file containing target alias not found: {}", e))?;
+
+        let attacker_pubkey = find_pubkey_by_alias(attacker_alias, &sim_network)?;
+        let target_pubkey = find_pubkey_by_alias(&target_alias.trim(), &sim_network)?;
+
+        // Create results + reputation directories if they're not present, they are part of our
+        // expected structure for the network.
+        std::fs::create_dir_all(network_dir.join("reputation"))?;
+        std::fs::create_dir_all(network_dir.join("results"))?;
+
+        Ok(SimulationFiles {
+            dir: network_dir,
+            sim_network,
+            attacker: (attacker_alias.to_string(), attacker_pubkey),
+            target: (target_alias.to_string(), target_pubkey),
+        })
+    }
+
+    /// Returns a directory to write simulation results to.
+    pub fn results_dir(&self) -> PathBuf {
+        self.dir.join("results")
+    }
+
+    /// Returns the location of a reputation and target revenue summary for the period of time
+    /// that the attacker in the network is bootstrapped for, creating sub-directories to hold
+    /// these files is necessary.
+    pub fn reputation_summary(&self, duration: Option<Duration>) -> (PathBuf, PathBuf) {
+        let reputation_dir = self
+            .dir
+            .join("reputation")
+            .join(HumanDuration::from(duration.unwrap_or(Duration::ZERO)).to_string());
+
+        // Create the specific duration directory
+        let _ = std::fs::create_dir_all(&reputation_dir);
+
+        (
+            reputation_dir.join("reputation_summary.csv"),
+            reputation_dir.join("target_revenue.txt"),
+        )
+    }
+
+    /// Returns the location of the file containing peacetime projections for the network.
+    pub fn peacetime_traffic(&self) -> PathBuf {
+        self.dir.join("peacetime_traffic.csv")
+    }
+
+    /// Returns the location of the file used to generate reputation snapshots from.
+    pub fn attacktime_traffic(&self) -> PathBuf {
+        self.dir.join("attacktime_traffic.csv")
+    }
+}
+
 #[derive(Parser)]
 #[command(version, about)]
 pub struct Cli {
-    /// A json file describing the lightning channels being simulated.
-    #[arg(long, short, default_value = DEFAULT_SIM_FILE)]
-    pub sim_file: PathBuf,
+    #[command(flatten)]
+    pub network: NetworkParams,
 
-    /// Directory containing reputation values for the channels in the network
-    #[arg(long, default_value = DEFAULT_REPUTATION_DIR)]
-    pub reputation_dir: PathBuf,
-
-    /// A CSV file containing forwards for the network, excluding the attacker used to represent peacetime revenue
-    /// for the target node.
-    #[arg(long, default_value = DEFAULT_PEACETIME_FILE)]
-    pub peacetime_file: PathBuf,
-
-    /// The duration of time that reputation of the attacking node should be bootstrapped for, expressed as human
-    /// readable values (eg: 1w, 3d).
+    /// The duration of time that reputation of the attacking node's reputation will be bootstrapped
+    /// for, expressed as human readable values (eg: 1w, 3d).
+    ///
+    /// Requires that a file with the following name format is provided in [`Self::network_dir`]:
+    ///
+    /// - bootstrap_attacker_for_{t}.csv
+    ///
+    /// For example, if bootstrapping for 3w, the simulator will look for:
+    /// network_dir/bootstrap_attacker_for_3w.csv
     #[arg(long, value_parser = parse_duration)]
-    pub attacker_bootstrap: (String, Duration),
+    pub attacker_bootstrap: Duration,
 
     /// The minimum percentage of channel pairs between the target and its honest peers that the target needs to have
     /// good reputation on for the simulation to run.
@@ -144,18 +233,6 @@ pub struct Cli {
 
     #[command(flatten)]
     pub reputation_params: ReputationParams,
-
-    /// The directory to write output files to.
-    #[arg(long, default_value = DEFAULT_RESULTS_DIR)]
-    pub results_dir: PathBuf,
-
-    /// The alias of the target node.
-    #[arg(long)]
-    pub target_alias: String,
-
-    /// The alias of the attacking node.
-    #[arg(long)]
-    pub attacker_alias: String,
 }
 
 impl Cli {
@@ -177,10 +254,10 @@ impl Cli {
         }
 
         let forward_params: ForwardManagerParams = self.reputation_params.clone().into();
-        if forward_params.reputation_params.reputation_window() < self.attacker_bootstrap.1 {
+        if forward_params.reputation_params.reputation_window() < self.attacker_bootstrap {
             return Err(format!(
                 "attacker_bootstrap {:?} < reputation window {:?} ({:?} * {})))",
-                self.attacker_bootstrap.1,
+                self.attacker_bootstrap,
                 forward_params.reputation_params.reputation_window(),
                 forward_params.reputation_params.revenue_window,
                 forward_params.reputation_params.reputation_multiplier,
@@ -230,10 +307,10 @@ pub fn find_alias_by_pubkey(
     })
 }
 
-pub fn parse_duration(s: &str) -> Result<(String, Duration), String> {
-    HumanDuration::from_str(s)
-        .map(|hd| (s.to_string(), hd.into()))
-        .map_err(|e| format!("Invalid duration '{}': {}", s, e))
+pub fn parse_duration(s: &str) -> Result<Duration, String> {
+    Ok(HumanDuration::from_str(s)
+        .map_err(|e| format!("Invalid duration '{}': {}", s, e))?
+        .into())
 }
 
 fn find_next_newline(file: &mut BufReader<File>, start: u64) -> Result<u64, BoxError> {
