@@ -111,7 +111,12 @@ async fn main() -> Result<(), BoxError> {
 
     let (network_bootstrap, taret_revenue) =
         network_dir.reputation_summary(Some(cli.attacker_bootstrap));
-    let reputation_snapshot = reputation_snapshot_from_file(&network_bootstrap)?;
+    let reputation_snapshot = reputation_snapshot_from_file(&network_bootstrap).map_err(|e| {
+        format!(
+            "could not find reputation snapshot {:?}, try generating one with reputation-builder: {:?}",
+            network_bootstrap, e
+        )
+    })?;
     let bootstrap_revenue: u64 = std::fs::read_to_string(taret_revenue)?.parse()?;
 
     let reputation_interceptor = Arc::new(Mutex::new(
