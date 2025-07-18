@@ -2,7 +2,7 @@ use crate::reputation_interceptor::{BootstrapForward, BootstrapRecords};
 use crate::revenue_interceptor::RevenueEvent;
 use crate::BoxError;
 use bitcoin::secp256k1::PublicKey;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use csv::{ReaderBuilder, StringRecord};
 use humantime::Duration as HumanDuration;
 use ln_resource_mgr::forward_manager::ForwardManagerParams;
@@ -10,7 +10,7 @@ use ln_resource_mgr::ChannelSnapshot;
 use serde::{Deserialize, Serialize};
 use sim_cli::parsing::NetworkParser;
 use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufReader, Read, Seek};
 use std::ops::Add;
 use std::path::PathBuf;
@@ -19,24 +19,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::task::{self, JoinSet};
-
-/// Default file used to describe the network being simulated.
-pub const DEFAULT_SIM_FILE: &str = "./simln.json";
-
-/// Default file used to bootstrap reputation.
-pub const DEFAULT_BOOTSTRAP_FILE: &str = "./bootstrap.csv";
-
-/// Default directory to look for reputation snapshot and revenue files.
-pub const DEFAULT_REPUTATION_DIR: &str = "./reputation-snapshots";
-
-/// Filename used used to write reputation snapshot data.
-pub const DEFAULT_REPUTATION_FILENAME: &str = "reputation-snapshot.csv";
-
-/// Filename used to write the target revenue.
-pub const DEFAULT_REVENUE_FILENAME: &str = "target-revenue.txt";
-
-/// Default file used to imitate peacetime revenue
-pub const DEFAULT_PEACETIME_FILE: &str = "./peacetime.csv";
 
 /// Default percent of good reputation pairs the target requires.
 pub const DEFAULT_TARGET_REP_PERCENT: &str = "50";
@@ -60,9 +42,6 @@ pub const DEFAULT_ATTACKER_POLL_SECONDS: &str = "300";
 
 /// The default batch size for writing results to disk.
 pub const DEFAULT_RESULT_BATCH_SIZE: &str = "500";
-
-/// The default location to output results files.
-const DEFAULT_RESULTS_DIR: &str = ".";
 
 #[derive(Clone, Parser)]
 pub struct ReputationParams {
@@ -88,26 +67,220 @@ impl From<ReputationParams> for ForwardManagerParams {
     }
 }
 
+#[derive(Debug, Copy, Clone, Parser, ValueEnum)]
+pub enum TrafficType {
+    Peacetime,
+    Attacktime,
+}
+
+#[derive(Clone, Parser)]
+pub struct NetworkParams {
+    /// The directory containing all files required for the simulation.
+    #[arg(long)]
+    pub network_dir: PathBuf,
+}
+
+/// Describes a network of files used to run a simulation.
+pub struct SimulationFiles {
+    /// The network directory that contains all files required for the simulation.
+    dir: PathBuf,
+
+    /// The graph that the simulation will run on.
+    pub sim_network: Vec<NetworkParser>,
+
+    /// The details of the attacking node.
+    pub attacker: (String, PublicKey),
+
+    /// The details of the target node.
+    pub target: (String, PublicKey),
+}
+
+impl SimulationFiles {
+    /// Reads simulation relevant files and creates and directories necessary for the simulation.
+    pub fn new(network_dir: PathBuf, graph_type: TrafficType) -> Result<Self, BoxError> {
+        // We'll always read both graphs to make sure that they're sanely set up, even though
+        // we only need one or the other depending on graph type.
+        let peacetime_network: SimNetwork = serde_json::from_str(
+            &fs::read_to_string(network_dir.join("peacetime_network.json"))
+                .map_err(|e| format!("could not find peacetime_network.json: {}", e))?,
+        )?;
+
+        let attacktime_network: SimNetwork = serde_json::from_str(
+            &fs::read_to_string(network_dir.join("attacktime_network.json"))
+                .map_err(|e| format!("could not find attacktime_network.json: {}", e))?,
+        )?;
+
+        // In future commits, we'll allow multiple attacker aliases. For now, read a CSV and enforce
+        // that there's only one attacker present.
+        let attacker_list = fs::read_to_string(network_dir.join("attacker.csv")).map_err(|e| {
+            format!(
+                "attacker.csv file containing attacker alias not found: {}",
+                e
+            )
+        })?;
+        let attacker_aliases: Vec<&str> = attacker_list.trim().split(',').collect();
+        diff_peacetime_attacktime(
+            &peacetime_network.sim_network,
+            &attacktime_network.sim_network,
+            &attacker_aliases,
+        )?;
+
+        if attacker_aliases.len() != 1 {
+            return Err(format!(
+                "expected one attacker alias, got: {}",
+                attacker_aliases.len()
+            )
+            .into());
+        }
+
+        let attacker_alias = attacker_aliases
+            .first()
+            .ok_or("No attacker alias found in file")?;
+
+        // We only allow one target node, but if there are multiple aliases in this file we'll
+        // fail to find the pubkey by alias below.
+        let target_alias = fs::read_to_string(network_dir.join("target.txt"))
+            .map_err(|e| format!("target.txt file containing target alias not found: {}", e))?;
+
+        // The attacker is only present in the attacktime graph, so we just use it for both of
+        // our lookups.
+        let attacker_pubkey =
+            find_pubkey_by_alias(attacker_alias, &attacktime_network.sim_network)?;
+        let target_pubkey =
+            find_pubkey_by_alias(target_alias.trim(), &attacktime_network.sim_network)?;
+
+        // Create results + reputation directories if they're not present, they are part of our
+        // expected structure for the network.
+        std::fs::create_dir_all(network_dir.join("reputation"))?;
+        std::fs::create_dir_all(network_dir.join("results"))?;
+
+        Ok(SimulationFiles {
+            dir: network_dir,
+            sim_network: match graph_type {
+                TrafficType::Attacktime => attacktime_network.sim_network,
+                TrafficType::Peacetime => peacetime_network.sim_network,
+            },
+            attacker: (attacker_alias.to_string(), attacker_pubkey),
+            target: (target_alias.to_string(), target_pubkey),
+        })
+    }
+
+    /// Returns a directory to write simulation results to.
+    pub fn results_dir(&self) -> PathBuf {
+        self.dir.join("results")
+    }
+
+    /// Returns the location of a reputation and target revenue summary for the period of time
+    /// that the attacker in the network is bootstrapped for, creating sub-directories to hold
+    /// these files is necessary.
+    pub fn reputation_summary(&self, duration: Option<Duration>) -> (PathBuf, PathBuf) {
+        let reputation_dir = self
+            .dir
+            .join("reputation")
+            .join(HumanDuration::from(duration.unwrap_or(Duration::ZERO)).to_string());
+
+        // Create the specific duration directory
+        let _ = std::fs::create_dir_all(&reputation_dir);
+
+        (
+            reputation_dir.join("reputation_summary.csv"),
+            reputation_dir.join("target_revenue.txt"),
+        )
+    }
+
+    /// Returns the location of the file containing peacetime projections for the network.
+    pub fn peacetime_traffic(&self) -> PathBuf {
+        self.dir.join("peacetime_traffic.csv")
+    }
+
+    /// Returns the location of the file used to generate reputation snapshots from.
+    pub fn attacktime_traffic(&self) -> PathBuf {
+        self.dir.join("attacktime_traffic.csv")
+    }
+}
+
+/// Checks that the only difference in the peacetime and attack time channel graphs are attacker
+/// owned channels.
+fn diff_peacetime_attacktime(
+    peacetime: &[NetworkParser],
+    attacktime: &[NetworkParser],
+    attacker_aliases: &[&str],
+) -> Result<(), BoxError> {
+    let peacetime_map: HashMap<u64, (String, String)> = peacetime
+        .iter()
+        .map(|channel| {
+            (
+                channel.scid.into(),
+                (channel.node_1.alias.clone(), channel.node_2.alias.clone()),
+            )
+        })
+        .collect();
+
+    let mut attacktime_map: HashMap<u64, (String, String)> = attacktime
+        .iter()
+        .map(|channel| {
+            (
+                channel.scid.into(),
+                (channel.node_1.alias.clone(), channel.node_2.alias.clone()),
+            )
+        })
+        .collect();
+
+    let attacker_aliases: HashSet<String> =
+        HashSet::from_iter(attacker_aliases.iter().map(|s| s.to_string()));
+
+    for (scid, (peacetime_1, peacetime_2)) in peacetime_map.iter() {
+        if attacker_aliases.contains(peacetime_1) || attacker_aliases.contains(peacetime_2) {
+            return Err(format!(
+                "peacetime map contains channel: {} belonging to attacker: ({}, {})",
+                scid, peacetime_1, peacetime_2
+            )
+            .into());
+        }
+
+        match attacktime_map.remove(scid) {
+            Some((attack_1, attack_2)) => {
+                if (attack_1 != *peacetime_1 || attack_2 != *peacetime_2)
+                    && (attack_2 != *peacetime_1 || attack_1 != *peacetime_2)
+                {
+                    return Err(format!(
+                        "channel: {} has mismatched aliases - peacetime ({}, {}), attacktime: ({}, {})",
+                        scid, peacetime_1, peacetime_2, attack_1, attack_2,
+                    ).into());
+                }
+            }
+            None => {
+                return Err(
+                    format!("channel: {} found in peacetime map but not attacker", scid).into(),
+                )
+            }
+        }
+    }
+
+    // Once we've removed all the matching channels, only attacker channels should remain.
+    for (scid, (node_1, node_2)) in attacktime_map {
+        if !(attacker_aliases.contains(&node_1) || attacker_aliases.contains(&node_2)) {
+            return Err(format!(
+                "attacker graph contains channel: {} which is not in peacetime graph and does not belong to attacker: ({}, {})",
+                 scid, node_1, node_2,
+            ).into());
+        }
+    }
+
+    Ok(())
+}
+
 #[derive(Parser)]
 #[command(version, about)]
 pub struct Cli {
-    /// A json file describing the lightning channels being simulated.
-    #[arg(long, short, default_value = DEFAULT_SIM_FILE)]
-    pub sim_file: PathBuf,
+    #[command(flatten)]
+    pub network: NetworkParams,
 
-    /// Directory containing reputation values for the channels in the network
-    #[arg(long, default_value = DEFAULT_REPUTATION_DIR)]
-    pub reputation_dir: PathBuf,
-
-    /// A CSV file containing forwards for the network, excluding the attacker used to represent peacetime revenue
-    /// for the target node.
-    #[arg(long, default_value = DEFAULT_PEACETIME_FILE)]
-    pub peacetime_file: PathBuf,
-
-    /// The duration of time that reputation of the attacking node should be bootstrapped for, expressed as human
-    /// readable values (eg: 1w, 3d).
+    /// The duration of time that reputation of the attacking node's reputation will be bootstrapped
+    /// for, expressed as human readable values (eg: 1w, 3d). Requires that a reputation bootstrap
+    /// file has been created in advance for this duration.
     #[arg(long, value_parser = parse_duration)]
-    pub attacker_bootstrap: (String, Duration),
+    pub attacker_bootstrap: Option<Duration>,
 
     /// The minimum percentage of channel pairs between the target and its honest peers that the target needs to have
     /// good reputation on for the simulation to run.
@@ -116,8 +289,8 @@ pub struct Cli {
 
     /// The minimum percentage of pairs with between the target and the attacker that the attacker needs to have good
     /// reputation on for the simulation to run.
-    #[arg(long, default_value = DEFAULT_ATTACKER_REP_PERCENT)]
-    pub attacker_reputation_percent: u8,
+    #[arg(long)]
+    pub attacker_reputation_percent: Option<u8>,
 
     /// Speed up multiplier to add to the wall clock to run the simulation faster.
     #[arg(long, default_value = DEFAULT_CLOCK_SPEEDUP)]
@@ -144,18 +317,6 @@ pub struct Cli {
 
     #[command(flatten)]
     pub reputation_params: ReputationParams,
-
-    /// The directory to write output files to.
-    #[arg(long, default_value = DEFAULT_RESULTS_DIR)]
-    pub results_dir: PathBuf,
-
-    /// The alias of the target node.
-    #[arg(long)]
-    pub target_alias: String,
-
-    /// The alias of the attacking node.
-    #[arg(long)]
-    pub attacker_alias: String,
 }
 
 impl Cli {
@@ -168,24 +329,28 @@ impl Cli {
             .into());
         }
 
-        if self.attacker_reputation_percent == 0 || self.attacker_reputation_percent > 100 {
-            return Err(format!(
-                "attacker reputation percent {} must be in (0;100]",
-                self.attacker_reputation_percent
-            )
-            .into());
+        if let Some(attacker_target) = self.attacker_reputation_percent {
+            if attacker_target == 0 || attacker_target > 100 {
+                return Err(format!(
+                    "attacker reputation percent {} must be in (0;100]",
+                    attacker_target,
+                )
+                .into());
+            }
         }
 
         let forward_params: ForwardManagerParams = self.reputation_params.clone().into();
-        if forward_params.reputation_params.reputation_window() < self.attacker_bootstrap.1 {
-            return Err(format!(
-                "attacker_bootstrap {:?} < reputation window {:?} ({:?} * {})))",
-                self.attacker_bootstrap.1,
-                forward_params.reputation_params.reputation_window(),
-                forward_params.reputation_params.revenue_window,
-                forward_params.reputation_params.reputation_multiplier,
-            )
-            .into());
+        if let Some(bootstrap) = self.attacker_bootstrap {
+            if forward_params.reputation_params.reputation_window() < bootstrap {
+                return Err(format!(
+                    "attacker_bootstrap {:?} > reputation window {:?} ({:?} * {})))",
+                    bootstrap,
+                    forward_params.reputation_params.reputation_window(),
+                    forward_params.reputation_params.revenue_window,
+                    forward_params.reputation_params.reputation_multiplier,
+                )
+                .into());
+            }
         }
 
         Ok(forward_params)
@@ -230,10 +395,10 @@ pub fn find_alias_by_pubkey(
     })
 }
 
-pub fn parse_duration(s: &str) -> Result<(String, Duration), String> {
-    HumanDuration::from_str(s)
-        .map(|hd| (s.to_string(), hd.into()))
-        .map_err(|e| format!("Invalid duration '{}': {}", s, e))
+pub fn parse_duration(s: &str) -> Result<Duration, String> {
+    Ok(HumanDuration::from_str(s)
+        .map_err(|e| format!("Invalid duration '{}': {}", s, e))?
+        .into())
 }
 
 fn find_next_newline(file: &mut BufReader<File>, start: u64) -> Result<u64, BoxError> {
@@ -413,16 +578,16 @@ pub async fn peacetime_from_file(
             for result in csv_reader.records() {
                 let record: StringRecord = result?;
 
-                let forwarding_node = PublicKey::from_slice(&hex::decode(&record[8])?)?;
+                let forwarding_node = PublicKey::from_slice(&hex::decode(&record[6])?)?;
                 if forwarding_node != target_pubkey {
                     continue;
                 }
 
                 let incoming_amt: u64 = record[0].parse()?;
-                let outgoing_amt: u64 = record[4].parse()?;
+                let outgoing_amt: u64 = record[1].parse()?;
 
                 heap_clone.lock().unwrap().push(RevenueEvent {
-                    timestamp_ns: record[3].parse()?,
+                    timestamp_ns: record[5].parse()?,
                     fee_msat: incoming_amt - outgoing_amt,
                 })
             }

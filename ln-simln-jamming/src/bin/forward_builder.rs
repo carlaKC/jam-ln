@@ -5,8 +5,7 @@ use ln_resource_mgr::{AllocationCheck, ProposedForward};
 use ln_simln_jamming::analysis::ForwardReporter;
 use ln_simln_jamming::clock::InstantClock;
 use ln_simln_jamming::parsing::{
-    find_pubkey_by_alias, parse_duration, ReputationParams, SimNetwork, DEFAULT_REPUTATION_DIR,
-    DEFAULT_SIM_FILE,
+    parse_duration, NetworkParams, ReputationParams, SimulationFiles, TrafficType,
 };
 use ln_simln_jamming::reputation_interceptor::{BootstrapForward, ReputationInterceptor};
 use ln_simln_jamming::{BoxError, ACCOUNTABLE_TYPE, UPGRADABLE_TYPE};
@@ -18,40 +17,27 @@ use simln_lib::latency_interceptor::LatencyIntercepor;
 use simln_lib::sim_node::CustomRecords;
 use simln_lib::SimulationCfg;
 use simple_logger::SimpleLogger;
-use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio_util::task::TaskTracker;
 
-// The default filename for the output.
-pub const DEFAULT_FWD_FILE: &str = "forwards.csv";
-
 // The default amount of time data will be generated for.
 pub const DEFAULT_RUNTIME: &str = "6months";
 
 #[derive(Parser)]
 struct Cli {
-    /// A json file describing the lightning channels being simulated.
-    #[arg(long, short, default_value = DEFAULT_SIM_FILE)]
-    sim_file: PathBuf,
-
-    // The directory to write the output to.
-    #[arg(long, short, default_value = DEFAULT_REPUTATION_DIR)]
-    output_dir: PathBuf,
+    #[command(flatten)]
+    network: NetworkParams,
 
     /// The amount of time to generate forwarding history for.
     #[arg(long, value_parser = parse_duration, default_value = DEFAULT_RUNTIME)]
-    pub duration: (String, Duration),
+    pub duration: Duration,
 
-    /// The alias of the target node.
-    #[arg(long)]
-    pub target_alias: String,
-
-    /// The alias of the attacking node.
-    #[arg(long)]
-    pub attacker_alias: String,
+    /// The network to generate forwarding traffic for.
+    #[arg(long, short)]
+    pub traffic_type: TrafficType,
 
     #[command(flatten)]
     pub reputation_params: ReputationParams,
@@ -70,32 +56,41 @@ async fn main() -> Result<(), BoxError> {
         .unwrap();
 
     let cli = Cli::parse();
-    let SimNetwork { sim_network } =
-        serde_json::from_str(&fs::read_to_string(cli.sim_file.as_path())?)?;
 
-    log::info!("Generating history for: {}", cli.duration.0);
-
-    let target_pubkey = find_pubkey_by_alias(&cli.target_alias, &sim_network)?;
-    let attacker_pubkey = find_pubkey_by_alias(&cli.attacker_alias, &sim_network)?;
+    let network_dir = SimulationFiles::new(cli.network.network_dir.clone(), cli.traffic_type)?;
+    let (attacker_pubkey, target_pubkey) = (network_dir.attacker.1, network_dir.target.1);
 
     let clock = Arc::new(SimulationClock::new(500)?);
     let tasks = TaskTracker::new();
+
+    // Forwarding traffic can either be created for the peacetime or attacktime graphs. We'll
+    // choose our output file accordingly.
+    let output_file = match cli.traffic_type {
+        TrafficType::Peacetime => network_dir.peacetime_traffic(),
+        TrafficType::Attacktime => network_dir.attacktime_traffic(),
+    };
 
     // Create a reputation interceptor without any bootstrap (since here we're creating the
     // bootstrap itself, we just want to run with reputation active).
     let reputation_interceptor = Arc::new(ReputationInterceptor::new_for_network(
         cli.reputation_params.into(),
-        &sim_network,
+        &network_dir.sim_network,
         clock.clone(),
         Some(Arc::new(Mutex::new(BootstrapWriter::new(
             clock.clone(),
-            cli.output_dir,
+            // TODO: change API in SimLN so that we can just pass a path in here.
+            cli.network.network_dir.clone(),
+            output_file
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
         )?))),
     )?);
     let latency_interceptor = Arc::new(LatencyIntercepor::new_poisson(300.0)?);
 
     let sim_cfg = SimulationCfg::new(
-        Some(cli.duration.1.as_secs() as u32),
+        Some(cli.duration.as_secs() as u32),
         3_800_000,
         2.0,
         None,
@@ -107,7 +102,7 @@ async fn main() -> Result<(), BoxError> {
 
     let sim_params = SimParams {
         nodes: vec![],
-        sim_network,
+        sim_network: network_dir.sim_network,
         activity: vec![],
         exclude: vec![attacker_pubkey, target_pubkey],
     };
@@ -137,10 +132,10 @@ impl<C> BootstrapWriter<C>
 where
     C: Clock + InstantClock + Send + Sync,
 {
-    fn new(clock: Arc<C>, dir: PathBuf) -> Result<Self, BoxError> {
+    fn new(clock: Arc<C>, dir: PathBuf, filename: String) -> Result<Self, BoxError> {
         Ok(BootstrapWriter {
             clock,
-            batch_writer: Mutex::new(BatchedWriter::new(dir, DEFAULT_FWD_FILE.into(), 500)?),
+            batch_writer: Mutex::new(BatchedWriter::new(dir, filename, 500)?),
         })
     }
 }

@@ -1,8 +1,7 @@
 use std::{
     collections::HashSet,
-    fs::{self, File, OpenOptions},
+    fs::{File, OpenOptions},
     io::Write,
-    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
@@ -14,9 +13,8 @@ use ln_simln_jamming::{
     analysis::BatchForwardWriter,
     clock::InstantClock,
     parsing::{
-        find_pubkey_by_alias, get_history_for_bootstrap, history_from_file, parse_duration,
-        ReputationParams, SimNetwork, DEFAULT_REPUTATION_DIR, DEFAULT_REPUTATION_FILENAME,
-        DEFAULT_REVENUE_FILENAME, DEFAULT_SIM_FILE,
+        get_history_for_bootstrap, history_from_file, parse_duration, NetworkParams,
+        ReputationParams, SimulationFiles, TrafficType,
     },
     reputation_interceptor::{BootstrapRecords, ReputationInterceptor, ReputationMonitor},
     BoxError,
@@ -25,40 +23,17 @@ use log::LevelFilter;
 use simln_lib::clock::SimulationClock;
 use simple_logger::SimpleLogger;
 
-/// Default file used to bootstrap reputation.
-const DEFAULT_BOOTSTRAP_FILE: &str = "./bootstrap.csv";
-
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
-    /// A json file describing the lightning channels being simulated.
-    #[arg(long, short, default_value = DEFAULT_SIM_FILE)]
-    sim_file: PathBuf,
+    #[command(flatten)]
+    network: NetworkParams,
 
-    /// A CSV file containing forwards for the network, including the attacker used to bootstrap reputation for the
-    /// simulation.
-    #[arg(long, default_value = DEFAULT_BOOTSTRAP_FILE)]
-    bootstrap_file: PathBuf,
-
-    /// The duration of time that reputation of the attacking node should be bootstrapped for, expressed as human
-    /// readable values (eg: 1w, 3d).
     #[arg(long, value_parser = parse_duration)]
-    attacker_bootstrap: Option<(String, Duration)>,
+    pub attacker_bootstrap: Option<Duration>,
 
     #[command(flatten)]
     pub reputation_params: ReputationParams,
-
-    /// The directory to write reputation snapshot and revenue file.
-    #[arg(long, default_value = DEFAULT_REPUTATION_DIR)]
-    results_dir: PathBuf,
-
-    /// The alias of the target node.
-    #[arg(long)]
-    target_alias: String,
-
-    /// The alias of the attacking node.
-    #[arg(long)]
-    attacker_alias: Option<String>,
 }
 
 #[tokio::main]
@@ -71,22 +46,36 @@ async fn main() -> Result<(), BoxError> {
 
     let cli = Cli::parse();
     let forward_params: ForwardManagerParams = cli.reputation_params.into();
-    let SimNetwork { sim_network } =
-        serde_json::from_str(&fs::read_to_string(cli.sim_file.as_path())?)?;
+
+    let network_type = match cli.attacker_bootstrap {
+        Some(_) => TrafficType::Attacktime,
+        None => TrafficType::Peacetime,
+    };
+    let network_dir = SimulationFiles::new(cli.network.network_dir, network_type)?;
+    let (attacker_pubkey, target_pubkey) = (network_dir.attacker.1, network_dir.target.1);
+
+    // If no attacker bootstrap period is specified, we can just use the traffic from peacetime
+    // projections to bootstrap peaceful nodes in the network. This may provide a quicker start
+    // for some attacks because you do not need to generate the second traffic file.
+    let traffic_file = if cli.attacker_bootstrap.is_some() {
+        &network_dir.attacktime_traffic()
+    } else {
+        &network_dir.peacetime_traffic()
+    };
 
     let unfiltered_history = history_from_file(
-        &cli.bootstrap_file,
+        traffic_file,
         Some(forward_params.reputation_params.revenue_window),
     )
     .await?;
 
-    let target_pubkey = find_pubkey_by_alias(&cli.target_alias, &sim_network)?;
+    // Filter bootstrap records if attacker alias and bootstrap provided.
+    let bootstrap = if let Some(bootstrap_dur) = cli.attacker_bootstrap {
+        if bootstrap_dur.is_zero() {
+            return Err("zero attacker_bootstrap is invalid, do not specify option".into());
+        }
 
-    // filter bootstrap records if attacker alias and bootstrap provided
-    let bootstrap = if cli.attacker_alias.is_some() && cli.attacker_bootstrap.is_some() {
-        let attacker_pubkey = find_pubkey_by_alias(&cli.attacker_alias.unwrap(), &sim_network)?;
-
-        let target_to_attacker = match sim_network.iter().find(|&channel| {
+        let target_to_attacker = match network_dir.sim_network.iter().find(|&channel| {
             (channel.node_1.pubkey == target_pubkey && channel.node_2.pubkey == attacker_pubkey)
                 || (channel.node_1.pubkey == attacker_pubkey
                     && channel.node_2.pubkey == target_pubkey)
@@ -98,7 +87,7 @@ async fn main() -> Result<(), BoxError> {
         };
 
         get_history_for_bootstrap(
-            cli.attacker_bootstrap.clone().unwrap().1,
+            bootstrap_dur,
             unfiltered_history,
             HashSet::from_iter(vec![target_to_attacker]),
         )?
@@ -127,7 +116,7 @@ async fn main() -> Result<(), BoxError> {
     let mut reputation_interceptor: ReputationInterceptor<BatchForwardWriter, ForwardManager> =
         ReputationInterceptor::new_for_network(
             forward_params,
-            &sim_network,
+            &network_dir.sim_network,
             reputation_clock,
             None,
         )?;
@@ -137,26 +126,21 @@ async fn main() -> Result<(), BoxError> {
         .await?;
 
     let mut node_pubkeys = HashSet::new();
-    for chan in sim_network {
+    for chan in network_dir.sim_network.iter() {
         node_pubkeys.insert(chan.node_1.pubkey);
         node_pubkeys.insert(chan.node_2.pubkey);
     }
 
-    let snapshot_dir = match cli.attacker_bootstrap {
-        // if a bootstrap period is provided, write results in ./reputation-snapshot/{duration}
-        Some(bootstrap_filter) => cli.results_dir.join(bootstrap_filter.0),
-        None => cli.results_dir,
-    };
-    fs::create_dir_all(&snapshot_dir)?;
+    let (reputation_state, target_revenue) = network_dir.reputation_summary(cli.attacker_bootstrap);
 
-    let mut target_revenue = File::create(snapshot_dir.join(DEFAULT_REVENUE_FILENAME))?;
+    let mut target_revenue = File::create(target_revenue)?;
     write!(target_revenue, "{}", bootstrap_revenue)?;
 
     let snapshot_file = OpenOptions::new()
         .write(true)
         .truncate(true)
         .create(true)
-        .open(snapshot_dir.join(DEFAULT_REPUTATION_FILENAME))?;
+        .open(&reputation_state)?;
 
     let mut csv_writer = Writer::from_writer(snapshot_file);
     csv_writer.write_record([
@@ -184,7 +168,11 @@ async fn main() -> Result<(), BoxError> {
     }
     csv_writer.flush()?;
 
-    log::info!("Finished writing reputation snapshot to {:?}", snapshot_dir);
+    log::info!(
+        "Finished writing reputation snapshot to {:?} and {:?}",
+        reputation_state,
+        target_revenue
+    );
 
     Ok(())
 }

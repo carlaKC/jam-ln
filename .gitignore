@@ -1,6 +1,6 @@
 *.json
 *.csv
+*.txt
 target
 data
-results
-reputation-snapshots
+results/*

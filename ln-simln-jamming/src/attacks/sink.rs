@@ -13,6 +13,7 @@ use triggered::Listener;
 
 use crate::clock::InstantClock;
 use crate::reputation_interceptor::ReputationMonitor;
+use crate::revenue_interceptor::PeacetimeRevenueMonitor;
 use crate::{
     accountable_from_records, get_network_reputation, print_request, records_from_signal, BoxError,
     NetworkReputation,
@@ -27,10 +28,11 @@ pub enum TargetChannelType {
 }
 
 #[derive(Clone)]
-pub struct SinkAttack<C, R>
+pub struct SinkAttack<C, R, M>
 where
     C: Clock + InstantClock,
     R: ReputationMonitor + Send + Sync,
+    M: PeacetimeRevenueMonitor + Send + Sync,
 {
     clock: Arc<C>,
     target_pubkey: PublicKey,
@@ -38,10 +40,16 @@ where
     target_channels: HashMap<u64, (PublicKey, String)>,
     risk_margin: u64,
     reputation_monitor: Arc<Mutex<R>>,
+    peacetime_revenue: Arc<M>,
     listener: Listener,
 }
 
-impl<C: Clock + InstantClock, R: ReputationMonitor + Send + Sync> SinkAttack<C, R> {
+impl<
+        C: Clock + InstantClock,
+        R: ReputationMonitor + Send + Sync,
+        M: PeacetimeRevenueMonitor + Send + Sync,
+    > SinkAttack<C, R, M>
+{
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         clock: Arc<C>,
@@ -50,6 +58,7 @@ impl<C: Clock + InstantClock, R: ReputationMonitor + Send + Sync> SinkAttack<C, 
         attacker_pubkey: PublicKey,
         risk_margin: u64,
         reputation_monitor: Arc<Mutex<R>>,
+        peacetime_revenue: Arc<M>,
         listener: Listener,
     ) -> Self {
         Self {
@@ -73,6 +82,7 @@ impl<C: Clock + InstantClock, R: ReputationMonitor + Send + Sync> SinkAttack<C, 
             })),
             risk_margin,
             reputation_monitor,
+            peacetime_revenue,
             listener,
         }
     }
@@ -161,10 +171,11 @@ fn inner_simulation_completed(
 }
 
 #[async_trait]
-impl<C, R> JammingAttack for SinkAttack<C, R>
+impl<C, R, M> JammingAttack for SinkAttack<C, R, M>
 where
     C: Clock + InstantClock,
     R: ReputationMonitor + Send + Sync,
+    M: PeacetimeRevenueMonitor + Send + Sync,
 {
     fn setup_for_network(&self) -> Result<NetworkSetup, BoxError> {
         self.validate()?;
@@ -233,10 +244,32 @@ where
         return Err("HTLC receive not expected in passive sink attack".into());
     }
 
+    /// Shuts down the simulation if the target node has lost revenue compared to its projected
+    /// peacetime revenue, or the attacker has lost reputation without being able to compromise
+    /// the target's reputation.
     async fn simulation_completed(
         &self,
         start_reputation: NetworkReputation,
     ) -> Result<bool, BoxError> {
+        let snapshot = self.peacetime_revenue.get_revenue_difference().await;
+        if snapshot.peacetime_revenue_msat > snapshot.simulation_revenue_msat {
+            log::error!(
+                "Peacetime revenue: {} exceeds simulation revenue: {} after: {:?}",
+                snapshot.peacetime_revenue_msat,
+                snapshot.simulation_revenue_msat,
+                snapshot.runtime
+            );
+
+            return Ok(true);
+        }
+
+        log::trace!(
+            "Peacetime revenue: {} less than simulation revenue: {} after: {:?}",
+            snapshot.peacetime_revenue_msat,
+            snapshot.simulation_revenue_msat,
+            snapshot.runtime
+        );
+
         let current_reputation = get_network_reputation(
             self.reputation_monitor.clone(),
             self.target_pubkey,
@@ -263,7 +296,8 @@ mod tests {
     use crate::attacks::sink::inner_simulation_completed;
     use crate::attacks::JammingAttack;
     use crate::test_utils::{
-        get_random_keypair, get_test_policy, setup_test_request, MockReputationInterceptor,
+        get_random_keypair, get_test_policy, setup_test_request, MockPeacetimeMonitor,
+        MockReputationInterceptor,
     };
     use crate::{accountable_from_records, NetworkReputation};
     use bitcoin::secp256k1::PublicKey;
@@ -279,7 +313,7 @@ mod tests {
         target: PublicKey,
         attacker: PublicKey,
         network: &[NetworkParser],
-    ) -> SinkAttack<SimulationClock, MockReputationInterceptor> {
+    ) -> SinkAttack<SimulationClock, MockReputationInterceptor, MockPeacetimeMonitor> {
         let (_shutdown, listener) = triggered::trigger();
 
         SinkAttack::new(
@@ -289,6 +323,7 @@ mod tests {
             attacker,
             0,
             Arc::new(Mutex::new(MockReputationInterceptor::new())),
+            Arc::new(MockPeacetimeMonitor::new()),
             listener,
         )
     }
@@ -300,7 +335,10 @@ mod tests {
     ///    target -- attacker
     ///      |
     /// P2 --+
-    fn setup_test_network() -> (SinkAttack<SimulationClock, MockReputationInterceptor>, u64) {
+    fn setup_test_network() -> (
+        SinkAttack<SimulationClock, MockReputationInterceptor, MockPeacetimeMonitor>,
+        u64,
+    ) {
         let target = get_random_keypair().1;
         let attacker = get_random_keypair().1;
         let regular_1 = get_random_keypair().1;

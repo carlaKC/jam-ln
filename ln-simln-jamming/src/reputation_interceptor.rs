@@ -173,6 +173,7 @@ where
         params: ForwardManagerParams,
         edges: &[NetworkParser],
         reputation_snapshot: HashMap<PublicKey, HashMap<u64, ChannelSnapshot>>,
+        no_reputation: HashSet<PublicKey>,
         clock: Arc<dyn InstantClock + Send + Sync>,
         results: Option<Arc<Mutex<R>>>,
     ) -> Result<Self, BoxError> {
@@ -180,27 +181,39 @@ where
 
         let add_ins = clock.now();
         macro_rules! add_node_to_network {
-            ($channel:expr, $node:tt) => {{
+            ($channel:expr, $node:tt, $counterparty:tt) => {{
                 let scid = $channel.scid.into();
                 let pubkey = $channel.$node.pubkey;
                 let alias = $channel.$node.alias.clone();
 
-                let snapshot = reputation_snapshot
-                    .get(&pubkey)
-                    .ok_or(format!("node: {} not found in snapshot", pubkey))?
-                    .get(&scid)
-                    .ok_or(format!(
-                        "channel: {} not found in snapshot for node: {}",
-                        scid, pubkey
-                    ))?;
+                let node_snapshot = reputation_snapshot
+                    .get(&pubkey);
+                let should_have_snapshot = no_reputation.get(&pubkey).is_none();
 
-                if snapshot.capacity_msat != $channel.capacity_msat {
-                    return Err(format!(
-                        "channel {} has different capacities {} - {}",
-                        scid, snapshot.capacity_msat, $channel.capacity_msat
-                    )
-                    .into());
+                if node_snapshot.is_some() != should_have_snapshot {
+                    return Err(format!("node: {pubkey} should have snapshot: {should_have_snapshot}, has snapshot: {}",
+                        node_snapshot.is_some()).into());
                 }
+
+                let snapshot = match node_snapshot {
+                    Some(s) => {
+                        // If our counterparty isn't expected to have a snapshot of its reputation,
+                        // then any channel with the counterparty also isn't tracked.
+                        if no_reputation.get(&$channel.$counterparty.pubkey).is_some() {
+                            None
+                        } else {
+                            let snapshot = s.get(&scid).ok_or(
+                                format!("channel:{} not found in snapshot for node: {}", scid, pubkey))?;
+
+                            if snapshot.capacity_msat != $channel.capacity_msat {
+                                return Err(format!("channel {} has different capacities {} - {}",
+                                    scid, snapshot.capacity_msat, $channel.capacity_msat).into())
+                            }
+                            Some(snapshot.clone())
+                        }
+                    },
+                    None => None,
+                };
 
                 match network_nodes.entry(pubkey) {
                     Entry::Vacant(e) => {
@@ -209,7 +222,7 @@ where
                             scid,
                             $channel.capacity_msat,
                             add_ins,
-                            Some(snapshot.clone()),
+                            snapshot,
                         )?;
                         e.insert(Node::new(forward_manager, alias));
                     }
@@ -218,7 +231,7 @@ where
                             scid,
                             $channel.capacity_msat,
                             add_ins,
-                            Some(snapshot.clone()),
+                            snapshot,
                         )?;
                     }
                 }
@@ -226,17 +239,8 @@ where
         }
 
         for channel in edges {
-            add_node_to_network!(channel, node_1);
-            add_node_to_network!(channel, node_2);
-        }
-
-        if edges.len() * 2
-            != reputation_snapshot
-                .values()
-                .map(|chan_map| chan_map.len())
-                .sum::<usize>()
-        {
-            return Err("number of channels in snapshot and network graph do not match".into());
+            add_node_to_network!(channel, node_1, node_2);
+            add_node_to_network!(channel, node_2, node_1);
         }
 
         Ok(Self {
@@ -573,7 +577,7 @@ mod tests {
     use simln_lib::clock::SimulationClock;
     use simln_lib::sim_node::{ChannelPolicy, CriticalError, InterceptResolution, Interceptor};
     use simln_lib::ShortChannelID;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::time::Duration;
     use std::time::Instant;
@@ -1088,6 +1092,7 @@ mod tests {
             params,
             &edges,
             reputation_snapshot.clone(),
+            HashSet::new(),
             clock.clone(),
             None,
         )
@@ -1151,6 +1156,7 @@ mod tests {
             params,
             &edges,
             reputation_snapshot,
+            HashSet::new(),
             Arc::new(SimulationClock::new(1).unwrap()),
             None,
         )
@@ -1178,6 +1184,7 @@ mod tests {
             params,
             &edges,
             reputation_snapshot,
+            HashSet::new(),
             Arc::new(SimulationClock::new(1).unwrap()),
             None,
         )
@@ -1206,6 +1213,7 @@ mod tests {
             params,
             &edges,
             reputation_snapshot,
+            HashSet::new(),
             Arc::new(SimulationClock::new(1).unwrap()),
             None,
         )
@@ -1232,6 +1240,7 @@ mod tests {
             params,
             &edges,
             reputation_snapshot,
+            HashSet::new(),
             Arc::new(SimulationClock::new(1).unwrap()),
             None,
         )

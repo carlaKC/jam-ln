@@ -6,12 +6,11 @@ use ln_simln_jamming::attack_interceptor::AttackInterceptor;
 use ln_simln_jamming::attacks::sink::SinkAttack;
 use ln_simln_jamming::attacks::JammingAttack;
 use ln_simln_jamming::clock::InstantClock;
-use ln_simln_jamming::parsing::{
-    find_alias_by_pubkey, find_pubkey_by_alias, reputation_snapshot_from_file, Cli, SimNetwork,
-    DEFAULT_REPUTATION_FILENAME, DEFAULT_REVENUE_FILENAME,
-};
+use ln_simln_jamming::parsing::{reputation_snapshot_from_file, Cli, SimulationFiles, TrafficType};
 use ln_simln_jamming::reputation_interceptor::{GeneralChannelJammer, ReputationInterceptor};
-use ln_simln_jamming::revenue_interceptor::{RevenueInterceptor, RevenueSnapshot};
+use ln_simln_jamming::revenue_interceptor::{
+    PeacetimeRevenueMonitor, RevenueInterceptor, RevenueSnapshot,
+};
 use ln_simln_jamming::{
     get_network_reputation, BoxError, NetworkReputation, ACCOUNTABLE_TYPE, UPGRADABLE_TYPE,
 };
@@ -23,8 +22,8 @@ use simln_lib::latency_interceptor::LatencyIntercepor;
 use simln_lib::sim_node::{CustomRecords, Interceptor, SimGraph, SimNode};
 use simln_lib::SimulationCfg;
 use simple_logger::SimpleLogger;
-use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
+use std::collections::{HashMap, HashSet};
+use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -48,18 +47,16 @@ async fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
     let forward_params = cli.validate()?;
 
-    let SimNetwork { sim_network } =
-        serde_json::from_str(&fs::read_to_string(cli.sim_file.as_path())?)?;
+    // We always want to load the attack time graph when running the simulation.
+    let network_dir =
+        SimulationFiles::new(cli.network.network_dir.clone(), TrafficType::Attacktime)?;
+    let (attacker_pubkey, target_pubkey) = (network_dir.attacker.1, network_dir.target.1);
 
     let tasks = TaskTracker::new();
     let (shutdown, listener) = triggered::trigger();
 
-    // Match the target alias using pubkeys provided in sim network file, then collect the pubkeys of all the
-    // non-attacker target peers.
-    let target_pubkey = find_pubkey_by_alias(&cli.target_alias, &sim_network)?;
-    let attacker_pubkey = find_pubkey_by_alias(&cli.attacker_alias, &sim_network)?;
-
-    let target_channels: HashMap<u64, (PublicKey, String)> = sim_network
+    let target_channels: HashMap<u64, (PublicKey, String)> = network_dir
+        .sim_network
         .iter()
         .filter_map(|channel| {
             if channel.node_1.pubkey == target_pubkey {
@@ -87,9 +84,10 @@ async fn main() -> Result<(), BoxError> {
     let now = InstantClock::now(&*clock);
 
     // Create a writer to store results for nodes that we care about.
+    let results_dir = network_dir.results_dir();
     let monitor_channels: Vec<(PublicKey, String)> = target_channels.values().cloned().collect();
     let results_writer = Arc::new(Mutex::new(BatchForwardWriter::new(
-        cli.results_dir.clone(),
+        results_dir.clone(),
         &monitor_channels,
         cli.result_batch_size,
         now,
@@ -115,23 +113,54 @@ async fn main() -> Result<(), BoxError> {
         }
     });
 
-    let reputation_dir = &cli.reputation_dir.join(cli.attacker_bootstrap.0.clone());
-    let reputation_snapshot =
-        reputation_snapshot_from_file(&reputation_dir.join(DEFAULT_REPUTATION_FILENAME))?;
-
-    let bootstrap_revenue: u64 =
-        std::fs::read_to_string(reputation_dir.join(DEFAULT_REVENUE_FILENAME))?.parse()?;
+    let (reputation_state, target_revenue) = network_dir.reputation_summary(cli.attacker_bootstrap);
+    let reputation_snapshot = reputation_snapshot_from_file(&reputation_state).map_err(|e| {
+        format!(
+            "could not find reputation snapshot {:?}, try generating one with reputation-builder: {:?}",
+            reputation_state, e
+        )
+    })?;
+    let bootstrap_revenue: u64 = std::fs::read_to_string(target_revenue)?.parse()?;
 
     let reputation_interceptor = Arc::new(Mutex::new(
         ReputationInterceptor::new_from_snapshot(
             forward_params,
-            &sim_network,
+            &network_dir.sim_network,
             reputation_snapshot,
+            // If bootstrapping the attacker's reputation, we expect them to be in our snapshot
+            // of starting reputation values. Otherwise, they can be omitted.
+            if cli.attacker_bootstrap.is_some() {
+                HashSet::new()
+            } else {
+                HashSet::from([network_dir.attacker.1])
+            },
             clock.clone(),
             Some(results_writer),
         )
         .await?,
     ));
+
+    // While we run the simulation, replay projected peacetime revenue to serve as a comparison.
+    let revenue_interceptor = Arc::new(
+        RevenueInterceptor::new_with_bootstrap(
+            clock.clone(),
+            target_pubkey,
+            bootstrap_revenue,
+            cli.attacker_bootstrap,
+            network_dir.peacetime_traffic(),
+            listener.clone(),
+        )
+        .await?,
+    );
+
+    let revenue_interceptor_1 = revenue_interceptor.clone();
+    let revenue_shutdown = shutdown.clone();
+    tasks.spawn(async move {
+        if let Err(e) = revenue_interceptor_1.process_peacetime_fwds().await {
+            log::error!("Error processing peacetime forwards: {e}");
+            revenue_shutdown.trigger();
+        }
+    });
 
     // Reputation is assessed for a channel pair and a specific HTLC that's being proposed. To assess whether pairs
     // have reputation, we'll use LND's default fee policy to get the HTLC risk for our configured htlc size and hold
@@ -144,11 +173,12 @@ async fn main() -> Result<(), BoxError> {
     // Next, setup the attack interceptor to use our custom attack.
     let attack = Arc::new(SinkAttack::new(
         clock.clone(),
-        &sim_network,
+        &network_dir.sim_network,
         target_pubkey,
         attacker_pubkey,
         risk_margin,
         reputation_interceptor.clone(),
+        revenue_interceptor.clone(),
         listener.clone(),
     ));
 
@@ -215,40 +245,6 @@ async fn main() -> Result<(), BoxError> {
         }
     });
 
-    let revenue_interceptor = Arc::new(
-        RevenueInterceptor::new_with_bootstrap(
-            clock.clone(),
-            target_pubkey,
-            bootstrap_revenue,
-            cli.attacker_bootstrap.1,
-            cli.peacetime_file,
-            listener.clone(),
-            shutdown.clone(),
-        )
-        .await?,
-    );
-
-    let revenue_interceptor_1 = revenue_interceptor.clone();
-    let revenue_shutdown = shutdown.clone();
-    tasks.spawn(async move {
-        if let Err(e) = revenue_interceptor_1.process_peacetime_fwds().await {
-            log::error!("Error processing peacetime forwards: {e}");
-            revenue_shutdown.trigger();
-        }
-    });
-
-    let revenue_interceptor_2 = revenue_interceptor.clone();
-    let revenue_shutdown = shutdown.clone();
-    tasks.spawn(async move {
-        if let Err(e) = revenue_interceptor_2
-            .poll_revenue_difference(Duration::from_secs(5))
-            .await
-        {
-            log::error!("Error polling revenue difference: {e}");
-            revenue_shutdown.trigger();
-        }
-    });
-
     let interceptors = vec![
         latency_interceptor,
         attack_interceptor.clone(),
@@ -261,7 +257,7 @@ async fn main() -> Result<(), BoxError> {
     // Setup the simulated network with our fake graph.
     let sim_params = SimParams {
         nodes: vec![],
-        sim_network,
+        sim_network: network_dir.sim_network,
         activity: vec![],
         exclude: vec![attacker_pubkey, target_pubkey],
     };
@@ -277,16 +273,12 @@ async fn main() -> Result<(), BoxError> {
     )
     .await?;
 
+    let attacker_alias = network_dir.attacker.0;
     let attacker_nodes: HashMap<String, Arc<Mutex<SimNode<SimGraph>>>> = sim_nodes
         .into_iter()
         .filter_map(|(pk, node)| {
             if pk == attacker_pubkey {
-                let alias = match find_alias_by_pubkey(&pk, &sim_params.sim_network) {
-                    Ok(alias) => alias,
-                    Err(e) => panic!("Attacker pubkey not found {}", e),
-                };
-
-                Some((alias, node))
+                Some((attacker_alias.clone(), node))
             } else {
                 None
             }
@@ -310,8 +302,8 @@ async fn main() -> Result<(), BoxError> {
     // Write start and end state to a summary file.
     let end_reputation = get_network_reputation(
         reputation_interceptor,
-        target_pubkey,
-        attacker_pubkey,
+        network_dir.target.1,
+        network_dir.attacker.1,
         &target_pubkey_map,
         risk_margin,
         InstantClock::now(&*clock),
@@ -320,7 +312,7 @@ async fn main() -> Result<(), BoxError> {
 
     let snapshot = revenue_interceptor.get_revenue_difference().await;
     write_simulation_summary(
-        cli.results_dir,
+        results_dir,
         &snapshot,
         &start_reputation,
         &end_reputation,
@@ -344,14 +336,15 @@ fn check_reputation_status(cli: &Cli, status: &NetworkReputation) -> Result<(), 
         status.target_pair_count,
     );
 
-    let attacker_threshold =
-        status.attacker_pair_count * cli.attacker_reputation_percent as usize / 100;
-    if status.attacker_reputation < attacker_threshold {
-        return Err(format!(
-            "attacker has {}/{} good reputation pairs which does not meet threshold {}",
-            status.attacker_reputation, status.attacker_pair_count, attacker_threshold,
-        )
-        .into());
+    if let Some(attacker_percentage) = cli.attacker_reputation_percent {
+        let attacker_threshold = status.attacker_pair_count * attacker_percentage as usize / 100;
+        if status.attacker_reputation < attacker_threshold {
+            return Err(format!(
+                "attacker has {}/{} good reputation pairs which does not meet threshold {}",
+                status.attacker_reputation, status.attacker_pair_count, attacker_threshold,
+            )
+            .into());
+        }
     }
 
     let target_threshold = status.target_pair_count * cli.target_reputation_percent as usize / 100;

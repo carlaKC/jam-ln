@@ -16,7 +16,7 @@ use simln_lib::sim_node::{
 };
 use tokio::select;
 use tokio::sync::Mutex;
-use triggered::{Listener, Trigger};
+use triggered::Listener;
 
 use crate::clock::InstantClock;
 use crate::parsing::peacetime_from_file;
@@ -34,7 +34,6 @@ where
     peacetime_revenue: Mutex<PeacetimeRevenue>,
     start_ins: Instant,
     listener: Listener,
-    shutdown: Trigger,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -64,6 +63,12 @@ impl PartialOrd for RevenueEvent {
     }
 }
 
+/// Polls current revenue against the projected revenue for the target node in times of peace.
+#[async_trait]
+pub trait PeacetimeRevenueMonitor {
+    async fn get_revenue_difference(&self) -> RevenueSnapshot;
+}
+
 /// Responsible for tracking what the target node's revenue would be in a peacetime network (without the attacker).
 #[derive(Clone, Debug)]
 struct PeacetimeRevenue {
@@ -86,18 +91,29 @@ impl PeacetimeRevenue {
     async fn new_with_bootstrap(
         target_pubkey: PublicKey,
         revenue_file: PathBuf,
-        bootstrap_duration: Duration,
+        bootstrap_duration: Option<Duration>,
     ) -> Result<Self, BoxError> {
-        let mut peacetime_activity = peacetime_from_file(&revenue_file, target_pubkey).await?;
+        let mut peacetime_activity = peacetime_from_file(&revenue_file, target_pubkey)
+            .await
+            .map_err(|e| format!("could not read peacetime projections: {}", e))?;
 
         // Grab the first event to get our starting timestamp, push the event back on so that we can process it.
         let first_event = peacetime_activity
             .peek()
             .ok_or("should have at least one forward for target node".to_string())?;
 
-        let cutoff_ns = first_event
-            .timestamp_ns
-            .add(bootstrap_duration.as_nanos() as u64);
+        let bootstrap = match bootstrap_duration {
+            Some(bootstrap) => bootstrap,
+            None => {
+                // If the attacker did not bootstrap any reputation, we don't need to "catch up"
+                // our peacetime projections with any period of time - we can just start fresh.
+                return Ok(PeacetimeRevenue {
+                    peacetime_revenue: 0,
+                    revenue_events: peacetime_activity,
+                });
+            }
+        };
+        let cutoff_ns = first_event.timestamp_ns.add(bootstrap.as_nanos() as u64);
 
         // Accumulate the starting peacetime revenue, defined by the period of time that we bootstrapped the simulation
         // from, so that we're on the same starting point.
@@ -123,10 +139,9 @@ impl<C: InstantClock + Clock> RevenueInterceptor<C> {
         clock: Arc<C>,
         target_pubkey: PublicKey,
         bootstrap_revenue: u64,
-        bootstrap_duration: Duration,
+        bootstrap_duration: Option<Duration>,
         revenue_file: PathBuf,
         listener: Listener,
-        shutdown: Trigger,
     ) -> Result<Self, BoxError> {
         Ok(Self {
             clock: clock.clone(),
@@ -145,7 +160,6 @@ impl<C: InstantClock + Clock> RevenueInterceptor<C> {
             ),
             start_ins: InstantClock::now(&*clock),
             listener,
-            shutdown,
         })
     }
 
@@ -177,37 +191,11 @@ impl<C: InstantClock + Clock> RevenueInterceptor<C> {
             self.peacetime_revenue.lock().await.peacetime_revenue += next_event.fee_msat;
         }
     }
+}
 
-    /// Polls the difference between attack and peacetime revenue using the provide interval. Triggers shutdown if
-    /// attack revenue drops below projected peacetime revenue.
-    pub async fn poll_revenue_difference(&self, interval: Duration) -> Result<(), BoxError> {
-        let mut i = 0;
-
-        loop {
-            select! {
-                _ = self.listener.clone() => return Ok(()),
-                _ = self.clock.sleep(interval) => {
-                    i +=1;
-
-                    let snapshot = self.get_revenue_difference().await;
-                    if snapshot.peacetime_revenue_msat > snapshot.simulation_revenue_msat{
-                        self.shutdown.trigger();
-                        log::error!("Peacetime revenue: {} exceeds simulation revenue: {} after: {:?}",
-                            snapshot.peacetime_revenue_msat, snapshot.simulation_revenue_msat, snapshot.runtime);
-                        return Ok(())
-                    }
-
-                    if i % 10 == 0{
-                        log::info!("Peacetime revenue: {} less than simulation revenue: {} after: {:?}",
-                            snapshot.peacetime_revenue_msat, snapshot.simulation_revenue_msat, snapshot.runtime);
-                    }
-                },
-            }
-        }
-    }
-
-    /// Returns a snapshot of the simulation's revenue for its runtime compared to a network with no attacking channels.
-    pub async fn get_revenue_difference(&self) -> RevenueSnapshot {
+#[async_trait]
+impl<C: InstantClock + Clock> PeacetimeRevenueMonitor for RevenueInterceptor<C> {
+    async fn get_revenue_difference(&self) -> RevenueSnapshot {
         RevenueSnapshot {
             simulation_revenue_msat: self.target_revenue.lock().await.revenue_total,
             peacetime_revenue_msat: self.peacetime_revenue.lock().await.peacetime_revenue,

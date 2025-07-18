@@ -2,6 +2,7 @@
 use std::time::Instant;
 
 use crate::reputation_interceptor::{BootstrapForward, ReputationMonitor};
+use crate::revenue_interceptor::PeacetimeRevenueMonitor;
 use crate::{records_from_signal, BoxError};
 use async_trait::async_trait;
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
@@ -32,6 +33,15 @@ mock! {
     #[async_trait]
     impl ReputationMonitor for ReputationInterceptor{
         async fn list_channels(&self, node: PublicKey, access_ins: Instant) -> Result<HashMap<u64, ChannelSnapshot>, BoxError>;
+    }
+}
+
+mock! {
+    pub PeacetimeMonitor{}
+
+    #[async_trait]
+    impl PeacetimeRevenueMonitor for PeacetimeMonitor {
+        async fn get_revenue_difference(&self) -> crate::revenue_interceptor::RevenueSnapshot;
     }
 }
 
