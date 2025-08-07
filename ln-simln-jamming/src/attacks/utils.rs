@@ -135,7 +135,8 @@ pub async fn build_reputation<C: Clock + InstantClock, R: ReputationMonitor>(
 
         htlc_risk = params
             .reputation_params
-            .htlc_opportunity_cost(target_hop.fee_msat, target_hop.cltv_expiry_delta);
+            .htlc_opportunity_cost(target_hop.fee_msat, target_hop.cltv_expiry_delta)
+            * params.htlcs.len() as u64;
         // Add small buffer to account for decayed average when we check if we have built
         // sufficient reputation at the end.
         let buffer = 5_000;

@@ -3,11 +3,12 @@ use std::{collections::HashMap, sync::Arc};
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use simln_lib::sim_node::{CustomRecords, ForwardingError, InterceptRequest, SimGraph, SimNode};
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot::Sender, Mutex};
 use triggered::Listener;
 
 use crate::{accountable_from_records, records_from_signal, BoxError, NetworkReputation};
 
+pub mod fast_jam;
 pub mod sink;
 pub mod utils;
 
@@ -74,19 +75,15 @@ pub trait JammingAttack {
     async fn run_custom_actions(
         &self,
         _attacker_nodes: HashMap<String, Arc<Mutex<SimNode<SimGraph>>>>,
+        _simulation_completed_check: Sender<()>,
         _shutdown_listener: Listener,
     ) -> Result<(), BoxError> {
         Ok(())
     }
 
     /// Returns a boolean that indicates whether a shutdown condition for the simulation has been reached.
-    ///
-    /// Should be used when there are shutdown conditions specific to the attack, the default implementation will
-    /// return `Ok(false)`.
     async fn simulation_completed(
         &self,
         _start_reputation: NetworkReputation,
-    ) -> Result<bool, BoxError> {
-        Ok(false)
-    }
+    ) -> Result<bool, BoxError>;
 }

@@ -146,6 +146,7 @@ impl ForwardManagerParams {
 /// Defines special actions that can be taken during a simulation that wouldn't otherwise be used in regular operation.
 pub trait SimulationDebugManager {
     fn general_jam_channel(&self, channel: u64) -> Result<(), ReputationError>;
+    fn congestion_jam_channel(&self, channel: u64) -> Result<(), ReputationError>;
 }
 
 /// Implements outgoing reputation algorithm and resource bucketing for an individual node.
@@ -296,6 +297,18 @@ impl SimulationDebugManager for ForwardManager {
             .ok_or(ReputationError::ErrChannelNotFound(channel))?
             .incoming_direction
             .general_jam_channel();
+        Ok(())
+    }
+
+    fn congestion_jam_channel(&self, channel: u64) -> Result<(), ReputationError> {
+        self.inner
+            .lock()
+            .map_err(|e| ReputationError::ErrUnrecoverable(e.to_string()))?
+            .channels
+            .get_mut(&channel)
+            .ok_or(ReputationError::ErrChannelNotFound(channel))?
+            .incoming_direction
+            .congestion_jam_channel();
         Ok(())
     }
 }
