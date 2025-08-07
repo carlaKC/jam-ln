@@ -379,7 +379,7 @@ where
     /// error has occurred.
     async fn inner_add_htlc(
         &self,
-        htlc_add: HtlcAdd,
+        mut htlc_add: HtlcAdd,
         report: bool,
     ) -> Result<Result<CustomRecords, ForwardingError>, ReputationError> {
         // If the forwarding node can't be found, we've hit a critical error and can't proceed.
@@ -390,6 +390,8 @@ where
             .entry(htlc_add.forwarding_node)
         {
             Entry::Occupied(mut e) => {
+                // Set the timestamp after the lock is acquired.
+                htlc_add.htlc.added_at = self.clock.now();
                 let node = e.get_mut();
                 (
                     node.forward_manager
@@ -438,7 +440,7 @@ where
     }
 
     /// Removes a htlc from the jamming interceptor, reporting its success/failure to the inner state machine.
-    async fn inner_resolve_htlc(&self, resolved_htlc: HtlcResolve) -> Result<(), ReputationError> {
+    async fn inner_resolve_htlc(&self, mut resolved_htlc: HtlcResolve) -> Result<(), ReputationError> {
         log::info!(
             "Resolving htlc {}:{} on {} with outcome {}",
             resolved_htlc.incoming_htlc.channel_id,
@@ -453,12 +455,17 @@ where
             .await
             .entry(resolved_htlc.forwarding_node)
         {
-            Entry::Occupied(mut e) => Ok(e.get_mut().forward_manager.resolve_htlc(
-                resolved_htlc.outgoing_channel_id,
-                resolved_htlc.incoming_htlc,
-                resolved_htlc.forward_resolution,
-                resolved_htlc.resolved_ins,
-            )?),
+            Entry::Occupied(mut e) => {
+                // Set the timestamp after the lock is acquired.
+                resolved_htlc.resolved_ins = self.clock.now();
+
+                Ok(e.get_mut().forward_manager.resolve_htlc(
+                    resolved_htlc.outgoing_channel_id,
+                    resolved_htlc.incoming_htlc,
+                    resolved_htlc.forward_resolution,
+                    resolved_htlc.resolved_ins,
+                )?)
+            }
             Entry::Vacant(_) => Err(ReputationError::ErrUnrecoverable(format!(
                 "Node: {} not found",
                 resolved_htlc.forwarding_node
