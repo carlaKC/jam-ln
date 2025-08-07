@@ -4,14 +4,14 @@ use crate::ReputationError;
 
 /// Tracks a timestamped decaying average, which may be positive or negative. Acts
 #[derive(Clone, Debug)]
-pub(super) struct DecayingAverage {
+pub struct DecayingAverage {
     value: i64,
     last_updated: Option<Instant>,
     decay_rate: f64,
 }
 
 impl DecayingAverage {
-    pub(super) fn new(period: Duration) -> Self {
+    pub fn new(period: Duration) -> Self {
         DecayingAverage {
             value: 0,
             last_updated: None,
@@ -25,10 +25,7 @@ impl DecayingAverage {
 
     /// Decays the tracked value to its value at the instant provided and returns the updated value. The access_instant
     /// must be after the last_updated time of the decaying average, tolerant to nanosecond differences.
-    pub(super) fn value_at_instant(
-        &mut self,
-        access_instant: Instant,
-    ) -> Result<i64, ReputationError> {
+    pub fn value_at_instant(&mut self, access_instant: Instant) -> Result<i64, ReputationError> {
         if let Some(last_updated) = self.last_updated {
             // Enforce that the access_instant must be after the last update on our average, but tolerate nanosecond
             // differences - these will just reflect as an update with the same update as last_updated.
