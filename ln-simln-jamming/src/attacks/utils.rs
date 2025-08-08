@@ -80,8 +80,6 @@ pub struct BuildReputationParams<'a, C: Clock + InstantClock, R: ReputationMonit
 pub async fn build_reputation<C: Clock + InstantClock, R: ReputationMonitor>(
     params: BuildReputationParams<'_, C, R>,
 ) -> Result<u64, BoxError> {
-    let mut total_fees_paid = 0;
-
     let reputation_monitor = params.reputation_monitor;
     let target_channel = params.target_channel;
     let clock = params.clock;
@@ -113,11 +111,29 @@ pub async fn build_reputation<C: Clock + InstantClock, R: ReputationMonitor>(
         .ok_or(format!("channel {} not found", last_hop_channel))?
         .outgoing_reputation;
 
-    let htlc_amounts: u64 = params.htlcs.iter().sum();
-    let mut htlc_risk = 0;
-    for path in route.paths.iter_mut() {
-        total_fees_paid += path.hops.iter().map(|hop| hop.fee_msat).sum::<u64>();
+    let mut htlc_amounts = 0;
+    let mut htlc_routes = Vec::with_capacity(params.htlcs.len());
+    for htlc in params.htlcs {
+        htlc_amounts += htlc;
 
+        let attacker_pubkey = params.attacker_node.lock().await.get_info().pubkey;
+        let route = build_custom_route(&attacker_pubkey, htlc, params.hops, params.network_graph)
+            .map_err(|e| e.err)?;
+
+        htlc_routes.push((htlc, route));
+    }
+
+    let (total_fee, htlc_risk) = fee_to_build_reputation(
+        htlc_routes,
+        &params.reputation_params,
+        target_channel.0,
+        current_target_revenue,
+        current_attacker_reputation,
+        5000,
+    );
+
+    let total_fees_paid = total_fee + route.get_total_fees();
+    for path in route.paths.iter_mut() {
         let target_hop = match path
             .hops
             .iter_mut()
@@ -127,27 +143,12 @@ pub async fn build_reputation<C: Clock + InstantClock, R: ReputationMonitor>(
             None => continue,
         };
 
-        let threshold = if current_target_revenue - current_attacker_reputation > 0 {
-            current_target_revenue - current_attacker_reputation
-        } else {
-            0
-        };
-
-        htlc_risk = params
-            .reputation_params
-            .htlc_opportunity_cost(target_hop.fee_msat, target_hop.cltv_expiry_delta);
-        // Add small buffer to account for decayed average when we check if we have built
-        // sufficient reputation at the end.
-        let buffer = 5_000;
-        let fee_to_bump_reputation = threshold as u64 + htlc_amounts + htlc_risk + buffer;
-
         // Make a single payment with an inflated fee at the hop we are building reputation with
-        target_hop.fee_msat += fee_to_bump_reputation;
-        total_fees_paid += fee_to_bump_reputation;
+        target_hop.fee_msat += total_fee;
     }
 
     if let Err(e) = attacker
-        .send_to_route(route.clone(), params.payment_hash, None)
+        .send_to_route(route, params.payment_hash, None)
         .await
     {
         return Err(e.to_string().into());
@@ -184,5 +185,134 @@ pub async fn build_reputation<C: Clock + InstantClock, R: ReputationMonitor>(
         Ok(total_fees_paid)
     } else {
         Err("could not build reputation".into())
+    }
+}
+
+// Calculates the fee amount that will need to be paid to build sufficient reputation.
+// Allows for small buffer to account for decayed average when a reputation check is done
+// afterwards.
+fn fee_to_build_reputation(
+    htlcs: Vec<(u64, Route)>,
+    forward_params: &ForwardManagerParams,
+    target_hop_pubkey: PublicKey,
+    channel_revenue: i64,
+    peer_reputation: i64,
+    fee_buffer: u64,
+) -> (u64, u64) {
+    let mut htlc_amounts = 0;
+    let mut htlc_risk = 0;
+    for (htlc, route) in &htlcs {
+        for path in route.paths.iter() {
+            let target_hop = match path.hops.iter().find(|hop| hop.pubkey == target_hop_pubkey) {
+                Some(hop) => hop,
+                None => continue,
+            };
+
+            htlc_amounts += htlc;
+
+            htlc_risk += forward_params
+                .htlc_opportunity_cost(target_hop.fee_msat, target_hop.cltv_expiry_delta);
+        }
+    }
+
+    let threshold = if channel_revenue - peer_reputation > 0 {
+        channel_revenue - peer_reputation
+    } else {
+        0
+    } as u64;
+
+    let fee_to_bump_reputation = threshold + htlc_amounts + htlc_risk + fee_buffer;
+
+    (fee_to_bump_reputation, htlc_risk)
+}
+
+#[cfg(test)]
+mod tests {
+    use bitcoin::secp256k1::PublicKey;
+    use lightning::{
+        ln::features::{ChannelFeatures, NodeFeatures},
+        routing::router::{Path, Route, RouteHop},
+    };
+    use ln_resource_mgr::forward_manager::ForwardManagerParams;
+
+    use super::fee_to_build_reputation;
+    use crate::test_utils::get_random_keypair;
+
+    fn build_route_with_target_hop(
+        target_pubkey: PublicKey,
+        fee_msat: u64,
+        cltv_expiry_delta: u32,
+    ) -> Route {
+        let hop = RouteHop {
+            pubkey: target_pubkey,
+            node_features: NodeFeatures::empty(),
+            short_channel_id: 21,
+            channel_features: ChannelFeatures::empty(),
+            fee_msat,
+            cltv_expiry_delta,
+            maybe_announced_channel: true,
+        };
+        let path = Path {
+            hops: vec![hop],
+            blinded_tail: None,
+        };
+        Route {
+            paths: vec![path],
+            route_params: None,
+        }
+    }
+
+    #[test]
+    fn test_calculated_fee_to_build_reputation() {
+        let (_, target_pubkey) = get_random_keypair();
+        let fwd_params = ForwardManagerParams::default();
+
+        let expiry_delta = 200;
+        let htlc_amounts: Vec<u64> = vec![21_000, 42_000, 100_000];
+        let fee_pct = 0.0001;
+
+        let htlcs: Vec<(u64, Route)> = htlc_amounts
+            .iter()
+            .map(|amount| {
+                let route = build_route_with_target_hop(
+                    target_pubkey,
+                    (*amount as f64 * fee_pct) as u64,
+                    expiry_delta,
+                );
+                (*amount, route)
+            })
+            .collect();
+
+        let channel_revenue = 1_000_000;
+        let peer_reputation = 700_000;
+        let fee_buffer = 1_000;
+
+        let (fee_to_pay, total_htlc_risk) = fee_to_build_reputation(
+            htlcs,
+            &fwd_params,
+            target_pubkey,
+            channel_revenue,
+            peer_reputation,
+            fee_buffer,
+        );
+
+        let expected_htlc_risk = {
+            let mut risk = 0;
+            for htlc in htlc_amounts.iter() {
+                risk +=
+                    fwd_params.htlc_opportunity_cost((*htlc as f64 * fee_pct) as u64, expiry_delta);
+            }
+            risk
+        };
+
+        // The fee that we expect to pay is the sum of:
+        // - Revenue/reputation diff -> 1000000 - 700000 = 300000
+        // - Sum of htlc amounts -> 21000 + 42000 + 100000 = 163000
+        // - Sum of risk of each htlc
+        // - Fee buffer -> 1000
+        let expected_fee = 300_000 + 163_000 + expected_htlc_risk + 1000;
+
+        assert_eq!(fee_to_pay, expected_fee);
+        assert_eq!(total_htlc_risk, expected_htlc_risk);
     }
 }

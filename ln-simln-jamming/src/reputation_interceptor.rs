@@ -342,22 +342,37 @@ where
     }
 }
 
+/// Simulation-specific helper trait for jamming resources on a channel in a specific direction.
+///
+/// The `pubkey` specifies the direction of the jamming operation. For a channel between nodes A
+/// and B with channel ID 999:
+/// - Passing `&A, 999` will jam resources in the B → A direction.
+/// - Passing `&B, 999` will jam resources in the A → B direction.
 #[async_trait]
-pub trait GeneralChannelJammer {
-    /// The `pubkey` can be used to specify in which direction to jam the channel. For example, a
-    /// channel between nodes A and B with channel ID 999:
-    /// - `jam_channel(&A, 999)` will jam the channel in the B → A direction.
-    /// - `jam_channel(&B, 999)` will jam the channel in the A → B direction.
-    async fn jam_channel(&self, pubkey: &PublicKey, channel: u64) -> Result<(), BoxError>;
+pub trait ChannelJammer {
+    /// Jam the general resources of the specified channel in the given direction.
+    async fn jam_general_resources(&self, pubkey: &PublicKey, channel: u64)
+        -> Result<(), BoxError>;
+
+    /// Jam the congestion resources of the specified channel in the given direction.
+    async fn jam_congestion_resources(
+        &self,
+        pubkey: &PublicKey,
+        channel: u64,
+    ) -> Result<(), BoxError>;
 }
 
 #[async_trait]
-impl<R, M> GeneralChannelJammer for ReputationInterceptor<R, M>
+impl<R, M> ChannelJammer for ReputationInterceptor<R, M>
 where
     R: ForwardReporter,
     M: ReputationManager + SimulationDebugManager + Send,
 {
-    async fn jam_channel(&self, pubkey: &PublicKey, channel: u64) -> Result<(), BoxError> {
+    async fn jam_general_resources(
+        &self,
+        pubkey: &PublicKey,
+        channel: u64,
+    ) -> Result<(), BoxError> {
         self.network_nodes
             .lock()
             .await
@@ -365,6 +380,21 @@ where
             .ok_or(format!("jammed node: {} not found", pubkey))?
             .forward_manager
             .general_jam_channel(channel)
+            .map_err(|e| e.into())
+    }
+
+    async fn jam_congestion_resources(
+        &self,
+        pubkey: &PublicKey,
+        channel: u64,
+    ) -> Result<(), BoxError> {
+        self.network_nodes
+            .lock()
+            .await
+            .get_mut(pubkey)
+            .ok_or(format!("jammed node: {} not found", pubkey))?
+            .forward_manager
+            .congestion_jam_channel(channel)
             .map_err(|e| e.into())
     }
 }
@@ -585,7 +615,7 @@ mod tests {
 
     use crate::analysis::BatchForwardWriter;
     use crate::clock::InstantClock;
-    use crate::reputation_interceptor::{BootstrapForward, BootstrapRecords, GeneralChannelJammer};
+    use crate::reputation_interceptor::{BootstrapForward, BootstrapRecords, ChannelJammer};
     use crate::test_utils::{get_random_keypair, setup_test_request, test_allocation_check};
     use crate::{accountable_from_records, BoxError};
 
@@ -596,6 +626,7 @@ mod tests {
 
         impl SimulationDebugManager for ForwardManager {
             fn general_jam_channel(&self, channel: u64) -> Result<(), ReputationError>;
+            fn congestion_jam_channel(&self, channel: u64) -> Result<(), ReputationError>;
         }
 
         #[async_trait]
@@ -1025,7 +1056,7 @@ mod tests {
             .unwrap();
 
         interceptor
-            .jam_channel(&edges[1].node_1.pubkey, bob_to_carol)
+            .jam_general_resources(&edges[1].node_1.pubkey, bob_to_carol)
             .await
             .unwrap();
 
@@ -1075,8 +1106,37 @@ mod tests {
             AccountableSignal::Unaccountable,
         );
 
-        let res = interceptor.intercept_htlc(request).await.unwrap().unwrap();
+        let res = interceptor
+            .intercept_htlc(request.clone())
+            .await
+            .unwrap()
+            .unwrap();
         assert!(accountable_from_records(&res) == AccountableSignal::Accountable);
+
+        // Resolve htlc occupying congestion bucket.
+        let resolution = InterceptResolution {
+            forwarding_node: request.forwarding_node,
+            incoming_htlc: request.incoming_htlc,
+            outgoing_channel_id: request.outgoing_channel_id,
+            success: true,
+        };
+        interceptor.notify_resolution(resolution).await.unwrap();
+
+        // With general and congestion jammed, unaccountable htlc should fail if no reputation.
+        interceptor
+            .jam_congestion_resources(&edges[1].node_1.pubkey, bob_to_carol)
+            .await
+            .unwrap();
+
+        let request = setup_test_request(
+            edges[1].node_1.pubkey,
+            bob_to_carol,
+            alice_to_bob,
+            AccountableSignal::Unaccountable,
+        );
+
+        let res = interceptor.intercept_htlc(request).await.unwrap();
+        assert!(res.is_err());
     }
 
     /// Tests starting interceptor from valid snapshot.
