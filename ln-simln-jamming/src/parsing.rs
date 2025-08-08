@@ -1,5 +1,8 @@
-use crate::reputation_interceptor::{BootstrapForward, BootstrapRecords};
-use crate::revenue_interceptor::RevenueEvent;
+use crate::attacks::sink::SinkAttack;
+use crate::attacks::JammingAttack;
+use crate::clock::InstantClock;
+use crate::reputation_interceptor::{BootstrapForward, BootstrapRecords, ReputationMonitor};
+use crate::revenue_interceptor::{PeacetimeRevenueMonitor, RevenueEvent};
 use crate::BoxError;
 use bitcoin::secp256k1::PublicKey;
 use clap::{Parser, ValueEnum};
@@ -9,6 +12,7 @@ use ln_resource_mgr::forward_manager::ForwardManagerParams;
 use ln_resource_mgr::ChannelSnapshot;
 use serde::{Deserialize, Serialize};
 use sim_cli::parsing::NetworkParser;
+use simln_lib::clock::Clock;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Seek};
@@ -18,6 +22,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::runtime::Handle;
+use tokio::sync::Mutex as TokioMutex;
 use tokio::task::{self, JoinSet};
 
 /// Default percent of good reputation pairs the target requires.
@@ -35,10 +40,6 @@ pub const DEFAULT_REPUTATION_MARGIN_MSAT: &str = "10000000";
 
 /// Default htlc expiry used for calculating reputation margin htlc's risk.
 pub const DEFAULT_REPUTATION_MARGIN_EXIPRY: &str = "200";
-
-/// The default interval used to poll whether the attacker still has reputation with the target, 5 minutes expresssed
-/// in seconds.
-pub const DEFAULT_ATTACKER_POLL_SECONDS: &str = "300";
 
 /// The default batch size for writing results to disk.
 pub const DEFAULT_RESULT_BATCH_SIZE: &str = "500";
@@ -296,16 +297,58 @@ pub struct Cli {
     #[arg(long, default_value = DEFAULT_REPUTATION_MARGIN_EXIPRY)]
     pub reputation_margin_expiry_blocks: u32,
 
-    /// The interval to poll whether the attacker still has reputation with the target node, expressed in seconds.
-    #[arg(long, default_value = DEFAULT_ATTACKER_POLL_SECONDS)]
-    pub attacker_poll_interval_seconds: u64,
-
     /// The size of results batches to write to disk.
     #[arg(long, default_value = DEFAULT_RESULT_BATCH_SIZE)]
     pub result_batch_size: u16,
 
     #[command(flatten)]
     pub reputation_params: ReputationParams,
+
+    /// The attack that will be run on the simulation.
+    #[arg(long, value_enum, default_value = "sink")]
+    pub attack: AttackType,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+pub enum AttackType {
+    Sink,
+    // NOTE: add your attack that you want to run here.
+}
+
+pub fn setup_attack<C, R, M>(
+    cli: &Cli,
+    simulation: &SimulationFiles,
+    clock: Arc<C>,
+    reputation_monitor: Arc<TokioMutex<R>>,
+    revenue_monitor: Arc<M>,
+    risk_margin: u64,
+) -> Result<Arc<dyn JammingAttack + Send + Sync>, BoxError>
+where
+    C: Clock + InstantClock + 'static,
+    R: ReputationMonitor + Send + Sync + 'static,
+    M: PeacetimeRevenueMonitor + Send + Sync + 'static,
+{
+    let sim_network = simulation.sim_network.clone();
+
+    // NOTE: If you are implementing your own attack and have added the variant to AttackType, you can
+    // then do any setup specific to your attack here and return.
+    match cli.attack {
+        AttackType::Sink => {
+            let attacker_pubkeys: Vec<PublicKey> =
+                simulation.attackers.iter().map(|a| a.1).collect();
+            let attack = Arc::new(SinkAttack::new(
+                clock,
+                &sim_network,
+                simulation.target.1,
+                attacker_pubkeys,
+                risk_margin,
+                reputation_monitor,
+                revenue_monitor,
+            ));
+
+            Ok(attack)
+        }
+    }
 }
 
 impl Cli {

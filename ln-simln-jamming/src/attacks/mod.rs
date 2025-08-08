@@ -64,29 +64,19 @@ pub trait JammingAttack {
         return Ok(Ok(CustomRecords::default()));
     }
 
-    /// Intended to be executed in a separate background task to perform custom actions on the
-    /// provided attacker nodes. It can be used to enable attacker to initiate custom payments
-    /// along a specific route for jamming with [`SimNode::send_to_route`] method. If this will be
-    /// long-running, it should listen for shutdown signals on the shutdown_listener to avoid
-    /// blocking the simulation shutdown.
+    /// This method should perform the core actions of the attack, such as initiating custom
+    /// payments, jam channels, or any other attack-specific behavior. Custom payments can be sent
+    /// along a specific route with the [`SimNode::send_to_route`] method.
+    ///
+    /// The implementation is responsible for defining its own shutdown conditions and once it is
+    /// complete, return from the method to trigger the simulation to shutdown. It should also
+    /// listen for shutdown signals and terminate to avoid blocking the simulation shutdown.
     ///
     /// [`SimNode::send_to_route`]: simln_lib::sim_node::SimNode::send_to_route
-    async fn run_custom_actions(
-        &self,
-        _attacker_nodes: HashMap<String, Arc<Mutex<SimNode<SimGraph>>>>,
-        _shutdown_listener: Listener,
-    ) -> Result<(), BoxError> {
-        Ok(())
-    }
-
-    /// Returns a boolean that indicates whether a shutdown condition for the simulation has been reached.
-    ///
-    /// Should be used when there are shutdown conditions specific to the attack, the default implementation will
-    /// return `Ok(false)`.
-    async fn simulation_completed(
+    async fn run_attack(
         &self,
         _start_reputation: NetworkReputation,
-    ) -> Result<bool, BoxError> {
-        Ok(false)
-    }
+        _attacker_nodes: HashMap<String, Arc<Mutex<SimNode<SimGraph>>>>,
+        _shutdown_listener: Listener,
+    ) -> Result<(), BoxError>;
 }

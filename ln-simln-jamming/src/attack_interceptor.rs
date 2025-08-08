@@ -12,27 +12,25 @@ use tokio::sync::Mutex;
 /// Wraps an innner reputation interceptor (which is responsible for implementing a mitigation to
 /// channel jamming) in an outer interceptor which can be used to take custom actions for attacks.
 #[derive(Clone)]
-pub struct AttackInterceptor<R, A>
+pub struct AttackInterceptor<R>
 where
     R: Interceptor + ReputationMonitor,
-    A: JammingAttack,
 {
     attacker_pubkeys: Vec<PublicKey>,
     /// Inner reputation monitor that implements jamming mitigation.
     reputation_interceptor: Arc<Mutex<R>>,
     /// The attack that will be launched.
-    attack: Arc<A>,
+    attack: Arc<dyn JammingAttack + Send + Sync>,
 }
 
-impl<R, A> AttackInterceptor<R, A>
+impl<R> AttackInterceptor<R>
 where
     R: Interceptor + ReputationMonitor,
-    A: JammingAttack + Sync + Send,
 {
     pub fn new(
         attacker_pubkeys: Vec<PublicKey>,
         reputation_interceptor: Arc<Mutex<R>>,
-        attack: Arc<A>,
+        attack: Arc<dyn JammingAttack + Send + Sync>,
     ) -> Self {
         Self {
             attacker_pubkeys,
@@ -43,10 +41,9 @@ where
 }
 
 #[async_trait]
-impl<R, A> Interceptor for AttackInterceptor<R, A>
+impl<R> Interceptor for AttackInterceptor<R>
 where
     R: Interceptor + ReputationMonitor,
-    A: JammingAttack + Send + Sync,
 {
     /// Implemented by HTLC interceptors that provide input on the resolution of HTLCs forwarded in the simulation.
     async fn intercept_htlc(
@@ -99,7 +96,8 @@ mod tests {
 
     use crate::attacks::JammingAttack;
     use crate::test_utils::{get_random_keypair, setup_test_request, MockReputationInterceptor};
-    use crate::{records_from_signal, BoxError, NetworkReputation};
+    use crate::NetworkReputation;
+    use crate::{records_from_signal, BoxError};
     use async_trait::async_trait;
     use ln_resource_mgr::AccountableSignal;
     use mockall::mock;
@@ -114,18 +112,16 @@ mod tests {
 
     mock! {
         Attack{}
-
         #[async_trait]
         impl JammingAttack for Attack {
             fn setup_for_network(&self) -> Result<crate::attacks::NetworkSetup, BoxError>;
             async fn intercept_attacker_htlc(&self, req: InterceptRequest) -> Result<Result<CustomRecords, ForwardingError>, BoxError>;
             async fn intercept_attacker_receive(&self,_req: InterceptRequest) -> Result<Result<CustomRecords, ForwardingError>, BoxError>;
-            async fn run_custom_actions(&self, attacker_nodes: HashMap<String, Arc<tokio::sync::Mutex<SimNode<SimGraph>>>>, shutdown_listener: Listener) -> Result<(), BoxError>;
-            async fn simulation_completed(&self, _start_reputation: NetworkReputation) -> Result<bool, BoxError>;
+            async fn run_attack(&self, _start_reputation: NetworkReputation, attacker_nodes: HashMap<String, Arc<tokio::sync::Mutex<SimNode<SimGraph>>>>, shutdown_listener: Listener) -> Result<(), BoxError>;
         }
     }
 
-    fn setup_interceptor_test() -> AttackInterceptor<MockReputationInterceptor, MockAttack> {
+    fn setup_interceptor_test() -> AttackInterceptor<MockReputationInterceptor> {
         let attacker_pubkey = get_random_keypair().1;
 
         let mock = MockReputationInterceptor::new();

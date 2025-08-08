@@ -3,7 +3,7 @@ use bitcoin::secp256k1::PublicKey;
 use ln_resource_mgr::AccountableSignal;
 use sim_cli::parsing::NetworkParser;
 use simln_lib::clock::Clock;
-use simln_lib::sim_node::{CustomRecords, ForwardingError, InterceptRequest};
+use simln_lib::sim_node::{CustomRecords, ForwardingError, InterceptRequest, SimGraph, SimNode};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,7 +41,6 @@ where
     risk_margin: u64,
     reputation_monitor: Arc<Mutex<R>>,
     peacetime_revenue: Arc<M>,
-    listener: Listener,
 }
 
 impl<
@@ -59,7 +58,6 @@ impl<
         risk_margin: u64,
         reputation_monitor: Arc<Mutex<R>>,
         peacetime_revenue: Arc<M>,
-        listener: Listener,
     ) -> Self {
         // For sink attack we only use one attacker node.
         assert!(attacker_pubkeys.len() == 1);
@@ -86,7 +84,6 @@ impl<
             risk_margin,
             reputation_monitor,
             peacetime_revenue,
-            listener,
         }
     }
 
@@ -147,7 +144,7 @@ impl<
         // If the htlc is accountable, then we go ahead and hold the htlc for as long as we can only exiting if we
         // get a shutdown signal elsewhere.
         select! {
-            _ = self.listener.clone() => Err(ForwardingError::InterceptorError("shutdown signal received".to_string())),
+            _ = req.shutdown_listener.clone() => Err(ForwardingError::InterceptorError("shutdown signal received".to_string())),
             _ = self.clock.sleep(max_hold_secs) => Ok(records_from_signal(AccountableSignal::Accountable))
         }
     }
@@ -250,44 +247,59 @@ where
     /// Shuts down the simulation if the target node has lost revenue compared to its projected
     /// peacetime revenue, or the attacker has lost reputation without being able to compromise
     /// the target's reputation.
-    async fn simulation_completed(
+    async fn run_attack(
         &self,
         start_reputation: NetworkReputation,
-    ) -> Result<bool, BoxError> {
-        let snapshot = self.peacetime_revenue.get_revenue_difference().await;
-        if snapshot.peacetime_revenue_msat > snapshot.simulation_revenue_msat {
-            log::error!(
-                "Peacetime revenue: {} exceeds simulation revenue: {} after: {:?}",
-                snapshot.peacetime_revenue_msat,
-                snapshot.simulation_revenue_msat,
-                snapshot.runtime
-            );
+        _attacker_nodes: HashMap<String, Arc<Mutex<SimNode<SimGraph>>>>,
+        shutdown_listener: Listener,
+    ) -> Result<(), BoxError> {
+        // Poll every 5 minutes to check if the attack is done.
+        let interval = Duration::from_secs(300);
+        loop {
+            select! {
+                _ = shutdown_listener.clone() => break,
+                _ = self.clock.sleep(interval) => {
+                    let snapshot = self.peacetime_revenue.get_revenue_difference().await;
+                    if snapshot.peacetime_revenue_msat > snapshot.simulation_revenue_msat {
+                        log::error!(
+                            "Peacetime revenue: {} exceeds simulation revenue: {} after: {:?}",
+                            snapshot.peacetime_revenue_msat,
+                            snapshot.simulation_revenue_msat,
+                            snapshot.runtime
+                        );
 
-            return Ok(true);
+                        return Ok(());
+                    }
+
+                    log::trace!(
+                        "Peacetime revenue: {} less than simulation revenue: {} after: {:?}",
+                        snapshot.peacetime_revenue_msat,
+                        snapshot.simulation_revenue_msat,
+                        snapshot.runtime
+                    );
+
+                    let current_reputation = get_network_reputation(
+                        self.reputation_monitor.clone(),
+                        self.target_pubkey,
+                        &[self.attacker_pubkey],
+                        &self
+                            .target_channels
+                            .iter()
+                            .map(|(k, v)| (*k, v.0))
+                            .collect(),
+                        self.risk_margin,
+                        InstantClock::now(&*self.clock),
+                    )
+                    .await?;
+
+                    if inner_simulation_completed(&start_reputation, &current_reputation)? {
+                        return Ok(())
+                    }
+                }
+            }
         }
 
-        log::trace!(
-            "Peacetime revenue: {} less than simulation revenue: {} after: {:?}",
-            snapshot.peacetime_revenue_msat,
-            snapshot.simulation_revenue_msat,
-            snapshot.runtime
-        );
-
-        let current_reputation = get_network_reputation(
-            self.reputation_monitor.clone(),
-            self.target_pubkey,
-            &[self.attacker_pubkey],
-            &self
-                .target_channels
-                .iter()
-                .map(|(k, v)| (*k, v.0))
-                .collect(),
-            self.risk_margin,
-            InstantClock::now(&*self.clock),
-        )
-        .await?;
-
-        inner_simulation_completed(&start_reputation, &current_reputation)
+        Ok(())
     }
 }
 
@@ -317,8 +329,6 @@ mod tests {
         attacker: PublicKey,
         network: &[NetworkParser],
     ) -> SinkAttack<SimulationClock, MockReputationInterceptor, MockPeacetimeMonitor> {
-        let (_shutdown, listener) = triggered::trigger();
-
         SinkAttack::new(
             Arc::new(SimulationClock::new(1).unwrap()),
             network,
@@ -327,7 +337,6 @@ mod tests {
             0,
             Arc::new(Mutex::new(MockReputationInterceptor::new())),
             Arc::new(MockPeacetimeMonitor::new()),
-            listener,
         )
     }
 
