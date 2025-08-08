@@ -26,7 +26,17 @@ use tokio::sync::Mutex;
 #[derive(Clone)]
 pub struct HtlcAdd {
     pub forwarding_node: PublicKey,
-    pub htlc: ProposedForward,
+    pub incoming_ref: HtlcRef,
+    pub outgoing_channel_id: u64,
+    pub amount_in_msat: u64,
+    pub amount_out_msat: u64,
+    pub expiry_in_height: u32,
+    pub expiry_out_height: u32,
+    pub incoming_accountable: AccountableSignal,
+    pub upgradable_accountability: bool,
+    /// Optional timestamp for the case where htlcs with existing timestamps are being replayed.
+    /// Should be None otherwise.
+    pub added_at: Option<Instant>,
 }
 
 struct HtlcResolve {
@@ -34,7 +44,9 @@ struct HtlcResolve {
     forwarding_node: PublicKey,
     incoming_htlc: HtlcRef,
     forward_resolution: ForwardResolution,
-    resolved_ins: Instant,
+    /// Optional timestamp for the case where htlcs with existing timestamps are being replayed.
+    /// Should be None otherwise.
+    resolved_ins: Option<Instant>,
 }
 
 enum BootstrapEvent {
@@ -270,14 +282,14 @@ where
 
             bootstrap_events.push(BootstrapEvent::BootstrapAdd(HtlcAdd {
                 forwarding_node: h.forwarding_node,
-                htlc: ProposedForward {
-                    incoming_ref,
-                    outgoing_channel_id: h.channel_out_id,
-                    amount_in_msat: h.incoming_amt,
-                    amount_out_msat: h.outgoing_amt,
-                    expiry_in_height: h.incoming_expiry,
-                    expiry_out_height: h.outgoing_expiry,
-                    added_at: start_ins.sub(Duration::from_nanos(
+                incoming_ref,
+                outgoing_channel_id: h.channel_out_id,
+                amount_in_msat: h.incoming_amt,
+                amount_out_msat: h.outgoing_amt,
+                expiry_in_height: h.incoming_expiry,
+                expiry_out_height: h.outgoing_expiry,
+                added_at: Some(
+                    start_ins.sub(Duration::from_nanos(
                         bootstrap
                             .last_timestamp_nanos
                             .checked_sub(h.added_ns)
@@ -286,24 +298,26 @@ where
                                 bootstrap.last_timestamp_nanos, h.added_ns
                             ))?,
                     )),
-                    incoming_accountable: AccountableSignal::Unaccountable,
-                    upgradable_accountability: true,
-                },
+                ),
+                incoming_accountable: AccountableSignal::Unaccountable,
+                upgradable_accountability: true,
             }));
 
             bootstrap_events.push(BootstrapEvent::BootstrapResolve(HtlcResolve {
                 outgoing_channel_id: h.channel_out_id,
                 forwarding_node: h.forwarding_node,
                 incoming_htlc: incoming_ref,
-                resolved_ins: start_ins.sub(Duration::from_nanos(
-                    bootstrap
-                        .last_timestamp_nanos
-                        .checked_sub(h.settled_ns)
-                        .ok_or(format!(
-                            "settled ts: {} > last ts: {}",
-                            bootstrap.last_timestamp_nanos, h.settled_ns
-                        ))?,
-                )),
+                resolved_ins: Some(
+                    start_ins.sub(Duration::from_nanos(
+                        bootstrap
+                            .last_timestamp_nanos
+                            .checked_sub(h.settled_ns)
+                            .ok_or(format!(
+                                "settled ts: {} > last ts: {}",
+                                bootstrap.last_timestamp_nanos, h.settled_ns
+                            ))?,
+                    )),
+                ),
                 forward_resolution: ForwardResolution::Settled,
             }));
         }
@@ -313,8 +327,10 @@ where
         //
         // TODO: queue?
         bootstrap_events.sort_by_key(|event| match event {
-            BootstrapEvent::BootstrapAdd(htlc_add) => htlc_add.htlc.added_at,
-            BootstrapEvent::BootstrapResolve(htlc_resolve) => htlc_resolve.resolved_ins,
+            // We know that the instants here must be Some, as we've just set it above so it's
+            // okay to unwrap here.
+            BootstrapEvent::BootstrapAdd(htlc_add) => htlc_add.added_at.unwrap(),
+            BootstrapEvent::BootstrapResolve(htlc_resolve) => htlc_resolve.resolved_ins.unwrap(),
         });
 
         // Data generation does not run the reputation algorithm, so it's possible that we'll hit a few htlcs that
@@ -326,7 +342,7 @@ where
                 BootstrapEvent::BootstrapAdd(htlc_add) => {
                     // Add to internal state but don't write to results.
                     if let Err(e) = self.inner_add_htlc(htlc_add.clone(), false).await? {
-                        skipped_htlcs.insert(htlc_add.htlc.incoming_ref);
+                        skipped_htlcs.insert(htlc_add.incoming_ref);
                         log::error!("Routing failure for bootstrap: {e}");
                     }
                 }
@@ -382,39 +398,45 @@ where
         htlc_add: HtlcAdd,
         report: bool,
     ) -> Result<Result<CustomRecords, ForwardingError>, ReputationError> {
-        // If the forwarding node can't be found, we've hit a critical error and can't proceed.
-        let (allocation_check, fwd_outcome, alias) = match self
-            .network_nodes
-            .lock()
-            .await
-            .entry(htlc_add.forwarding_node)
-        {
-            Entry::Occupied(mut e) => {
-                let node = e.get_mut();
-                (
-                    node.forward_manager
-                        .get_allocation_snapshot(&htlc_add.htlc)?,
-                    node.forward_manager.add_htlc(&htlc_add.htlc)?,
-                    node.alias.to_string(),
-                )
-            }
-            Entry::Vacant(_) => {
-                return Err(ReputationError::ErrUnrecoverable(format!(
-                    "node not found: {}",
-                    htlc_add.forwarding_node,
-                )))
-            }
+        // We want our main lock to be held when we get our timestamp, so it doesn't drift too much.
+        let mut network_lock = self.network_nodes.lock().await;
+        let htlc = ProposedForward {
+            incoming_ref: htlc_add.incoming_ref,
+            outgoing_channel_id: htlc_add.outgoing_channel_id,
+            amount_in_msat: htlc_add.amount_in_msat,
+            amount_out_msat: htlc_add.amount_out_msat,
+            expiry_in_height: htlc_add.expiry_in_height,
+            expiry_out_height: htlc_add.expiry_out_height,
+            added_at: htlc_add.added_at.unwrap_or(self.clock.now()),
+            incoming_accountable: htlc_add.incoming_accountable,
+            upgradable_accountability: htlc_add.upgradable_accountability,
         };
+
+        // If the forwarding node can't be found, we've hit a critical error and can't proceed.
+        let (allocation_check, fwd_outcome, alias) =
+            match network_lock.entry(htlc_add.forwarding_node) {
+                Entry::Occupied(mut e) => {
+                    let node = e.get_mut();
+                    (
+                        node.forward_manager.get_allocation_snapshot(&htlc)?,
+                        node.forward_manager.add_htlc(&htlc)?,
+                        node.alias.to_string(),
+                    )
+                }
+                Entry::Vacant(_) => {
+                    return Err(ReputationError::ErrUnrecoverable(format!(
+                        "node not found: {}",
+                        htlc_add.forwarding_node,
+                    )))
+                }
+            };
+        drop(network_lock);
 
         if let Some(r) = &self.results {
             if report {
                 r.lock()
                     .await
-                    .report_forward(
-                        htlc_add.forwarding_node,
-                        allocation_check,
-                        htlc_add.htlc.clone(),
-                    )
+                    .report_forward(htlc_add.forwarding_node, allocation_check, htlc.clone())
                     .await
                     .map_err(|e| ReputationError::ErrUnrecoverable(e.to_string()))?;
             }
@@ -423,7 +445,7 @@ where
         log::info!(
             "Node {} forwarding: {} with outcome {}",
             alias,
-            htlc_add.htlc,
+            htlc,
             fwd_outcome,
         );
 
@@ -457,7 +479,7 @@ where
                 resolved_htlc.outgoing_channel_id,
                 resolved_htlc.incoming_htlc,
                 resolved_htlc.forward_resolution,
-                resolved_htlc.resolved_ins,
+                resolved_htlc.resolved_ins.unwrap_or(self.clock.now()),
             )?),
             Entry::Vacant(_) => Err(ReputationError::ErrUnrecoverable(format!(
                 "Node: {} not found",
@@ -508,25 +530,22 @@ where
             }
         };
 
-        let htlc = ProposedForward {
-            incoming_ref: HtlcRef {
-                channel_id: req.incoming_htlc.channel_id.into(),
-                htlc_index: req.incoming_htlc.index,
-            },
-            outgoing_channel_id,
-            amount_in_msat: req.incoming_amount_msat,
-            amount_out_msat: req.outgoing_amount_msat,
-            expiry_in_height: req.incoming_expiry_height,
-            expiry_out_height: req.outgoing_expiry_height,
-            added_at: self.clock.now(),
-            incoming_accountable: accountable_from_records(&req.incoming_custom_records),
-            upgradable_accountability: upgradable_from_records(&req.incoming_custom_records),
-        };
-
         self.inner_add_htlc(
             HtlcAdd {
                 forwarding_node: req.forwarding_node,
-                htlc,
+                incoming_ref: HtlcRef {
+                    channel_id: req.incoming_htlc.channel_id.into(),
+                    htlc_index: req.incoming_htlc.index,
+                },
+                outgoing_channel_id,
+                amount_in_msat: req.incoming_amount_msat,
+                amount_out_msat: req.outgoing_amount_msat,
+                expiry_in_height: req.incoming_expiry_height,
+                expiry_out_height: req.outgoing_expiry_height,
+                // We want to use our live clock to set the timestamp on this resolution.
+                added_at: None,
+                incoming_accountable: accountable_from_records(&req.incoming_custom_records),
+                upgradable_accountability: upgradable_from_records(&req.incoming_custom_records),
             },
             true,
         )
@@ -549,7 +568,8 @@ where
                 htlc_index: res.incoming_htlc.index,
             },
             forward_resolution: ForwardResolution::from(res.success),
-            resolved_ins: self.clock.now(),
+            // We want to use our live clock to set the timestamp on this resolution.
+            resolved_ins: None,
         })
         .await
         .map_err(|e| CriticalError::InterceptorError(e.to_string()))

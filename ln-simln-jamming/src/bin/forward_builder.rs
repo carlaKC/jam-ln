@@ -59,7 +59,7 @@ async fn main() -> Result<(), BoxError> {
 
     let network_dir = SimulationFiles::new(cli.network.network_dir.clone(), cli.traffic_type)?;
 
-    let clock = Arc::new(SimulationClock::new(500)?);
+    let clock = Arc::new(SimulationClock::new(1000)?);
     let tasks = TaskTracker::new();
 
     // Forwarding traffic can either be created for the peacetime or attacktime graphs. We'll
