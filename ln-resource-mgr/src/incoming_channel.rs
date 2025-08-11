@@ -50,6 +50,13 @@ impl IncomingChannel {
             liquidity_msat: 0,
         };
     }
+
+    pub(super) fn congestion_jam_channel(&mut self) {
+        self.congestion_bucket = BucketParameters {
+            slot_count: 0,
+            liquidity_msat: 0,
+        };
+    }
 }
 
 /// Defines the number of slots each candidate channel is allowed in the general bucket.
