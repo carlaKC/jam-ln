@@ -268,7 +268,7 @@ async fn main() -> Result<(), BoxError> {
     .await?;
     let simulation = Arc::new(simulation);
 
-    let attacker_nodes: HashMap<String, Arc<Mutex<SimNode<SimGraph>>>> = sim_nodes
+    let attacker_nodes: HashMap<String, Arc<Mutex<SimNode<SimGraph, SimulationClock>>>> = sim_nodes
         .into_iter()
         .filter_map(|(pk, node)| {
             network_dir
