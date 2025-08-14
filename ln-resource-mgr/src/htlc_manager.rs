@@ -74,12 +74,6 @@ impl ReputationParams {
     }
 }
 
-pub enum ChannelFilter {
-    #[allow(dead_code)]
-    IncomingChannel(u64),
-    OutgoingChannel(u64),
-}
-
 /// Responsible for tracking all currently in flight htlcs on the node's channels.
 ///
 /// Centrally tracked decrease data duplication (otherwise htlc amount/expiry needs to be tracked on both the incoming
@@ -129,19 +123,16 @@ impl InFlightManager {
     }
 
     /// Returns the total htlc risk of all the accountable htlcs that a channel currently has in-flight on our channels.
-    pub(super) fn channel_in_flight_risk(&self, filter: ChannelFilter) -> u64 {
+    pub(super) fn channel_in_flight_risk(&self, outgoing_channel_id: u64) -> u64 {
         self.in_flight
             .iter()
-            .filter(|(k, v)| {
+            .filter(|(_, v)| {
                 // Unaccountable htlcs do not contribute to risk, so no option is given to count them.
                 if v.outgoing_accountable == AccountableSignal::Unaccountable {
                     return false;
                 }
 
-                match filter {
-                    ChannelFilter::IncomingChannel(scid) => k.channel_id == scid,
-                    ChannelFilter::OutgoingChannel(scid) => v.outgoing_channel_id == scid,
-                }
+                v.outgoing_channel_id == outgoing_channel_id
             })
             .map(|(_, v)| self.params.htlc_risk(v.fee_msat, v.hold_blocks))
             .sum()
@@ -195,7 +186,7 @@ impl InFlightManager {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use crate::htlc_manager::{ChannelFilter, InFlightManager};
+    use crate::htlc_manager::InFlightManager;
     use crate::{
         AccountableSignal, HtlcRef, ReputationError, ReputationParams, ResourceBucketType,
     };
@@ -331,14 +322,8 @@ mod tests {
         let channel_1 = 1;
         let channel_2 = 2;
 
-        assert_eq!(
-            tracker.channel_in_flight_risk(ChannelFilter::OutgoingChannel(channel_0)),
-            0
-        );
-        assert_eq!(
-            tracker.channel_in_flight_risk(ChannelFilter::OutgoingChannel(channel_1)),
-            0
-        );
+        assert_eq!(tracker.channel_in_flight_risk(channel_0), 0);
+        assert_eq!(tracker.channel_in_flight_risk(channel_1), 0);
 
         // Accountable htlc contribute to in flight risk and count, 0 -> 1.
         let htlc_1_ref = HtlcRef {
@@ -382,30 +367,11 @@ mod tests {
         assert!(tracker.add_htlc(htlc_3_ref, htlc_3).is_ok());
         assert!(tracker.add_htlc(htlc_4_ref, htlc_4).is_ok());
 
+        assert_eq!(tracker.channel_in_flight_risk(channel_0), htlc_2_risk,);
+        assert_eq!(tracker.channel_in_flight_risk(channel_1), htlc_1_risk,);
         assert_eq!(
-            tracker.channel_in_flight_risk(ChannelFilter::OutgoingChannel(channel_0)),
-            htlc_2_risk,
-        );
-        assert_eq!(
-            tracker.channel_in_flight_risk(ChannelFilter::OutgoingChannel(channel_1)),
-            htlc_1_risk,
-        );
-        assert_eq!(
-            tracker.channel_in_flight_risk(ChannelFilter::OutgoingChannel(channel_2)),
+            tracker.channel_in_flight_risk(channel_2),
             htlc_4_risk, // Unaccountable does not contribute to risk, so no htlc_3.
-        );
-
-        assert_eq!(
-            tracker.channel_in_flight_risk(ChannelFilter::IncomingChannel(channel_0)),
-            htlc_1_risk,
-        );
-        assert_eq!(
-            tracker.channel_in_flight_risk(ChannelFilter::IncomingChannel(channel_1)),
-            htlc_2_risk + htlc_4_risk, // Unaccountable does not contribute to risk, so no htlc_3.
-        );
-        assert_eq!(
-            tracker.channel_in_flight_risk(ChannelFilter::IncomingChannel(channel_2)),
-            0,
         );
     }
 
