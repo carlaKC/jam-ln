@@ -4,7 +4,7 @@ use rand::Rng;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
-use crate::ReputationError;
+use crate::{ReputationError, ResourceBucketType};
 
 /// Describes the size of a resource bucket.
 #[derive(Clone, Debug)]
@@ -56,6 +56,32 @@ impl IncomingChannel {
             slot_count: 0,
             liquidity_msat: 0,
         };
+    }
+
+    pub(super) fn add_htlc(
+        &mut self,
+        candidate_scid: u64,
+        amount_msat: u64,
+        bucket_type: ResourceBucketType,
+    ) -> Result<bool, ReputationError> {
+        if bucket_type != ResourceBucketType::General {
+            return Ok(true);
+        }
+
+        self.general_bucket.add_htlc(candidate_scid, amount_msat)
+    }
+
+    pub(super) fn remove_htlc(
+        &mut self,
+        candidate_scid: u64,
+        amount_msat: u64,
+        bucket_type: ResourceBucketType,
+    ) -> Result<(), ReputationError> {
+        if bucket_type != ResourceBucketType::General {
+            return Ok(());
+        }
+
+        self.general_bucket.remove_htlc(candidate_scid, amount_msat)
     }
 }
 
@@ -257,11 +283,7 @@ impl GeneralBucket {
     /// channel if it has never been used as the outgoing forwarding channel with this one. This
     /// is done "just in time" so that we don't need to pick slots for channels that we many never
     /// forward with.
-    pub(super) fn add_htlc(
-        &mut self,
-        candidate_scid: u64,
-        amount_msat: u64,
-    ) -> Result<bool, ReputationError> {
+    fn add_htlc(&mut self, candidate_scid: u64, amount_msat: u64) -> Result<bool, ReputationError> {
         let available_slots = match self.get_usable_slots(candidate_scid, amount_msat)? {
             Some(slots) => slots,
             None => return Ok(false),
@@ -296,7 +318,7 @@ impl GeneralBucket {
     }
 
     /// Removes a HTLC for the candidate channel. Should be called once the HTLC has been resolved.
-    pub(super) fn remove_htlc(
+    fn remove_htlc(
         &mut self,
         candidate_scid: u64,
         amount_msat: u64,

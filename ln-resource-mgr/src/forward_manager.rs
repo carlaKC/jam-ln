@@ -461,16 +461,18 @@ impl ReputationManager for ForwardManager {
                 // Add to our inner channel's bucket, failing if we can't add the HTLC. We've just
                 // checked our forwarding outcome and our state is locked so this should always
                 // succeed.
-                if fwd_sucess.bucket == ResourceBucketType::General
-                    && !inner_lock
-                        .channels
-                        .get_mut(&forward.incoming_ref.channel_id)
-                        .ok_or(ReputationError::ErrIncomingNotFound(
-                            forward.incoming_ref.channel_id,
-                        ))?
-                        .incoming_direction
-                        .general_bucket
-                        .add_htlc(forward.outgoing_channel_id, forward.amount_in_msat)?
+                if !inner_lock
+                    .channels
+                    .get_mut(&forward.incoming_ref.channel_id)
+                    .ok_or(ReputationError::ErrIncomingNotFound(
+                        forward.incoming_ref.channel_id,
+                    ))?
+                    .incoming_direction
+                    .add_htlc(
+                        forward.outgoing_channel_id,
+                        forward.amount_in_msat,
+                        fwd_sucess.bucket.clone(),
+                    )?
                 {
                     return Err(ReputationError::ErrUnrecoverable("Could not assign HTLC previously considered eligible with internal lock held - we have a bug!".to_string()));
                 }
@@ -512,17 +514,18 @@ impl ReputationManager for ForwardManager {
             .htlcs
             .remove_htlc(outgoing_channel, incoming_ref)?;
 
-        if in_flight.bucket == ResourceBucketType::General {
-            inner_lock
-                .channels
-                .get_mut(&incoming_ref.channel_id)
-                .ok_or(ReputationError::ErrIncomingNotFound(
-                    incoming_ref.channel_id,
-                ))?
-                .incoming_direction
-                .general_bucket
-                .remove_htlc(outgoing_channel, in_flight.incoming_amt_msat)?;
-        }
+        inner_lock
+            .channels
+            .get_mut(&incoming_ref.channel_id)
+            .ok_or(ReputationError::ErrIncomingNotFound(
+                incoming_ref.channel_id,
+            ))?
+            .incoming_direction
+            .remove_htlc(
+                outgoing_channel,
+                in_flight.incoming_amt_msat,
+                in_flight.bucket.clone(),
+            )?;
 
         inner_lock
             .channels
