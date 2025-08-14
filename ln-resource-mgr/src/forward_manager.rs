@@ -181,6 +181,29 @@ impl ForwardManagerImpl {
         let no_congestion_misuse = outgoing_channel.no_congestion_misuse(forward.added_at);
         let outgoing_reputation = outgoing_channel.outgoing_reputation(forward.added_at)?;
 
+        let in_flight_total_risk = self
+            .htlcs
+            .channel_in_flight_risk(forward.outgoing_channel_id)
+            .iter()
+            .map(|(k, v)| {
+                let incoming_utilization = self
+                    .channels
+                    .get_mut(k)
+                    .ok_or(ReputationError::ErrIncomingNotFound(*k))
+                    // TODO: handle this unwrap
+                    .unwrap()
+                    .incoming_direction
+                    // TODO: rounding
+                    .max_utilization(forward.added_at)
+                    .unwrap();
+
+                v.iter().fold(0, |acc, v| {
+                    acc + (params.htlc_risk(v.fee_msat, v.hold_blocks) as f64
+                        * incoming_utilization) as u64
+                })
+            })
+            .sum();
+
         let incoming_channel = self
             .channels
             .get_mut(&forward.incoming_ref.channel_id)
@@ -196,16 +219,7 @@ impl ForwardManagerImpl {
             reputation_check: ReputationCheck {
                 reputation: outgoing_reputation,
                 revenue_threshold: incoming_revenue_threshold,
-                in_flight_total_risk: self
-                    .htlcs
-                    .channel_in_flight_risk(forward.outgoing_channel_id)
-                    .iter()
-                    .map(|(_, v)| {
-                        v.iter().fold(0, |acc, v| {
-                            acc + params.htlc_risk(v.fee_msat, v.hold_blocks)
-                        })
-                    })
-                    .sum(),
+                in_flight_total_risk,
                 htlc_risk: params.htlc_risk(forward.fee_msat(), forward.expiry_in_height),
             },
             general_eligible: incoming_channel
