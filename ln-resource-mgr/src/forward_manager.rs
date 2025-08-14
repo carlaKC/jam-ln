@@ -165,6 +165,7 @@ struct ForwardManagerImpl {
 impl ForwardManagerImpl {
     fn get_allocation_snapshot(
         &mut self,
+        params: &ReputationParams,
         forward: &ProposedForward,
     ) -> Result<AllocationCheck, ReputationError> {
         forward.validate()?;
@@ -198,10 +199,15 @@ impl ForwardManagerImpl {
                 revenue_threshold: incoming_revenue_threshold,
                 in_flight_total_risk: self
                     .htlcs
-                    .channel_in_flight_risk(forward.outgoing_channel_id),
-                htlc_risk: self
-                    .htlcs
-                    .htlc_risk(forward.fee_msat(), forward.expiry_in_height),
+                    .channel_in_flight_risk(forward.outgoing_channel_id)
+                    .iter()
+                    .map(|(_, v)| {
+                        v.iter().fold(0, |acc, v| {
+                            acc + params.htlc_risk(v.fee_msat, v.hold_blocks)
+                        })
+                    })
+                    .sum(),
+                htlc_risk: params.htlc_risk(forward.fee_msat(), forward.expiry_in_height),
             },
             general_eligible: incoming_channel
                 .incoming_direction
@@ -281,7 +287,7 @@ impl ForwardManager {
             params,
             inner: Mutex::new(ForwardManagerImpl {
                 channels: HashMap::new(),
-                htlcs: InFlightManager::new(params.reputation_params),
+                htlcs: InFlightManager::new(),
             }),
         }
     }
@@ -432,7 +438,7 @@ impl ReputationManager for ForwardManager {
         self.inner
             .lock()
             .map_err(|e| ReputationError::ErrUnrecoverable(e.to_string()))?
-            .get_allocation_snapshot(forward)
+            .get_allocation_snapshot(&self.params.reputation_params, forward)
     }
 
     fn add_htlc(&self, forward: &ProposedForward) -> Result<ForwardingOutcome, ReputationError> {
@@ -441,7 +447,8 @@ impl ReputationManager for ForwardManager {
             .lock()
             .map_err(|e| ReputationError::ErrUnrecoverable(e.to_string()))?;
 
-        let allocation_check = inner_lock.get_allocation_snapshot(forward)?;
+        let allocation_check =
+            inner_lock.get_allocation_snapshot(&self.params.reputation_params, forward)?;
 
         let fwd_outcome = allocation_check.inner_forwarding_outcome(
             forward.amount_in_msat,

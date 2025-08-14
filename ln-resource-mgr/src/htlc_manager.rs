@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::{validate_msat, AccountableSignal, HtlcRef, ReputationError, ResourceBucketType};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct InFlightHtlc {
     pub(super) outgoing_channel_id: u64,
     pub(super) fee_msat: u64,
@@ -81,14 +81,12 @@ impl ReputationParams {
 #[derive(Debug)]
 pub(super) struct InFlightManager {
     in_flight: HashMap<HtlcRef, InFlightHtlc>,
-    params: ReputationParams,
 }
 
 impl InFlightManager {
-    pub(super) fn new(params: ReputationParams) -> Self {
+    pub(super) fn new() -> Self {
         Self {
             in_flight: HashMap::new(),
-            params,
         }
     }
 
@@ -122,8 +120,13 @@ impl InFlightManager {
             ))
     }
 
-    /// Returns the total htlc risk of all the accountable htlcs that a channel currently has in-flight on our channels.
-    pub(super) fn channel_in_flight_risk(&self, outgoing_channel_id: u64) -> u64 {
+    /// Returns a map of accountable htlcs per incoming channel that the outgoing channel currently
+    /// has in flight.
+    pub(super) fn channel_in_flight_risk(
+        &self,
+        outgoing_channel_id: u64,
+    ) -> HashMap<u64, Vec<InFlightHtlc>> {
+        let mut in_flight_htlcs: HashMap<u64, Vec<InFlightHtlc>> = HashMap::new();
         self.in_flight
             .iter()
             .filter(|(_, v)| {
@@ -134,8 +137,14 @@ impl InFlightManager {
 
                 v.outgoing_channel_id == outgoing_channel_id
             })
-            .map(|(_, v)| self.params.htlc_risk(v.fee_msat, v.hold_blocks))
-            .sum()
+            .for_each(|(k, v)| {
+                in_flight_htlcs
+                    .entry(k.channel_id)
+                    .or_default()
+                    .push(v.clone())
+            });
+
+        in_flight_htlcs
     }
 
     /// Returns the total balance of htlcs in flight in the bucket provided.
@@ -175,32 +184,17 @@ impl InFlightManager {
                 && v.outgoing_channel_id == outgoing_channel_id
         })
     }
-
-    /// Calculates the worst case reputation damage of a htlc, assuming it'll be held for its full expiry_delta.
-    pub(super) fn htlc_risk(&self, fee_msat: u64, expiry_delta: u32) -> u64 {
-        self.params.htlc_risk(fee_msat, expiry_delta)
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::collections::HashMap;
+    use std::time::Instant;
 
     use crate::htlc_manager::InFlightManager;
-    use crate::{
-        AccountableSignal, HtlcRef, ReputationError, ReputationParams, ResourceBucketType,
-    };
+    use crate::{AccountableSignal, HtlcRef, ReputationError, ResourceBucketType};
 
     use super::InFlightHtlc;
-
-    fn get_test_manager() -> InFlightManager {
-        InFlightManager::new(ReputationParams {
-            revenue_window: Duration::from_secs(60 * 60 * 24), // 1 week
-            reputation_multiplier: 10,
-            resolution_period: Duration::from_secs(60),
-            expected_block_speed: Some(Duration::from_secs(60 * 10)),
-        })
-    }
 
     fn get_test_htlc(
         outgoing_channel: u64,
@@ -226,7 +220,7 @@ mod tests {
     /// Tests adding and removal of HTLCs from the tracker.
     #[test]
     fn test_add_htlc() {
-        let mut tracker = get_test_manager();
+        let mut tracker = InFlightManager::new();
         let channel_0 = 0;
         let channel_1 = 1;
 
@@ -317,13 +311,13 @@ mod tests {
     /// Tests calculation of in flight risk on outgoing channels.
     #[test]
     fn test_in_flight_risk() {
-        let mut tracker = get_test_manager();
+        let mut tracker = InFlightManager::new();
         let channel_0 = 0;
         let channel_1 = 1;
         let channel_2 = 2;
 
-        assert_eq!(tracker.channel_in_flight_risk(channel_0), 0);
-        assert_eq!(tracker.channel_in_flight_risk(channel_1), 0);
+        assert!(tracker.channel_in_flight_risk(channel_0).is_empty());
+        assert!(tracker.channel_in_flight_risk(channel_1).is_empty());
 
         // Accountable htlc contribute to in flight risk and count, 0 -> 1.
         let htlc_1_ref = HtlcRef {
@@ -331,9 +325,6 @@ mod tests {
             htlc_index: 0,
         };
         let htlc_1 = get_test_htlc(channel_1, true, ResourceBucketType::Protected, 1000);
-        let htlc_1_risk = tracker
-            .params
-            .htlc_risk(htlc_1.fee_msat, htlc_1.hold_blocks);
 
         // Accountable htlc contribute to in flight risk and count despite general bucket, 0 -> 1.
         let htlc_2_ref = HtlcRef {
@@ -341,9 +332,6 @@ mod tests {
             htlc_index: 0,
         };
         let htlc_2 = get_test_htlc(channel_0, true, ResourceBucketType::General, 5000);
-        let htlc_2_risk = tracker
-            .params
-            .htlc_risk(htlc_2.fee_msat, htlc_2.hold_blocks);
 
         // Unaccountable htlc no contribution to in flight risk, 1 -> 2.
         let htlc_3_ref = HtlcRef {
@@ -358,27 +346,31 @@ mod tests {
             htlc_index: 2,
         };
         let htlc_4 = get_test_htlc(channel_2, true, ResourceBucketType::Congestion, 1250);
-        let htlc_4_risk = tracker
-            .params
-            .htlc_risk(htlc_4.fee_msat, htlc_4.hold_blocks);
 
-        assert!(tracker.add_htlc(htlc_1_ref, htlc_1).is_ok());
-        assert!(tracker.add_htlc(htlc_2_ref, htlc_2).is_ok());
-        assert!(tracker.add_htlc(htlc_3_ref, htlc_3).is_ok());
-        assert!(tracker.add_htlc(htlc_4_ref, htlc_4).is_ok());
+        assert!(tracker.add_htlc(htlc_1_ref, htlc_1.clone()).is_ok());
+        assert!(tracker.add_htlc(htlc_2_ref, htlc_2.clone()).is_ok());
+        assert!(tracker.add_htlc(htlc_3_ref, htlc_3.clone()).is_ok());
+        assert!(tracker.add_htlc(htlc_4_ref, htlc_4.clone()).is_ok());
 
-        assert_eq!(tracker.channel_in_flight_risk(channel_0), htlc_2_risk,);
-        assert_eq!(tracker.channel_in_flight_risk(channel_1), htlc_1_risk,);
+        assert_eq!(
+            tracker.channel_in_flight_risk(channel_0),
+            HashMap::from_iter(vec![(htlc_2_ref.channel_id, vec![htlc_2])]),
+        );
+        assert_eq!(
+            tracker.channel_in_flight_risk(channel_1),
+            HashMap::from_iter(vec![(htlc_1_ref.channel_id, vec![htlc_1])]),
+        );
         assert_eq!(
             tracker.channel_in_flight_risk(channel_2),
-            htlc_4_risk, // Unaccountable does not contribute to risk, so no htlc_3.
+            // Unaccountable does not contribute to risk, so no htlc_3.
+            HashMap::from_iter(vec![(htlc_4_ref.channel_id, vec![htlc_4])]),
         );
     }
 
     /// Tests tracking of in flight counts and liquidity in buckets.
     #[test]
     fn test_bucket_in_flight() {
-        let mut tracker = get_test_manager();
+        let mut tracker = InFlightManager::new();
         let channel_0 = 0;
         let channel_1 = 1;
 
@@ -476,7 +468,7 @@ mod tests {
 
     #[test]
     fn test_congestion_eligible() {
-        let mut tracker = get_test_manager();
+        let mut tracker = InFlightManager::new();
         let channel_0 = 0;
         let channel_1 = 1;
 
