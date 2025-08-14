@@ -2,10 +2,12 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
+use simln_lib::clock::Clock;
 use simln_lib::sim_node::{CustomRecords, ForwardingError, InterceptRequest, SimGraph, SimNode};
 use tokio::sync::Mutex;
 use triggered::Listener;
 
+use crate::clock::InstantClock;
 use crate::{accountable_from_records, records_from_signal, BoxError, NetworkReputation};
 
 pub mod sink;
@@ -25,7 +27,7 @@ pub struct NetworkSetup {
 
 // Defines an attack that can be mounted against the simulation framework.
 #[async_trait]
-pub trait JammingAttack {
+pub trait JammingAttack<C: Clock + InstantClock> {
     /// Responsible for validating that the network provided meets any topological expectations for the attack, and
     /// returning network-specific setup instructions for the attack.
     ///
@@ -76,7 +78,7 @@ pub trait JammingAttack {
     async fn run_attack(
         &self,
         _start_reputation: NetworkReputation,
-        _attacker_nodes: HashMap<String, Arc<Mutex<SimNode<SimGraph>>>>,
+        _attacker_nodes: HashMap<String, Arc<Mutex<SimNode<SimGraph, C>>>>,
         _shutdown_listener: Listener,
     ) -> Result<(), BoxError>;
 }

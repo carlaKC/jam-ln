@@ -171,7 +171,7 @@ fn inner_simulation_completed(
 }
 
 #[async_trait]
-impl<C, R, M> JammingAttack for SinkAttack<C, R, M>
+impl<C, R, M> JammingAttack<C> for SinkAttack<C, R, M>
 where
     C: Clock + InstantClock,
     R: ReputationMonitor + Send + Sync,
@@ -250,7 +250,7 @@ where
     async fn run_attack(
         &self,
         start_reputation: NetworkReputation,
-        _attacker_nodes: HashMap<String, Arc<Mutex<SimNode<SimGraph>>>>,
+        _attacker_nodes: HashMap<String, Arc<Mutex<SimNode<SimGraph, C>>>>,
         shutdown_listener: Listener,
     ) -> Result<(), BoxError> {
         // Poll every 5 minutes to check if the attack is done.
