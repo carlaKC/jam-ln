@@ -326,7 +326,7 @@ pub fn setup_attack<C, R, M>(
     reputation_monitor: Arc<TokioMutex<R>>,
     revenue_monitor: Arc<M>,
     risk_margin: u64,
-) -> Result<Arc<dyn JammingAttack + Send + Sync>, BoxError>
+) -> Result<Arc<dyn JammingAttack<C> + Send + Sync>, BoxError>
 where
     C: Clock + InstantClock + 'static,
     R: ReputationMonitor + Send + Sync + 'static,

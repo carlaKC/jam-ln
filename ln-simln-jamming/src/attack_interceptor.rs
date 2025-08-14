@@ -1,7 +1,9 @@
 use crate::attacks::JammingAttack;
+use crate::clock::InstantClock;
 use crate::reputation_interceptor::ReputationMonitor;
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
+use simln_lib::clock::Clock;
 use simln_lib::sim_node::{
     CriticalError, CustomRecords, ForwardingError, InterceptRequest, InterceptResolution,
     Interceptor,
@@ -12,25 +14,27 @@ use tokio::sync::Mutex;
 /// Wraps an innner reputation interceptor (which is responsible for implementing a mitigation to
 /// channel jamming) in an outer interceptor which can be used to take custom actions for attacks.
 #[derive(Clone)]
-pub struct AttackInterceptor<R>
+pub struct AttackInterceptor<R, C>
 where
     R: Interceptor + ReputationMonitor,
+    C: Clock + InstantClock,
 {
     attacker_pubkeys: Vec<PublicKey>,
     /// Inner reputation monitor that implements jamming mitigation.
     reputation_interceptor: Arc<Mutex<R>>,
     /// The attack that will be launched.
-    attack: Arc<dyn JammingAttack + Send + Sync>,
+    attack: Arc<dyn JammingAttack<C> + Send + Sync>,
 }
 
-impl<R> AttackInterceptor<R>
+impl<R, C> AttackInterceptor<R, C>
 where
     R: Interceptor + ReputationMonitor,
+    C: Clock + InstantClock,
 {
     pub fn new(
         attacker_pubkeys: Vec<PublicKey>,
         reputation_interceptor: Arc<Mutex<R>>,
-        attack: Arc<dyn JammingAttack + Send + Sync>,
+        attack: Arc<dyn JammingAttack<C> + Send + Sync>,
     ) -> Self {
         Self {
             attacker_pubkeys,
@@ -41,9 +45,10 @@ where
 }
 
 #[async_trait]
-impl<R> Interceptor for AttackInterceptor<R>
+impl<R, C> Interceptor for AttackInterceptor<R, C>
 where
     R: Interceptor + ReputationMonitor,
+    C: Clock + InstantClock,
 {
     /// Implemented by HTLC interceptors that provide input on the resolution of HTLCs forwarded in the simulation.
     async fn intercept_htlc(
@@ -102,6 +107,7 @@ mod tests {
     use ln_resource_mgr::AccountableSignal;
     use mockall::mock;
     use mockall::predicate::function;
+    use simln_lib::clock::SimulationClock;
     use simln_lib::sim_node::{
         CustomRecords, ForwardingError, InterceptRequest, Interceptor, SimGraph, SimNode,
     };
@@ -113,15 +119,15 @@ mod tests {
     mock! {
         Attack{}
         #[async_trait]
-        impl JammingAttack for Attack {
+        impl JammingAttack<SimulationClock> for Attack {
             fn setup_for_network(&self) -> Result<crate::attacks::NetworkSetup, BoxError>;
             async fn intercept_attacker_htlc(&self, req: InterceptRequest) -> Result<Result<CustomRecords, ForwardingError>, BoxError>;
             async fn intercept_attacker_receive(&self,_req: InterceptRequest) -> Result<Result<CustomRecords, ForwardingError>, BoxError>;
-            async fn run_attack(&self, _start_reputation: NetworkReputation, attacker_nodes: HashMap<String, Arc<tokio::sync::Mutex<SimNode<SimGraph>>>>, shutdown_listener: Listener) -> Result<(), BoxError>;
+            async fn run_attack(&self, _start_reputation: NetworkReputation, attacker_nodes: HashMap<String, Arc<tokio::sync::Mutex<SimNode<SimGraph, simln_lib::clock::SimulationClock>>>>, shutdown_listener: Listener) -> Result<(), BoxError>;
         }
     }
 
-    fn setup_interceptor_test() -> AttackInterceptor<MockReputationInterceptor> {
+    fn setup_interceptor_test() -> AttackInterceptor<MockReputationInterceptor, SimulationClock> {
         let attacker_pubkey = get_random_keypair().1;
 
         let mock = MockReputationInterceptor::new();
