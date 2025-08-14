@@ -182,6 +182,30 @@ impl ForwardManagerImpl {
         let no_congestion_misuse = outgoing_channel.no_congestion_misuse(forward.added_at);
         let outgoing_reputation = outgoing_channel.outgoing_reputation(forward.added_at)?;
 
+        let in_flight_total_risk = self
+            .htlcs
+            .channel_in_flight_risk(forward.outgoing_channel_id)
+            .iter()
+            .try_fold(0u64, |acc, (k, v)| -> Result<u64, ReputationError> {
+                let incoming_utilization = self
+                    .channels
+                    .get_mut(k)
+                    .ok_or(ReputationError::ErrIncomingNotFound(*k))?
+                    .incoming_direction
+                    .max_utilization(forward.added_at)?;
+
+                // We're happy to round HTLC risk because in the network we expect a expiry
+                // delta of at least 10 (implementations should not allow setting a lower delta,
+                // it's unsafe, and the default is around 80).
+                let risk = v.iter().fold(0, |acc, v| {
+                    acc + (params.htlc_risk(v.fee_msat, v.hold_blocks) as f64
+                        * incoming_utilization)
+                        .round() as u64
+                });
+
+                Ok(acc + risk)
+            })?;
+
         let incoming_channel = self
             .channels
             .get_mut(&forward.incoming_ref.channel_id)
@@ -193,21 +217,19 @@ impl ForwardManagerImpl {
             .bidirectional_revenue
             .value_at_instant(forward.added_at)?;
 
+        let incoming_utilization = incoming_channel
+            .incoming_direction
+            .max_utilization(forward.added_at)?;
+
         Ok(AllocationCheck {
             reputation_check: ReputationCheck {
                 reputation: outgoing_reputation,
                 revenue_threshold: incoming_revenue_threshold,
-                in_flight_total_risk: self
-                    .htlcs
-                    .channel_in_flight_risk(forward.outgoing_channel_id)
-                    .iter()
-                    .map(|(_, v)| {
-                        v.iter().fold(0, |acc, v| {
-                            acc + params.htlc_risk(v.fee_msat, v.hold_blocks)
-                        })
-                    })
-                    .sum(),
-                htlc_risk: params.htlc_risk(forward.fee_msat(), forward.expiry_in_height),
+                in_flight_total_risk,
+                // As noted above, we're okay with the rounding risk here due to typical values.
+                htlc_risk: (params.htlc_risk(forward.fee_msat(), forward.expiry_in_height) as f64
+                    * incoming_utilization)
+                    .round() as u64,
             },
             general_eligible: incoming_channel
                 .incoming_direction

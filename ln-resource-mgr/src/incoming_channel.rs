@@ -99,6 +99,17 @@ impl IncomingChannel {
             }
         }
     }
+
+    pub(super) fn max_utilization(
+        &mut self,
+        access_instant: Instant,
+    ) -> Result<f64, ReputationError> {
+        self.utilization.max_utilization(
+            (self.congestion_bucket.slot_count + self.protected_bucket.slot_count).into(),
+            self.congestion_bucket.liquidity_msat + self.congestion_bucket.liquidity_msat,
+            access_instant,
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -125,6 +136,26 @@ impl ChannelUtilization {
             .add_value(amount_msat as f64, update_instant)?;
 
         Ok(())
+    }
+
+    fn max_utilization(
+        &mut self,
+        slot_count: u64,
+        capacity_msat: u64,
+        access_instant: Instant,
+    ) -> Result<f64, ReputationError> {
+        let slots_utilization = self
+            .slot_utilization
+            .value_at_instant(access_instant)?
+            .max(1.0)
+            / slot_count as f64;
+
+        let liquidity_utilization = self
+            .liquidity_utilization
+            .value_at_instant(access_instant)?
+            / capacity_msat as f64;
+
+        Ok(slots_utilization.max(liquidity_utilization))
     }
 }
 
