@@ -1,5 +1,5 @@
 use crate::decaying_average::DecayingAverage;
-use crate::htlc_manager::{ChannelFilter, InFlightHtlc, InFlightManager};
+use crate::htlc_manager::{InFlightHtlc, InFlightManager};
 use crate::incoming_channel::{BucketParameters, IncomingChannel};
 use crate::outgoing_channel::OutgoingChannel;
 use crate::{
@@ -196,9 +196,9 @@ impl ForwardManagerImpl {
             reputation_check: ReputationCheck {
                 reputation: outgoing_reputation,
                 revenue_threshold: incoming_revenue_threshold,
-                in_flight_total_risk: self.htlcs.channel_in_flight_risk(
-                    ChannelFilter::OutgoingChannel(forward.outgoing_channel_id),
-                ),
+                in_flight_total_risk: self
+                    .htlcs
+                    .channel_in_flight_risk(forward.outgoing_channel_id),
                 htlc_risk: self
                     .htlcs
                     .htlc_risk(forward.fee_msat(), forward.expiry_in_height),
