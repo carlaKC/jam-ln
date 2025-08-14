@@ -3,7 +3,9 @@ use bitcoin::hashes::Hash;
 use rand::Rng;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
+use crate::decaying_average::DecayingAverage;
 use crate::{ReputationError, ResourceBucketType};
 
 /// Describes the size of a resource bucket.
@@ -28,6 +30,9 @@ pub(super) struct IncomingChannel {
     /// The resources available on the protected bucket. This will be used by htlcs that are
     /// accountable from peers that have sufficient reputation.
     pub(super) protected_bucket: BucketParameters,
+
+    /// Tracks the rate at which protected and congested resources are utilized on the channel.
+    pub(super) utilization: ChannelUtilization,
 }
 
 impl IncomingChannel {
@@ -36,11 +41,13 @@ impl IncomingChannel {
         general_bucket: BucketParameters,
         congestion_bucket: BucketParameters,
         protected_bucket: BucketParameters,
+        utilization_period: Duration,
     ) -> Result<Self, ReputationError> {
         Ok(Self {
             general_bucket: GeneralBucket::new(scid, general_bucket)?,
             congestion_bucket,
             protected_bucket,
+            utilization: ChannelUtilization::new(utilization_period),
         })
     }
 
@@ -76,12 +83,48 @@ impl IncomingChannel {
         candidate_scid: u64,
         amount_msat: u64,
         bucket_type: ResourceBucketType,
+        settled: bool,
+        update_instant: Instant,
     ) -> Result<(), ReputationError> {
-        if bucket_type != ResourceBucketType::General {
-            return Ok(());
-        }
+        match bucket_type {
+            ResourceBucketType::General => {
+                self.general_bucket.remove_htlc(candidate_scid, amount_msat)
+            }
+            ResourceBucketType::Congestion | ResourceBucketType::Protected => {
+                if settled {
+                    self.utilization.add_htlc(amount_msat, update_instant)?;
+                }
 
-        self.general_bucket.remove_htlc(candidate_scid, amount_msat)
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ChannelUtilization {
+    slot_utilization: DecayingAverage<f64>,
+    liquidity_utilization: DecayingAverage<f64>,
+}
+
+impl ChannelUtilization {
+    pub fn new(period: Duration) -> Self {
+        Self {
+            slot_utilization: DecayingAverage::new(period),
+            liquidity_utilization: DecayingAverage::new(period),
+        }
+    }
+
+    pub fn add_htlc(
+        &mut self,
+        amount_msat: u64,
+        update_instant: Instant,
+    ) -> Result<(), ReputationError> {
+        self.slot_utilization.add_value(1.0, update_instant)?;
+        self.liquidity_utilization
+            .add_value(amount_msat as f64, update_instant)?;
+
+        Ok(())
     }
 }
 

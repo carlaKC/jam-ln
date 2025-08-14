@@ -392,6 +392,7 @@ impl ReputationManager for ForwardManager {
                             slot_count: protected_slot_count,
                             liquidity_msat: protected_liquidity_amount,
                         },
+                        self.params.reputation_params.revenue_window,
                     )?,
                     outgoing_direction: OutgoingChannel::new(
                         self.params.reputation_params,
@@ -525,6 +526,8 @@ impl ReputationManager for ForwardManager {
                 outgoing_channel,
                 in_flight.incoming_amt_msat,
                 in_flight.bucket.clone(),
+                resolution == ForwardResolution::Settled,
+                resolved_instant,
             )?;
 
         inner_lock

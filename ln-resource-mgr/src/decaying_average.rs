@@ -19,6 +19,17 @@ impl DecayingAverageOps for i64 {
     }
 }
 
+impl DecayingAverageOps for f64 {
+    fn mul_f64(self, rhs: f64) -> Self {
+        self * rhs
+    }
+    fn saturating_add(self, rhs: Self) -> Self {
+        // f64 type has a specially defined infinity value, at which is just loses precision
+        // rather than overflowing.
+        self + rhs
+    }
+}
+
 /// Tracks a timestamped decaying average, which may be positive or negative. Acts
 #[derive(Clone, Debug)]
 pub(super) struct DecayingAverage<T> {
