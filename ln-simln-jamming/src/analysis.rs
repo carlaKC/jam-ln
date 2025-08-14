@@ -2,7 +2,7 @@ use crate::BoxError;
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use csv::WriterBuilder;
-use ln_resource_mgr::{AllocationCheck, ProposedForward};
+use ln_resource_mgr::{AllocationCheck, ForwardingOutcome, ProposedForward};
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 use std::collections::HashMap;
@@ -52,14 +52,22 @@ impl Serialize for Record {
         state.serialize_field("expiry_in_height", &self.forward.expiry_in_height)?;
         state.serialize_field("expiry_out_height", &self.forward.expiry_out_height)?;
         state.serialize_field("incoming_accountable", &self.forward.incoming_accountable)?;
-        state.serialize_field(
-            "forwarding_outcome",
-            &self.decision.forwarding_outcome(
-                self.forward.amount_in_msat,
-                self.forward.incoming_accountable,
-                self.forward.upgradable_accountability,
-            ),
-        )?;
+        let fwd_result = self.decision.inner_forwarding_outcome(
+            self.forward.amount_in_msat,
+            self.forward.incoming_accountable,
+            self.forward.upgradable_accountability,
+        );
+        let fwd_outcome = match &fwd_result {
+            Ok(fwd_success) => ForwardingOutcome::Forward(fwd_success.accountable_signal),
+            Err(fail_reason) => ForwardingOutcome::Fail(fail_reason.clone()),
+        };
+        state.serialize_field("forwarding_outcome", &fwd_outcome)?;
+        if fwd_result.is_ok() {
+            state.serialize_field("assigned_bucket", &fwd_result.unwrap().bucket)?;
+        } else {
+            state.serialize_field("assigned_bucket", &fwd_outcome)?;
+        }
+
         state.serialize_field(
             "revenue_threshold",
             &self.decision.reputation_check.revenue_threshold,

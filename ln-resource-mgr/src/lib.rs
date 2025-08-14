@@ -214,7 +214,9 @@ impl AllocationCheck {
     }
 
     /// Returns the bucket assignment or failure reason for a htlc.
-    fn inner_forwarding_outcome(
+    // This forwarding outcome method is only made public for analysis purposes to report the
+    // bucket outcome of the htlc.
+    pub fn inner_forwarding_outcome(
         &self,
         htlc_amt_msat: u64,
         incoming_accountable: AccountableSignal,

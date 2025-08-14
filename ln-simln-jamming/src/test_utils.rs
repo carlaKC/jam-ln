@@ -13,6 +13,7 @@ use ln_resource_mgr::{
 };
 use mockall::mock;
 use rand::Rng;
+use sim_cli::parsing::NetworkParser;
 use simln_lib::sim_node::{
     ChannelPolicy, CriticalError, CustomRecords, ForwardingError, InterceptRequest,
     InterceptResolution, Interceptor,
@@ -173,5 +174,32 @@ pub fn get_test_policy(pubkey: PublicKey) -> ChannelPolicy {
         cltv_expiry_delta: 40,
         base_fee: 1000,
         fee_rate_prop: 1,
+    }
+}
+
+fn setup_test_policy(node: PublicKey) -> ChannelPolicy {
+    ChannelPolicy {
+        pubkey: node,
+        alias: "".to_string(),
+        max_htlc_count: 483,
+        max_in_flight_msat: 1_000_000_000,
+        min_htlc_size_msat: 1,
+        max_htlc_size_msat: 1_000_000_000,
+        cltv_expiry_delta: 40,
+        base_fee: 1000,
+        fee_rate_prop: 2000,
+    }
+}
+
+pub fn setup_test_edge(
+    scid: ShortChannelID,
+    node_1: PublicKey,
+    node_2: PublicKey,
+) -> NetworkParser {
+    NetworkParser {
+        scid,
+        capacity_msat: 1_000_000_000,
+        node_1: setup_test_policy(node_1),
+        node_2: setup_test_policy(node_2),
     }
 }

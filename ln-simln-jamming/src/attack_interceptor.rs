@@ -7,7 +7,6 @@ use simln_lib::sim_node::{
     Interceptor,
 };
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 /// Wraps an innner reputation interceptor (which is responsible for implementing a mitigation to
 /// channel jamming) in an outer interceptor which can be used to take custom actions for attacks.
@@ -18,7 +17,7 @@ where
 {
     attacker_pubkeys: Vec<PublicKey>,
     /// Inner reputation monitor that implements jamming mitigation.
-    reputation_interceptor: Arc<Mutex<R>>,
+    reputation_interceptor: Arc<R>,
     /// The attack that will be launched.
     attack: Arc<dyn JammingAttack + Send + Sync>,
 }
@@ -29,7 +28,7 @@ where
 {
     pub fn new(
         attacker_pubkeys: Vec<PublicKey>,
-        reputation_interceptor: Arc<Mutex<R>>,
+        reputation_interceptor: Arc<R>,
         attack: Arc<dyn JammingAttack + Send + Sync>,
     ) -> Self {
         Self {
@@ -61,11 +60,7 @@ where
 
         // If attacker is not involved, use jamming interceptor to implement reputation and
         // bucketing.
-        self.reputation_interceptor
-            .lock()
-            .await
-            .intercept_htlc(req)
-            .await
+        self.reputation_interceptor.intercept_htlc(req).await
     }
 
     /// Notifies the underlying jamming interceptor of htlc resolution, as our attacking interceptor doesn't need
@@ -77,11 +72,7 @@ where
             return Ok(());
         }
 
-        self.reputation_interceptor
-            .lock()
-            .await
-            .notify_resolution(res)
-            .await
+        self.reputation_interceptor.notify_resolution(res).await
     }
 
     fn name(&self) -> String {
@@ -105,7 +96,6 @@ mod tests {
     use simln_lib::sim_node::{
         CustomRecords, ForwardingError, InterceptRequest, Interceptor, SimGraph, SimNode,
     };
-    use tokio::sync::Mutex;
     use triggered::Listener;
 
     use super::AttackInterceptor;
@@ -127,22 +117,20 @@ mod tests {
         let mock = MockReputationInterceptor::new();
         AttackInterceptor::new(
             vec![attacker_pubkey],
-            Arc::new(Mutex::new(mock)),
+            Arc::new(mock),
             Arc::new(MockAttack::new()),
         )
     }
 
     /// Primes the mock to expect intercept_htlc called with the request provided.
     async fn mock_intercept_htlc(
-        interceptor: Arc<Mutex<MockReputationInterceptor>>,
+        interceptor: &mut MockReputationInterceptor,
         req: &InterceptRequest,
     ) {
         let expected_incoming = req.incoming_htlc.channel_id;
         let expected_outgoing = req.outgoing_channel_id.unwrap();
 
         interceptor
-            .lock()
-            .await
             .expect_intercept_htlc()
             .with(function(move |args: &InterceptRequest| {
                 args.incoming_htlc.channel_id == expected_incoming
@@ -163,7 +151,7 @@ mod tests {
 
         let interceptor = AttackInterceptor::new(
             vec![attacker_pubkey],
-            Arc::new(Mutex::new(MockReputationInterceptor::new())),
+            Arc::new(MockReputationInterceptor::new()),
             Arc::new(mock_attack),
         );
 
@@ -208,7 +196,7 @@ mod tests {
 
         let interceptor = AttackInterceptor::new(
             vec![attacker_pubkey],
-            Arc::new(Mutex::new(MockReputationInterceptor::new())),
+            Arc::new(MockReputationInterceptor::new()),
             Arc::new(mock_attack),
         );
 
@@ -229,13 +217,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_peer_to_target_accountable() {
-        let interceptor = setup_interceptor_test();
+        let mut interceptor = setup_interceptor_test();
 
         // Intercepted on target's peer: node -(5) -> peer -(1)-> target, accountable payments just passed through.
         let peer_pubkey = get_random_keypair().1;
         let peer_to_target = setup_test_request(peer_pubkey, 5, 1, AccountableSignal::Accountable);
 
-        mock_intercept_htlc(interceptor.reputation_interceptor.clone(), &peer_to_target).await;
+        // This should always work since at this point the Arc on the reputation_interceptor
+        // should only have one reference.
+        let mut reputation_interceptor = Arc::try_unwrap(interceptor.reputation_interceptor)
+            .map_err(|_| "MockReputationInterceptor had more than one reference")
+            .unwrap();
+        mock_intercept_htlc(&mut reputation_interceptor, &peer_to_target).await;
+
+        let reputation_interceptor = Arc::new(reputation_interceptor);
+        interceptor.reputation_interceptor = reputation_interceptor;
         interceptor
             .intercept_htlc(peer_to_target)
             .await
@@ -247,13 +243,21 @@ mod tests {
     /// sufficient reputation.
     #[tokio::test]
     async fn test_peer_to_target_upgraded() {
-        let interceptor = setup_interceptor_test();
+        let mut interceptor = setup_interceptor_test();
 
         let peer_pubkey = get_random_keypair().1;
         let peer_to_target =
             setup_test_request(peer_pubkey, 5, 1, AccountableSignal::Unaccountable);
 
-        mock_intercept_htlc(interceptor.reputation_interceptor.clone(), &peer_to_target).await;
+        // This should always work since at this point the Arc on the reputation_interceptor
+        // should only have one reference.
+        let mut reputation_interceptor = Arc::try_unwrap(interceptor.reputation_interceptor)
+            .map_err(|_| "MockReputationInterceptor had more than one reference")
+            .unwrap();
+        mock_intercept_htlc(&mut reputation_interceptor, &peer_to_target).await;
+
+        let reputation_interceptor = Arc::new(reputation_interceptor);
+        interceptor.reputation_interceptor = reputation_interceptor;
         interceptor
             .intercept_htlc(peer_to_target)
             .await
@@ -265,13 +269,21 @@ mod tests {
     /// be upgraded to accountable.
     #[tokio::test]
     async fn test_peer_to_target_general_jammed() {
-        let interceptor = setup_interceptor_test();
+        let mut interceptor = setup_interceptor_test();
 
         let peer_pubkey = get_random_keypair().1;
         let peer_to_target =
             setup_test_request(peer_pubkey, 5, 1, AccountableSignal::Unaccountable);
 
-        mock_intercept_htlc(interceptor.reputation_interceptor.clone(), &peer_to_target).await;
+        // This should always work since at this point the Arc on the reputation_interceptor
+        // should only have one reference.
+        let mut reputation_interceptor = Arc::try_unwrap(interceptor.reputation_interceptor)
+            .map_err(|_| "MockReputationInterceptor had more than one reference")
+            .unwrap();
+        mock_intercept_htlc(&mut reputation_interceptor, &peer_to_target).await;
+
+        let reputation_interceptor = Arc::new(reputation_interceptor);
+        interceptor.reputation_interceptor = reputation_interceptor;
         interceptor
             .intercept_htlc(peer_to_target)
             .await
@@ -282,7 +294,7 @@ mod tests {
     /// Tests that forwards through the target node to its peers will be upgraded to accountable.
     #[tokio::test]
     async fn test_target_to_peer() {
-        let interceptor = setup_interceptor_test();
+        let mut interceptor = setup_interceptor_test();
 
         let target_pubkey = get_random_keypair().1;
         let target_forward = setup_test_request(
@@ -294,7 +306,16 @@ mod tests {
 
         let mut expected_req = target_forward.clone();
         expected_req.incoming_custom_records = records_from_signal(AccountableSignal::Accountable);
-        mock_intercept_htlc(interceptor.reputation_interceptor.clone(), &expected_req).await;
+
+        // This should always work since at this point the Arc on the reputation_interceptor
+        // should only have one reference.
+        let mut reputation_interceptor = Arc::try_unwrap(interceptor.reputation_interceptor)
+            .map_err(|_| "MockReputationInterceptor had more than one reference")
+            .unwrap();
+        mock_intercept_htlc(&mut reputation_interceptor, &expected_req).await;
+
+        let reputation_interceptor = Arc::new(reputation_interceptor);
+        interceptor.reputation_interceptor = reputation_interceptor;
         interceptor
             .intercept_htlc(target_forward)
             .await
@@ -305,7 +326,7 @@ mod tests {
     /// Tests that forwards through the target node to the attacker will be upgraded to accountable.
     #[tokio::test]
     async fn test_target_to_attacker() {
-        let interceptor = setup_interceptor_test();
+        let mut interceptor = setup_interceptor_test();
 
         let target_pubkey = get_random_keypair().1;
         let target_forward = setup_test_request(
@@ -317,7 +338,16 @@ mod tests {
 
         let mut expected_req = target_forward.clone();
         expected_req.incoming_custom_records = records_from_signal(AccountableSignal::Accountable);
-        mock_intercept_htlc(interceptor.reputation_interceptor.clone(), &expected_req).await;
+
+        // This should always work since at this point the Arc on the reputation_interceptor
+        // should only have one reference.
+        let mut reputation_interceptor = Arc::try_unwrap(interceptor.reputation_interceptor)
+            .map_err(|_| "MockReputationInterceptor had more than one reference")
+            .unwrap();
+        mock_intercept_htlc(&mut reputation_interceptor, &expected_req).await;
+
+        let reputation_interceptor = Arc::new(reputation_interceptor);
+        interceptor.reputation_interceptor = reputation_interceptor;
         interceptor
             .intercept_htlc(target_forward)
             .await
@@ -328,18 +358,21 @@ mod tests {
     /// Tests that forwards by the target sent from attacker -> target are handled like any other target payment.
     #[tokio::test]
     async fn test_target_from_attacker() {
-        let interceptor = setup_interceptor_test();
+        let mut interceptor = setup_interceptor_test();
 
         let target_pubkey = get_random_keypair().1;
         let not_actually_attacker =
             setup_test_request(target_pubkey, 0, 3, AccountableSignal::Accountable);
 
-        // This tests hangs; the target is actually jamming the attacker lol because we don't check the direction
-        mock_intercept_htlc(
-            interceptor.reputation_interceptor.clone(),
-            &not_actually_attacker,
-        )
-        .await;
+        // This should always work since at this point the Arc on the reputation_interceptor
+        // should only have one reference.
+        let mut reputation_interceptor = Arc::try_unwrap(interceptor.reputation_interceptor)
+            .map_err(|_| "MockReputationInterceptor had more than one reference")
+            .unwrap();
+        mock_intercept_htlc(&mut reputation_interceptor, &not_actually_attacker).await;
+
+        let reputation_interceptor = Arc::new(reputation_interceptor);
+        interceptor.reputation_interceptor = reputation_interceptor;
         interceptor
             .intercept_htlc(not_actually_attacker)
             .await

@@ -110,24 +110,26 @@ where
 /// Implements a network-wide interceptor that implements resource management for every forwarding node in the
 /// network.
 #[derive(Clone)]
-pub struct ReputationInterceptor<R, M>
+pub struct ReputationInterceptor<R, M, C>
 where
     R: ForwardReporter,
     M: ReputationManager + SimulationDebugManager,
+    C: InstantClock + Send + Sync,
 {
     network_nodes: Arc<Mutex<HashMap<PublicKey, Node<M>>>>,
-    clock: Arc<dyn InstantClock + Send + Sync>,
+    clock: Arc<C>,
     results: Option<Arc<Mutex<R>>>,
 }
 
-impl<R> ReputationInterceptor<R, ForwardManager>
+impl<R, C> ReputationInterceptor<R, ForwardManager, C>
 where
     R: ForwardReporter,
+    C: InstantClock + Send + Sync,
 {
     pub fn new_for_network(
         params: ForwardManagerParams,
         edges: &[NetworkParser],
-        clock: Arc<dyn InstantClock + Send + Sync>,
+        clock: Arc<C>,
         results: Option<Arc<Mutex<R>>>,
     ) -> Result<Self, BoxError> {
         let mut network_nodes: HashMap<PublicKey, Node<ForwardManager>> = HashMap::new();
@@ -186,7 +188,7 @@ where
         edges: &[NetworkParser],
         reputation_snapshot: HashMap<PublicKey, HashMap<u64, ChannelSnapshot>>,
         no_reputation: HashSet<PublicKey>,
-        clock: Arc<dyn InstantClock + Send + Sync>,
+        clock: Arc<C>,
         results: Option<Arc<Mutex<R>>>,
     ) -> Result<Self, BoxError> {
         let mut network_nodes = HashMap::with_capacity(reputation_snapshot.len());
@@ -358,22 +360,38 @@ where
     }
 }
 
+/// Simulation-specific helper trait for jamming resources on a channel in a specific direction.
+///
+/// The `pubkey` specifies the direction of the jamming operation. For a channel between nodes A
+/// and B with channel ID 999:
+/// - Passing `&A, 999` will jam resources in the B → A direction.
+/// - Passing `&B, 999` will jam resources in the A → B direction.
 #[async_trait]
-pub trait GeneralChannelJammer {
-    /// The `pubkey` can be used to specify in which direction to jam the channel. For example, a
-    /// channel between nodes A and B with channel ID 999:
-    /// - `jam_channel(&A, 999)` will jam the channel in the B → A direction.
-    /// - `jam_channel(&B, 999)` will jam the channel in the A → B direction.
-    async fn jam_channel(&self, pubkey: &PublicKey, channel: u64) -> Result<(), BoxError>;
+pub trait ChannelJammer {
+    /// Jam the general resources of the specified channel in the given direction.
+    async fn jam_general_resources(&self, pubkey: &PublicKey, channel: u64)
+        -> Result<(), BoxError>;
+
+    /// Jam the congestion resources of the specified channel in the given direction.
+    async fn jam_congestion_resources(
+        &self,
+        pubkey: &PublicKey,
+        channel: u64,
+    ) -> Result<(), BoxError>;
 }
 
 #[async_trait]
-impl<R, M> GeneralChannelJammer for ReputationInterceptor<R, M>
+impl<R, M, C> ChannelJammer for ReputationInterceptor<R, M, C>
 where
     R: ForwardReporter,
     M: ReputationManager + SimulationDebugManager + Send,
+    C: InstantClock + Send + Sync,
 {
-    async fn jam_channel(&self, pubkey: &PublicKey, channel: u64) -> Result<(), BoxError> {
+    async fn jam_general_resources(
+        &self,
+        pubkey: &PublicKey,
+        channel: u64,
+    ) -> Result<(), BoxError> {
         self.network_nodes
             .lock()
             .await
@@ -383,12 +401,28 @@ where
             .general_jam_channel(channel)
             .map_err(|e| e.into())
     }
+
+    async fn jam_congestion_resources(
+        &self,
+        pubkey: &PublicKey,
+        channel: u64,
+    ) -> Result<(), BoxError> {
+        self.network_nodes
+            .lock()
+            .await
+            .get_mut(pubkey)
+            .ok_or(format!("jammed node: {} not found", pubkey))?
+            .forward_manager
+            .congestion_jam_channel(channel)
+            .map_err(|e| e.into())
+    }
 }
 
-impl<R, M> ReputationInterceptor<R, M>
+impl<R, M, C> ReputationInterceptor<R, M, C>
 where
     R: ForwardReporter,
     M: ReputationManager + SimulationDebugManager,
+    C: InstantClock + Send + Sync,
 {
     /// Adds a htlc forward to the jamming interceptor, performing forwarding checks and returning the decided
     /// forwarding outcome for the htlc. Callers should fail if the outer result is an error, because an unexpected
@@ -490,10 +524,11 @@ where
 }
 
 #[async_trait]
-impl<R, M> ReputationMonitor for ReputationInterceptor<R, M>
+impl<R, M, C> ReputationMonitor for ReputationInterceptor<R, M, C>
 where
     R: ForwardReporter,
     M: ReputationManager + Send + SimulationDebugManager,
+    C: InstantClock + Send + Sync,
 {
     async fn list_channels(
         &self,
@@ -512,10 +547,11 @@ where
 }
 
 #[async_trait]
-impl<R, M> Interceptor for ReputationInterceptor<R, M>
+impl<R, M, C> Interceptor for ReputationInterceptor<R, M, C>
 where
     R: ForwardReporter,
     M: ReputationManager + Send + Sync + SimulationDebugManager,
+    C: InstantClock + Send + Sync,
 {
     /// Implemented by HTLC interceptors that provide input on the resolution of HTLCs forwarded in the simulation.
     async fn intercept_htlc(
@@ -595,18 +631,19 @@ mod tests {
     use mockall::mock;
     use sim_cli::parsing::NetworkParser;
     use simln_lib::clock::SimulationClock;
-    use simln_lib::sim_node::{ChannelPolicy, CriticalError, InterceptResolution, Interceptor};
+    use simln_lib::sim_node::{CriticalError, InterceptResolution, Interceptor};
     use simln_lib::ShortChannelID;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
-    use std::time::Duration;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
     use tokio::sync::Mutex;
 
     use crate::analysis::BatchForwardWriter;
     use crate::clock::InstantClock;
-    use crate::reputation_interceptor::{BootstrapForward, BootstrapRecords, GeneralChannelJammer};
-    use crate::test_utils::{get_random_keypair, setup_test_request, test_allocation_check};
+    use crate::reputation_interceptor::{BootstrapForward, BootstrapRecords, ChannelJammer};
+    use crate::test_utils::{
+        get_random_keypair, setup_test_edge, setup_test_request, test_allocation_check,
+    };
     use crate::{accountable_from_records, BoxError};
 
     use super::{Node, ReputationInterceptor, ReputationMonitor};
@@ -616,6 +653,7 @@ mod tests {
 
         impl SimulationDebugManager for ForwardManager {
             fn general_jam_channel(&self, channel: u64) -> Result<(), ReputationError>;
+            fn congestion_jam_channel(&self, channel: u64) -> Result<(), ReputationError>;
         }
 
         #[async_trait]
@@ -656,7 +694,7 @@ mod tests {
 
     /// Creates a test interceptor with three nodes in the network and a vector of their public keys.
     fn setup_test_interceptor() -> (
-        ReputationInterceptor<BatchForwardWriter, MockForwardManager>,
+        ReputationInterceptor<BatchForwardWriter, MockForwardManager, SimulationClock>,
         Vec<PublicKey>,
     ) {
         let pubkeys = vec![
@@ -876,33 +914,6 @@ mod tests {
             .return_once(|_, _, _, _| Ok(()));
     }
 
-    fn setup_test_policy(node: PublicKey) -> ChannelPolicy {
-        ChannelPolicy {
-            pubkey: node,
-            alias: "".to_string(),
-            max_htlc_count: 483,
-            max_in_flight_msat: 100_000,
-            min_htlc_size_msat: 1,
-            max_htlc_size_msat: 100_000,
-            cltv_expiry_delta: 40,
-            base_fee: 1000,
-            fee_rate_prop: 2000,
-        }
-    }
-
-    fn setup_test_edge(
-        scid: ShortChannelID,
-        node_1: PublicKey,
-        node_2: PublicKey,
-    ) -> NetworkParser {
-        NetworkParser {
-            scid,
-            capacity_msat: 100_000,
-            node_1: setup_test_policy(node_1),
-            node_2: setup_test_policy(node_2),
-        }
-    }
-
     type ReputationSnapshot = HashMap<PublicKey, HashMap<u64, ChannelSnapshot>>;
 
     /// Creates a reputation interceptor for a three hop network: Alice - Bob - Carol.
@@ -965,14 +976,17 @@ mod tests {
     async fn test_new_for_network_node_creation() {
         let (params, edges, _) = setup_three_hop_network_edges();
 
-        let interceptor: ReputationInterceptor<BatchForwardWriter, ForwardManager> =
-            ReputationInterceptor::new_for_network(
-                params,
-                &edges,
-                Arc::new(SimulationClock::new(1).unwrap()),
-                None,
-            )
-            .unwrap();
+        let interceptor: ReputationInterceptor<
+            BatchForwardWriter,
+            ForwardManager,
+            SimulationClock,
+        > = ReputationInterceptor::new_for_network(
+            params,
+            &edges,
+            Arc::new(SimulationClock::new(1).unwrap()),
+            None,
+        )
+        .unwrap();
 
         // Alice only has one channel tracked.
         let alice_channels = interceptor
@@ -1027,14 +1041,17 @@ mod tests {
 
         // Create an interceptor that is intended to general jam payments on Bob -> Carol in the three hop network
         // Alice -> Bob -> Carol.
-        let mut interceptor: ReputationInterceptor<BatchForwardWriter, ForwardManager> =
-            ReputationInterceptor::new_for_network(
-                params,
-                &edges,
-                Arc::new(SimulationClock::new(1).unwrap()),
-                None,
-            )
-            .unwrap();
+        let mut interceptor: ReputationInterceptor<
+            BatchForwardWriter,
+            ForwardManager,
+            SimulationClock,
+        > = ReputationInterceptor::new_for_network(
+            params,
+            &edges,
+            Arc::new(SimulationClock::new(1).unwrap()),
+            None,
+        )
+        .unwrap();
 
         interceptor
             .bootstrap_network_history(&BootstrapRecords {
@@ -1045,7 +1062,7 @@ mod tests {
             .unwrap();
 
         interceptor
-            .jam_channel(&edges[1].node_1.pubkey, bob_to_carol)
+            .jam_general_resources(&edges[1].node_1.pubkey, bob_to_carol)
             .await
             .unwrap();
 
@@ -1095,8 +1112,37 @@ mod tests {
             AccountableSignal::Unaccountable,
         );
 
-        let res = interceptor.intercept_htlc(request).await.unwrap().unwrap();
+        let res = interceptor
+            .intercept_htlc(request.clone())
+            .await
+            .unwrap()
+            .unwrap();
         assert!(accountable_from_records(&res) == AccountableSignal::Accountable);
+
+        // Resolve htlc occupying congestion bucket.
+        let resolution = InterceptResolution {
+            forwarding_node: request.forwarding_node,
+            incoming_htlc: request.incoming_htlc,
+            outgoing_channel_id: request.outgoing_channel_id,
+            success: true,
+        };
+        interceptor.notify_resolution(resolution).await.unwrap();
+
+        // With general and congestion jammed, unaccountable htlc should fail if no reputation.
+        interceptor
+            .jam_congestion_resources(&edges[1].node_1.pubkey, bob_to_carol)
+            .await
+            .unwrap();
+
+        let request = setup_test_request(
+            edges[1].node_1.pubkey,
+            bob_to_carol,
+            alice_to_bob,
+            AccountableSignal::Unaccountable,
+        );
+
+        let res = interceptor.intercept_htlc(request).await.unwrap();
+        assert!(res.is_err());
     }
 
     /// Tests starting interceptor from valid snapshot.
@@ -1106,7 +1152,7 @@ mod tests {
 
         let clock = Arc::new(SimulationClock::new(1).unwrap());
         let interceptor: Result<
-            ReputationInterceptor<BatchForwardWriter, ForwardManager>,
+            ReputationInterceptor<BatchForwardWriter, ForwardManager, SimulationClock>,
             BoxError,
         > = ReputationInterceptor::new_from_snapshot(
             params,
@@ -1170,7 +1216,7 @@ mod tests {
             .insert(edge.scid.into(), node_1_snapshot);
 
         let interceptor: Result<
-            ReputationInterceptor<BatchForwardWriter, ForwardManager>,
+            ReputationInterceptor<BatchForwardWriter, ForwardManager, SimulationClock>,
             BoxError,
         > = ReputationInterceptor::new_from_snapshot(
             params,
@@ -1198,7 +1244,7 @@ mod tests {
         reputation_snapshot.entry(edge.node_1.pubkey).or_default();
 
         let interceptor: Result<
-            ReputationInterceptor<BatchForwardWriter, ForwardManager>,
+            ReputationInterceptor<BatchForwardWriter, ForwardManager, SimulationClock>,
             BoxError,
         > = ReputationInterceptor::new_from_snapshot(
             params,
@@ -1227,7 +1273,7 @@ mod tests {
         channel_snapshot.capacity_msat = 1000;
 
         let interceptor: Result<
-            ReputationInterceptor<BatchForwardWriter, ForwardManager>,
+            ReputationInterceptor<BatchForwardWriter, ForwardManager, SimulationClock>,
             BoxError,
         > = ReputationInterceptor::new_from_snapshot(
             params,
@@ -1254,7 +1300,7 @@ mod tests {
         channels.remove(&edges[0].scid.into()).unwrap();
 
         let interceptor: Result<
-            ReputationInterceptor<BatchForwardWriter, ForwardManager>,
+            ReputationInterceptor<BatchForwardWriter, ForwardManager, SimulationClock>,
             BoxError,
         > = ReputationInterceptor::new_from_snapshot(
             params,

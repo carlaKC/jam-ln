@@ -146,6 +146,7 @@ impl ForwardManagerParams {
 /// Defines special actions that can be taken during a simulation that wouldn't otherwise be used in regular operation.
 pub trait SimulationDebugManager {
     fn general_jam_channel(&self, channel: u64) -> Result<(), ReputationError>;
+    fn congestion_jam_channel(&self, channel: u64) -> Result<(), ReputationError>;
 }
 
 /// Implements outgoing reputation algorithm and resource bucketing for an individual node.
@@ -296,6 +297,18 @@ impl SimulationDebugManager for ForwardManager {
             .ok_or(ReputationError::ErrChannelNotFound(channel))?
             .incoming_direction
             .general_jam_channel();
+        Ok(())
+    }
+
+    fn congestion_jam_channel(&self, channel: u64) -> Result<(), ReputationError> {
+        self.inner
+            .lock()
+            .map_err(|e| ReputationError::ErrUnrecoverable(e.to_string()))?
+            .channels
+            .get_mut(&channel)
+            .ok_or(ReputationError::ErrChannelNotFound(channel))?
+            .incoming_direction
+            .congestion_jam_channel();
         Ok(())
     }
 }
@@ -579,6 +592,41 @@ mod tests {
         AccountableSignal, ChannelSnapshot, FailureReason, ForwardingOutcome, HtlcRef,
         ProposedForward, ReputationError, ReputationManager, ReputationParams,
     };
+
+    #[test]
+    fn test_jamming_helpers() {
+        // Sanity check that jamming helpers set the appropriate bucket resources to 0.
+        let fwd_manager = ForwardManager::new(test_forward_manager_params());
+
+        let now = Instant::now();
+        let channel_capacity = 10_000_000;
+        fwd_manager
+            .add_channel(0, channel_capacity, now, None)
+            .unwrap();
+
+        let inner_fwd_manager = fwd_manager.inner.lock().unwrap();
+        let channel_0 = &inner_fwd_manager
+            .channels
+            .get(&0)
+            .unwrap()
+            .incoming_direction;
+        assert!(channel_0.general_bucket.params.slot_count > 0);
+        assert!(channel_0.congestion_bucket.slot_count > 0);
+
+        // Drop the lock for `general_jam_channel`
+        drop(inner_fwd_manager);
+
+        fwd_manager.general_jam_channel(0).unwrap();
+        fwd_manager.congestion_jam_channel(0).unwrap();
+        let inner_fwd_manager = fwd_manager.inner.lock().unwrap();
+        let channel_0 = &inner_fwd_manager
+            .channels
+            .get(&0)
+            .unwrap()
+            .incoming_direction;
+        assert!(channel_0.general_bucket.params.slot_count == 0);
+        assert!(channel_0.congestion_bucket.slot_count == 0);
+    }
 
     #[test]
     fn test_revenue_average() {

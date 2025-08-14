@@ -23,7 +23,6 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::runtime::Handle;
-use tokio::sync::Mutex as TokioMutex;
 use tokio::task::{self, JoinSet};
 
 /// Default percent of good reputation pairs the target requires.
@@ -323,7 +322,7 @@ pub fn setup_attack<C, R, M>(
     cli: &Cli,
     simulation: &SimulationFiles,
     clock: Arc<C>,
-    reputation_monitor: Arc<TokioMutex<R>>,
+    reputation_monitor: Arc<R>,
     revenue_monitor: Arc<M>,
     risk_margin: u64,
 ) -> Result<Arc<dyn JammingAttack + Send + Sync>, BoxError>

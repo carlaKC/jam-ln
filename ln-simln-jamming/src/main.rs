@@ -7,7 +7,7 @@ use ln_simln_jamming::clock::InstantClock;
 use ln_simln_jamming::parsing::{
     reputation_snapshot_from_file, setup_attack, Cli, SimulationFiles, TrafficType,
 };
-use ln_simln_jamming::reputation_interceptor::{GeneralChannelJammer, ReputationInterceptor};
+use ln_simln_jamming::reputation_interceptor::{ChannelJammer, ReputationInterceptor};
 use ln_simln_jamming::revenue_interceptor::{
     PeacetimeRevenueMonitor, RevenueInterceptor, RevenueSnapshot,
 };
@@ -130,7 +130,7 @@ async fn main() -> Result<(), BoxError> {
     let bootstrap_revenue: u64 = std::fs::read_to_string(target_revenue)?.parse()?;
 
     let attacker_pubkeys: Vec<PublicKey> = network_dir.attackers.iter().map(|a| a.1).collect();
-    let reputation_interceptor = Arc::new(Mutex::new(
+    let reputation_interceptor = Arc::new(
         ReputationInterceptor::new_from_snapshot(
             forward_params,
             &network_dir.sim_network,
@@ -146,7 +146,7 @@ async fn main() -> Result<(), BoxError> {
             Some(results_writer),
         )
         .await?,
-    ));
+    );
 
     // While we run the simulation, replay projected peacetime revenue to serve as a comparison.
     let revenue_interceptor = Arc::new(
@@ -191,9 +191,7 @@ async fn main() -> Result<(), BoxError> {
     let attack_setup = attack.setup_for_network()?;
     for (channel, pubkey) in attack_setup.general_jammed_nodes.iter() {
         reputation_interceptor
-            .lock()
-            .await
-            .jam_channel(pubkey, *channel)
+            .jam_general_resources(pubkey, *channel)
             .await?;
     }
 

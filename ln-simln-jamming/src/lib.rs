@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::Mutex;
 
 use self::reputation_interceptor::ReputationMonitor;
 
@@ -75,15 +74,14 @@ pub struct NetworkReputation {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn get_network_reputation<R: ReputationMonitor>(
-    reputation_monitor: Arc<Mutex<R>>,
+    reputation_monitor: Arc<R>,
     target_pubkey: PublicKey,
     attacker_pubkeys: &[PublicKey],
     target_channels: &HashMap<u64, PublicKey>,
     risk_margin: u64,
     access_ins: Instant,
 ) -> Result<NetworkReputation, BoxError> {
-    let reputation_monitor_lock = reputation_monitor.lock().await;
-    let target_channels_snapshot = reputation_monitor_lock
+    let target_channels_snapshot = reputation_monitor
         .list_channels(target_pubkey, access_ins)
         .await?;
 
@@ -101,7 +99,7 @@ pub async fn get_network_reputation<R: ReputationMonitor>(
             (&target_channels_snapshot, true)
         } else {
             (
-                &reputation_monitor_lock
+                &reputation_monitor
                     .list_channels(*pubkey, access_ins)
                     .await?,
                 false,
@@ -177,7 +175,6 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Instant;
-    use tokio::sync::Mutex;
 
     mock! {
         Monitor{}
@@ -365,7 +362,7 @@ mod tests {
             attacker_pair_count: 3,
         };
         let network_reputation = get_network_reputation(
-            Arc::new(Mutex::new(mock_monitor)),
+            Arc::new(mock_monitor),
             target_pubkey,
             &attacker_pubkey,
             &target_channels,

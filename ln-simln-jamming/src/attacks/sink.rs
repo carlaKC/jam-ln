@@ -39,7 +39,7 @@ where
     attacker_pubkey: PublicKey,
     target_channels: HashMap<u64, (PublicKey, String)>,
     risk_margin: u64,
-    reputation_monitor: Arc<Mutex<R>>,
+    reputation_monitor: Arc<R>,
     peacetime_revenue: Arc<M>,
 }
 
@@ -56,7 +56,7 @@ impl<
         target_pubkey: PublicKey,
         attacker_pubkeys: Vec<PublicKey>,
         risk_margin: u64,
-        reputation_monitor: Arc<Mutex<R>>,
+        reputation_monitor: Arc<R>,
         peacetime_revenue: Arc<M>,
     ) -> Self {
         // For sink attack we only use one attacker node.
@@ -320,7 +320,6 @@ mod tests {
     use sim_cli::parsing::NetworkParser;
     use simln_lib::clock::SimulationClock;
     use simln_lib::sim_node::ForwardingError;
-    use tokio::sync::Mutex;
 
     use super::SinkAttack;
 
@@ -335,7 +334,7 @@ mod tests {
             target,
             vec![attacker],
             0,
-            Arc::new(Mutex::new(MockReputationInterceptor::new())),
+            Arc::new(MockReputationInterceptor::new()),
             Arc::new(MockPeacetimeMonitor::new()),
         )
     }
