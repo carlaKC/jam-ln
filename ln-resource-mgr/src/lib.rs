@@ -518,6 +518,8 @@ pub struct ChannelSnapshot {
     pub capacity_msat: u64,
     pub outgoing_reputation: i64,
     pub bidirectional_revenue: i64,
+    pub incoming_slot_utilization: i64,
+    pub incoming_liquidity_utilization: i64,
 }
 
 /// Validates that an msat amount doesn't exceed the total supply cap of bitcoin and casts to i64 to be used in

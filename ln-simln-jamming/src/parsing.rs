@@ -567,6 +567,8 @@ pub fn reputation_snapshot_from_file(
         let capacity_msat: u64 = record[2].parse()?;
         let outgoing_reputation: i64 = record[3].parse()?;
         let bidirectional_revenue: i64 = record[4].parse()?;
+        let incoming_slot_utilization: i64 = record[5].parse()?;
+        let incoming_liquidity_utilization: i64 = record[6].parse()?;
 
         reputation_snapshot.entry(pubkey).or_default().insert(
             scid,
@@ -574,6 +576,8 @@ pub fn reputation_snapshot_from_file(
                 capacity_msat,
                 outgoing_reputation,
                 bidirectional_revenue,
+                incoming_slot_utilization,
+                incoming_liquidity_utilization,
             },
         );
     }

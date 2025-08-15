@@ -578,6 +578,9 @@ impl ReputationManager for ForwardManager {
 
         let mut reputations = HashMap::with_capacity(inner_lock.len());
         for (scid, channel) in inner_lock.iter_mut() {
+            let (incoming_slot_utilization, incoming_liquidity_utilization) =
+                channel.incoming_direction.utilization_values(access_ins)?;
+
             reputations.insert(
                 *scid,
                 ChannelSnapshot {
@@ -588,6 +591,8 @@ impl ReputationManager for ForwardManager {
                     bidirectional_revenue: channel
                         .bidirectional_revenue
                         .value_at_instant(access_ins)?,
+                    incoming_slot_utilization,
+                    incoming_liquidity_utilization,
                 },
             );
         }
