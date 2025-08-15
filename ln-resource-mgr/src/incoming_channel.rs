@@ -168,10 +168,11 @@ impl ChannelUtilization {
         capacity_msat: u64,
         access_instant: Instant,
     ) -> Result<f64, ReputationError> {
-        let slots_utilization= self
+        let slots_utilization = self
             .slot_utilization
             .value_at_instant(access_instant)?
-            .max(1) as f64 / slot_count as f64;
+            .max(1) as f64
+            / slot_count as f64;
 
         let liquidity_utilization = self
             .liquidity_utilization

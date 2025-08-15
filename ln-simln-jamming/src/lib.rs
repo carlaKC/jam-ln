@@ -1,5 +1,5 @@
 use bitcoin::secp256k1::PublicKey;
-use ln_resource_mgr::{AccountableSignal, ChannelSnapshot};
+use ln_resource_mgr::{AccountableSignal, ChannelSnapshot, ReputationParams};
 use simln_lib::sim_node::{CustomRecords, InterceptRequest};
 use std::collections::HashMap;
 use std::error::Error;
@@ -75,12 +75,13 @@ pub struct NetworkReputation {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn get_network_reputation<R: ReputationMonitor>(
+    reputation_params: &ReputationParams,
     reputation_monitor: Arc<Mutex<R>>,
     target_pubkey: PublicKey,
     attacker_pubkeys: &[PublicKey],
     target_channels: &HashMap<u64, PublicKey>,
-	margin_blocks: u64,
-	margin_msat: u64,
+    margin_blocks: u32,
+    margin_msat: u64,
     access_ins: Instant,
 ) -> Result<NetworkReputation, BoxError> {
     let reputation_monitor_lock = reputation_monitor.lock().await;
@@ -109,7 +110,13 @@ pub async fn get_network_reputation<R: ReputationMonitor>(
             )
         };
 
-        let repuation_pairs = count_reputation_pairs(channels, *scid, margin_blocks, margin_msat)?;
+        let repuation_pairs = count_reputation_pairs(
+            reputation_params,
+            channels,
+            *scid,
+            margin_blocks,
+            margin_msat,
+        )?;
         let total_paris = channels.len() - 1;
 
         if is_attacker {
@@ -126,10 +133,11 @@ pub async fn get_network_reputation<R: ReputationMonitor>(
 
 /// Counts the number of pairs that the outgoing channel has reputation for.
 fn count_reputation_pairs(
+    reputation_params: &ReputationParams,
     channels: &HashMap<u64, ChannelSnapshot>,
     outgoing_channel: u64,
-	margin_blocks: u64,
-	margin_msat: u64,
+    margin_blocks: u32,
+    margin_msat: u64,
 ) -> Result<usize, BoxError> {
     let outgoing_channel_snapshot = channels
         .get(&outgoing_channel)
@@ -138,6 +146,21 @@ fn count_reputation_pairs(
     Ok(channels
         .iter()
         .filter(|(scid, snapshot)| {
+            // Reputation is assessed for a channel pair and a specific HTLC that's being proposed.
+            // To assess whether pairs have reputation, we'll use LND's default fee policy to get
+            // the HTLC risk for our configured htlc size and hold time.
+            let risk_margin = reputation_params.opportunity_cost_from_blocks(
+                1000 + (0.0001 * margin_msat as f64) as u64,
+                margin_blocks,
+            ) / 200;
+            // ^TODO: We need to pick the larger of our ratio of slots used / slot total and
+            // liquidity used / liquidity total (minimum-ing it out at 1). We should possibly
+            // do this by just saving the values we choose in the ChannelSnapshot like we do for
+            // capacity?
+            //
+            // For now we're just assuming that we're using one slot at a time, and around half
+            // of slos are assigned to protected.
+
             **scid != outgoing_channel
                 && outgoing_channel_snapshot.outgoing_reputation
                     >= snapshot.bidirectional_revenue + risk_margin as i64
@@ -372,7 +395,7 @@ mod tests {
             &attacker_pubkey,
             &target_channels,
             0,
-			0,
+            0,
             now,
         )
         .await
