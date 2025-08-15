@@ -599,16 +599,23 @@ impl ReputationManager for ForwardManager {
 
         let mut reputations = HashMap::with_capacity(inner_lock.len());
         for (scid, channel) in inner_lock.iter_mut() {
+            let (incoming_slot_utilization, incoming_liquidity_utilization) =
+                channel.incoming_direction.utilization_values(access_ins)?;
+
             reputations.insert(
                 *scid,
                 ChannelSnapshot {
                     capacity_msat: channel.capacity_msat,
+                    non_general_slots: channel.incoming_direction.protected_bucket.slot_count
+                        + channel.incoming_direction.congestion_bucket.slot_count,
                     outgoing_reputation: channel
                         .outgoing_direction
                         .outgoing_reputation(access_ins)?,
                     bidirectional_revenue: channel
                         .bidirectional_revenue
                         .value_at_instant(access_ins)?,
+                    incoming_slot_utilization,
+                    incoming_liquidity_utilization,
                 },
             );
         }
@@ -778,8 +785,11 @@ mod tests {
         // Test adding channel from a snapshot
         let snapshot = ChannelSnapshot {
             capacity_msat: 10_000_000,
+            non_general_slots: 100,
             outgoing_reputation: 1000,
             bidirectional_revenue: 500,
+            incoming_liquidity_utilization: 0.0,
+            incoming_slot_utilization: 0.0,
         };
         assert!(fwd_manager
             .add_channel(1, channel_capacity, now, Some(snapshot.clone()))
@@ -875,8 +885,11 @@ mod tests {
         // Add a channel with sufficient reputation
         let snapshot = ChannelSnapshot {
             capacity_msat: channel_capacity,
+            non_general_slots: 100,
             outgoing_reputation: 10_000_000,
             bidirectional_revenue: 1_000_000,
+            incoming_liquidity_utilization: 0.0,
+            incoming_slot_utilization: 0.0,
         };
         let channel_with_reputation = 2;
 
@@ -924,8 +937,11 @@ mod tests {
         // Add a channel with sufficient reputation
         let snapshot = ChannelSnapshot {
             capacity_msat: channel_capacity,
+            non_general_slots: 100,
             outgoing_reputation: 10_000_000,
             bidirectional_revenue: 1_000_000,
+            incoming_liquidity_utilization: 0.0,
+            incoming_slot_utilization: 0.0,
         };
         let channel_with_reputation = 2;
 

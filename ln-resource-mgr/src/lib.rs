@@ -515,11 +515,15 @@ impl ProposedForward {
 }
 
 /// Provides a snapshot of the reputation and revenue values tracked for a channel.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ChannelSnapshot {
     pub capacity_msat: u64,
+    /// Total count of congestion and protected slots.
+    pub non_general_slots: u16,
     pub outgoing_reputation: i64,
     pub bidirectional_revenue: i64,
+    pub incoming_slot_utilization: f64,
+    pub incoming_liquidity_utilization: f64,
 }
 
 /// Validates that an msat amount doesn't exceed the total supply cap of bitcoin and casts to i64 to be used in

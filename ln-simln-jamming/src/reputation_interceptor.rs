@@ -944,13 +944,19 @@ mod tests {
         for edge in &edges {
             let node_1_snapshot = ChannelSnapshot {
                 capacity_msat: edge.capacity_msat,
+                non_general_slots: 337, // 70% of slots.
                 outgoing_reputation: 0,
                 bidirectional_revenue: 0,
+                incoming_liquidity_utilization: 0.0,
+                incoming_slot_utilization: 0.0,
             };
             let node_2_snapshot = ChannelSnapshot {
                 capacity_msat: edge.capacity_msat,
+                non_general_slots: 337, // 70% of slots.
                 outgoing_reputation: 0,
                 bidirectional_revenue: 0,
+                incoming_liquidity_utilization: 0.0,
+                incoming_slot_utilization: 0.0,
             };
 
             reputation_snapshot
@@ -1196,8 +1202,11 @@ mod tests {
         let edge = &edges[0];
         let node_1_snapshot = ChannelSnapshot {
             capacity_msat: edge.capacity_msat,
+            non_general_slots: 100,
             outgoing_reputation: 0,
             bidirectional_revenue: 0,
+            incoming_liquidity_utilization: 0.0,
+            incoming_slot_utilization: 0.0,
         };
         reputation_snapshot
             .entry(edge.node_1.pubkey)

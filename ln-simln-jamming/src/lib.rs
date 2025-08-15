@@ -194,24 +194,33 @@ mod tests {
                 0,
                 ChannelSnapshot {
                     capacity_msat: 200_000,
+                    non_general_slots: 100,
                     outgoing_reputation: 100_000,
                     bidirectional_revenue: 20_000,
+                    incoming_liquidity_utilization: 0.0,
+                    incoming_slot_utilization: 0.0,
                 },
             ),
             (
                 1,
                 ChannelSnapshot {
                     capacity_msat: 200_000,
+                    non_general_slots: 100,
                     outgoing_reputation: 45_000,
                     bidirectional_revenue: 50_000,
+                    incoming_liquidity_utilization: 0.0,
+                    incoming_slot_utilization: 0.0,
                 },
             ),
             (
                 2,
                 ChannelSnapshot {
                     capacity_msat: 200_000,
+                    non_general_slots: 100,
                     outgoing_reputation: 15_000,
                     bidirectional_revenue: 80_000,
+                    incoming_liquidity_utilization: 0.0,
+                    incoming_slot_utilization: 0.0,
                 },
             ),
         ]
@@ -264,32 +273,44 @@ mod tests {
                             0,
                             ChannelSnapshot {
                                 capacity_msat: 200_000,
+                                non_general_slots: 100,
                                 outgoing_reputation: 100,
                                 bidirectional_revenue: 15,
+                                incoming_liquidity_utilization: 0.0,
+                                incoming_slot_utilization: 0.0,
                             },
                         ),
                         (
                             1,
                             ChannelSnapshot {
                                 capacity_msat: 200_000,
+                                non_general_slots: 100,
                                 outgoing_reputation: 150,
                                 bidirectional_revenue: 110,
+                                incoming_liquidity_utilization: 0.0,
+                                incoming_slot_utilization: 0.0,
                             },
                         ),
                         (
                             2,
                             ChannelSnapshot {
                                 capacity_msat: 200_000,
+                                non_general_slots: 100,
                                 outgoing_reputation: 200,
                                 bidirectional_revenue: 90,
+                                incoming_liquidity_utilization: 0.0,
+                                incoming_slot_utilization: 0.0,
                             },
                         ),
                         (
                             3,
                             ChannelSnapshot {
                                 capacity_msat: 200_000,
+                                non_general_slots: 100,
                                 outgoing_reputation: 75,
                                 bidirectional_revenue: 100,
+                                incoming_liquidity_utilization: 0.0,
+                                incoming_slot_utilization: 0.0,
                             },
                         ),
                     ]
@@ -299,24 +320,33 @@ mod tests {
                             1,
                             ChannelSnapshot {
                                 capacity_msat: 200_000,
+                                non_general_slots: 100,
                                 outgoing_reputation: 500,
                                 bidirectional_revenue: 15,
+                                incoming_liquidity_utilization: 0.0,
+                                incoming_slot_utilization: 0.0,
                             },
                         ),
                         (
                             4,
                             ChannelSnapshot {
                                 capacity_msat: 200_000,
+                                non_general_slots: 100,
                                 outgoing_reputation: 150,
                                 bidirectional_revenue: 600,
+                                incoming_liquidity_utilization: 0.0,
+                                incoming_slot_utilization: 0.0,
                             },
                         ),
                         (
                             5,
                             ChannelSnapshot {
                                 capacity_msat: 200_000,
+                                non_general_slots: 100,
                                 outgoing_reputation: 200,
                                 bidirectional_revenue: 250,
+                                incoming_liquidity_utilization: 0.0,
+                                incoming_slot_utilization: 0.0,
                             },
                         ),
                     ]
@@ -326,16 +356,22 @@ mod tests {
                             2,
                             ChannelSnapshot {
                                 capacity_msat: 200_000,
+                                non_general_slots: 100,
                                 outgoing_reputation: 1000,
                                 bidirectional_revenue: 50,
+                                incoming_liquidity_utilization: 0.0,
+                                incoming_slot_utilization: 0.0,
                             },
                         ),
                         (
                             6,
                             ChannelSnapshot {
                                 capacity_msat: 200_000,
+                                non_general_slots: 100,
                                 outgoing_reputation: 350,
                                 bidirectional_revenue: 800,
+                                incoming_liquidity_utilization: 0.0,
+                                incoming_slot_utilization: 0.0,
                             },
                         ),
                     ]
@@ -344,8 +380,11 @@ mod tests {
                         3,
                         ChannelSnapshot {
                             capacity_msat: 200_000,
+                            non_general_slots: 100,
                             outgoing_reputation: 1000,
                             bidirectional_revenue: 50,
+                            incoming_liquidity_utilization: 0.0,
+                            incoming_slot_utilization: 0.0,
                         },
                     )]
                 } else {

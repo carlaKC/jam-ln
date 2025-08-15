@@ -110,6 +110,21 @@ impl IncomingChannel {
             access_instant,
         )
     }
+
+    /// Returns slot and liquidity utilization for the channel.
+    pub(super) fn utilization_values(
+        &mut self,
+        access_instant: Instant,
+    ) -> Result<(f64, f64), ReputationError> {
+        Ok((
+            self.utilization
+                .slot_utilization
+                .value_at_instant(access_instant)?,
+            self.utilization
+                .liquidity_utilization
+                .value_at_instant(access_instant)?,
+        ))
+    }
 }
 
 #[derive(Debug)]
