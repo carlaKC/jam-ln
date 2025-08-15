@@ -415,6 +415,13 @@ impl ReputationManager for ForwardManager {
                             liquidity_msat: protected_liquidity_amount,
                         },
                         self.params.reputation_params.revenue_window,
+                        channel_reputation.map(|snapshot| {
+                            (
+                                snapshot.incoming_slot_utilization,
+                                snapshot.incoming_liquidity_utilization,
+                                add_ins,
+                            )
+                        }),
                     )?,
                     outgoing_direction: OutgoingChannel::new(
                         self.params.reputation_params,

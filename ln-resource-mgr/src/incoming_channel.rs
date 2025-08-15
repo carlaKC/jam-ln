@@ -42,12 +42,14 @@ impl IncomingChannel {
         congestion_bucket: BucketParameters,
         protected_bucket: BucketParameters,
         utilization_period: Duration,
+        // Starting stat for (slots, liquidity) utilization.
+        utilization_start: Option<(f64, f64, Instant)>,
     ) -> Result<Self, ReputationError> {
         Ok(Self {
             general_bucket: GeneralBucket::new(scid, general_bucket)?,
             congestion_bucket,
             protected_bucket,
-            utilization: ChannelUtilization::new(utilization_period),
+            utilization: ChannelUtilization::new(utilization_period, utilization_start)?,
         })
     }
 
@@ -134,11 +136,25 @@ pub struct ChannelUtilization {
 }
 
 impl ChannelUtilization {
-    pub fn new(period: Duration) -> Self {
-        Self {
+    pub fn new(
+        period: Duration,
+        start_values: Option<(f64, f64, Instant)>,
+    ) -> Result<Self, ReputationError> {
+        let mut chan_utilization = Self {
             slot_utilization: DecayingAverage::new(period),
             liquidity_utilization: DecayingAverage::new(period),
+        };
+
+        if let Some((slot_utilization, liquidity_utilization, ins)) = start_values {
+            chan_utilization
+                .slot_utilization
+                .add_value(slot_utilization, ins)?;
+            chan_utilization
+                .liquidity_utilization
+                .add_value(liquidity_utilization, ins)?;
         }
+
+        Ok(chan_utilization)
     }
 
     pub fn add_htlc(

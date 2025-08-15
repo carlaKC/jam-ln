@@ -948,8 +948,8 @@ mod tests {
                 non_general_slots: 337, // 70% of slots.
                 outgoing_reputation: 0,
                 bidirectional_revenue: 0,
-                incoming_liquidity_utilization: 0.0,
-                incoming_slot_utilization: 0.0,
+                incoming_liquidity_utilization: 0.1,
+                incoming_slot_utilization: 0.5,
             };
             let node_2_snapshot = ChannelSnapshot {
                 capacity_msat: edge.capacity_msat,
