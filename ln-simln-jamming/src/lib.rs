@@ -79,7 +79,8 @@ pub async fn get_network_reputation<R: ReputationMonitor>(
     target_pubkey: PublicKey,
     attacker_pubkeys: &[PublicKey],
     target_channels: &HashMap<u64, PublicKey>,
-    risk_margin: u64,
+	margin_blocks: u64,
+	margin_msat: u64,
     access_ins: Instant,
 ) -> Result<NetworkReputation, BoxError> {
     let reputation_monitor_lock = reputation_monitor.lock().await;
@@ -108,7 +109,7 @@ pub async fn get_network_reputation<R: ReputationMonitor>(
             )
         };
 
-        let repuation_pairs = count_reputation_pairs(channels, *scid, risk_margin)?;
+        let repuation_pairs = count_reputation_pairs(channels, *scid, margin_blocks, margin_msat)?;
         let total_paris = channels.len() - 1;
 
         if is_attacker {
@@ -127,7 +128,8 @@ pub async fn get_network_reputation<R: ReputationMonitor>(
 fn count_reputation_pairs(
     channels: &HashMap<u64, ChannelSnapshot>,
     outgoing_channel: u64,
-    risk_margin: u64,
+	margin_blocks: u64,
+	margin_msat: u64,
 ) -> Result<usize, BoxError> {
     let outgoing_channel_snapshot = channels
         .get(&outgoing_channel)
@@ -370,6 +372,7 @@ mod tests {
             &attacker_pubkey,
             &target_channels,
             0,
+			0,
             now,
         )
         .await

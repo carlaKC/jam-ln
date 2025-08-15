@@ -325,7 +325,8 @@ pub fn setup_attack<C, R, M>(
     clock: Arc<C>,
     reputation_monitor: Arc<TokioMutex<R>>,
     revenue_monitor: Arc<M>,
-    risk_margin: u64,
+	margin_msat: u64,
+	margin_blocks: u642
 ) -> Result<Arc<dyn JammingAttack + Send + Sync>, BoxError>
 where
     C: Clock + InstantClock + 'static,

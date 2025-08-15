@@ -38,7 +38,8 @@ where
     target_pubkey: PublicKey,
     attacker_pubkey: PublicKey,
     target_channels: HashMap<u64, (PublicKey, String)>,
-    risk_margin: u64,
+	margin_blocks: u64,
+		margin_msat: u64,
     reputation_monitor: Arc<Mutex<R>>,
     peacetime_revenue: Arc<M>,
 }
@@ -55,7 +56,8 @@ impl<
         network: &[NetworkParser],
         target_pubkey: PublicKey,
         attacker_pubkeys: Vec<PublicKey>,
-        risk_margin: u64,
+		margin_blocks: u64,
+		margin_msat: u64,
         reputation_monitor: Arc<Mutex<R>>,
         peacetime_revenue: Arc<M>,
     ) -> Self {
@@ -81,7 +83,8 @@ impl<
                     None
                 }
             })),
-            risk_margin,
+			margin_blocks,
+			margin_msat,
             reputation_monitor,
             peacetime_revenue,
         }
@@ -287,7 +290,8 @@ where
                             .iter()
                             .map(|(k, v)| (*k, v.0))
                             .collect(),
-                        self.risk_margin,
+                        self.margin_blocks,
+						self.margin_msat,
                         InstantClock::now(&*self.clock),
                     )
                     .await?;

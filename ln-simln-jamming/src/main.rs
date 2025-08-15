@@ -187,7 +187,8 @@ async fn main() -> Result<(), BoxError> {
         Arc::clone(&clock),
         Arc::clone(&reputation_interceptor),
         Arc::clone(&revenue_interceptor),
-        risk_margin,
+		cli.reputation_margin_expiry_blocks,
+		cli.reputation_margin_msat,
     )?;
 
     let attack_setup = attack.setup_for_network()?;
@@ -209,7 +210,8 @@ async fn main() -> Result<(), BoxError> {
         target_pubkey,
         &attacker_pubkeys,
         &target_pubkey_map,
-        risk_margin,
+		cli.reputation_margin_expiry_blocks,
+		cli.reputation_margin_msat,
         // The reputation_interceptor clock has been set on decaying averages so we use the clock
         // to provide a new instant rather than the previous fixed point.
         InstantClock::now(&*clock),
@@ -305,7 +307,8 @@ async fn main() -> Result<(), BoxError> {
         network_dir.target.1,
         &attacker_pubkeys,
         &target_pubkey_map,
-        risk_margin,
+		cli.reputation_margin_expiry_blocks,
+		cli.reputation_margin_msat,
         InstantClock::now(&*clock),
     )
     .await?;
