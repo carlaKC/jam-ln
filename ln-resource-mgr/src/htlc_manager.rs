@@ -35,6 +35,12 @@ impl ReputationParams {
         (hold_time.as_secs() / self.resolution_period.as_secs()).saturating_mul(fee_msat)
     }
 
+    /// Calculates the opportunity_cost of a htlc being held on the channel for the number of blocks
+    /// provided, assuming 10 minute blocks.
+    pub fn opportunity_cost_from_blocks(&self, fee_msat: u64, expiry: u32) -> u64 {
+        self.opportunity_cost(fee_msat, Duration::from_secs(expiry as u64 * 10 * 60))
+    }
+
     /// Calculates the worst case reputation damage of a htlc, assuming it'll be held for its full expiry_delta.
     pub(super) fn htlc_risk(&self, fee_msat: u64, expiry_delta: u32) -> u64 {
         let max_hold_time = self

@@ -174,10 +174,12 @@ async fn main() -> Result<(), BoxError> {
     // Reputation is assessed for a channel pair and a specific HTLC that's being proposed. To assess whether pairs
     // have reputation, we'll use LND's default fee policy to get the HTLC risk for our configured htlc size and hold
     // time.
-    let risk_margin = forward_params.htlc_opportunity_cost(
-        1000 + (0.0001 * cli.reputation_margin_msat as f64) as u64,
-        cli.reputation_margin_expiry_blocks,
-    );
+    let risk_margin = forward_params
+        .reputation_params
+        .opportunity_cost_from_blocks(
+            1000 + (0.0001 * cli.reputation_margin_msat as f64) as u64,
+            cli.reputation_margin_expiry_blocks,
+        );
 
     // Next, setup the attack interceptor to use our custom attack.
     let attack = setup_attack(
