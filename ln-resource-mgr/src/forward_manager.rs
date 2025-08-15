@@ -135,14 +135,6 @@ impl Default for ForwardManagerParams {
     }
 }
 
-impl ForwardManagerParams {
-    /// Returns the opportunity cost for the htlc amount and expiry provided, assuming 10 minute blocks.
-    pub fn htlc_opportunity_cost(&self, fee_msat: u64, expiry: u32) -> u64 {
-        self.reputation_params
-            .opportunity_cost(fee_msat, Duration::from_secs(expiry as u64 * 10 * 60))
-    }
-}
-
 /// Defines special actions that can be taken during a simulation that wouldn't otherwise be used in regular operation.
 pub trait SimulationDebugManager {
     fn general_jam_channel(&self, channel: u64) -> Result<(), ReputationError>;
