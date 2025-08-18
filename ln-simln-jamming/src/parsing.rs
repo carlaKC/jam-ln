@@ -317,13 +317,16 @@ pub enum AttackType {
     // NOTE: add your attack that you want to run here.
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn setup_attack<R, M>(
     cli: &Cli,
     simulation: &SimulationFiles,
     clock: Arc<SimulationClock>,
     reputation_monitor: Arc<R>,
     revenue_monitor: Arc<M>,
-    risk_margin: u64,
+    margin_blocks: u32,
+    margin_msat: u64,
+    reputation_params: ln_resource_mgr::ReputationParams,
 ) -> Result<Arc<dyn JammingAttack + Send + Sync>, BoxError>
 where
     R: ReputationMonitor + Send + Sync + 'static,
@@ -342,9 +345,11 @@ where
                 &sim_network,
                 simulation.target.1,
                 attacker_pubkeys,
-                risk_margin,
+                margin_blocks,
+                margin_msat,
                 reputation_monitor,
                 revenue_monitor,
+                reputation_params,
             ));
 
             Ok(attack)

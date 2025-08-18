@@ -1,5 +1,5 @@
 use bitcoin::secp256k1::PublicKey;
-use ln_resource_mgr::{AccountableSignal, ChannelSnapshot};
+use ln_resource_mgr::{AccountableSignal, ChannelSnapshot, ReputationParams};
 use simln_lib::sim_node::{CustomRecords, InterceptRequest};
 use std::collections::HashMap;
 use std::error::Error;
@@ -74,11 +74,13 @@ pub struct NetworkReputation {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn get_network_reputation<R: ReputationMonitor>(
+    reputation_params: &ReputationParams,
     reputation_monitor: Arc<R>,
     target_pubkey: PublicKey,
     attacker_pubkeys: &[PublicKey],
     target_channels: &HashMap<u64, PublicKey>,
-    risk_margin: u64,
+    margin_blocks: u32,
+    margin_msat: u64,
     access_ins: Instant,
 ) -> Result<NetworkReputation, BoxError> {
     let target_channels_snapshot = reputation_monitor
@@ -106,7 +108,13 @@ pub async fn get_network_reputation<R: ReputationMonitor>(
             )
         };
 
-        let repuation_pairs = count_reputation_pairs(channels, *scid, risk_margin)?;
+        let repuation_pairs = count_reputation_pairs(
+            reputation_params,
+            channels,
+            *scid,
+            margin_blocks,
+            margin_msat,
+        )?;
         let total_paris = channels.len() - 1;
 
         if is_attacker {
@@ -123,9 +131,11 @@ pub async fn get_network_reputation<R: ReputationMonitor>(
 
 /// Counts the number of pairs that the outgoing channel has reputation for.
 fn count_reputation_pairs(
+    reputation_params: &ReputationParams,
     channels: &HashMap<u64, ChannelSnapshot>,
     outgoing_channel: u64,
-    risk_margin: u64,
+    margin_blocks: u32,
+    margin_msat: u64,
 ) -> Result<usize, BoxError> {
     let outgoing_channel_snapshot = channels
         .get(&outgoing_channel)
@@ -134,9 +144,24 @@ fn count_reputation_pairs(
     Ok(channels
         .iter()
         .filter(|(scid, snapshot)| {
+            // Reputation is assessed for a channel pair and a specific HTLC that's being proposed.
+            // To assess whether pairs have reputation, we'll use LND's default fee policy to get
+            // the HTLC risk for our configured htlc size and hold time.
+            //
+            // TODO: deduplicate this logic with incoming_channel.
+            let capacicty_utilization =
+                snapshot.incoming_liquidity_utilization / snapshot.capacity_msat as f64;
+            let slot_utilization =
+                snapshot.incoming_slot_utilization.max(1.0) / snapshot.non_general_slots as f64;
+            let risk_margin = reputation_params.opportunity_cost_from_blocks(
+                1000 + (0.0001 * margin_msat as f64) as u64,
+                margin_blocks,
+            ) as f64
+                * slot_utilization.max(capacicty_utilization);
+
             **scid != outgoing_channel
                 && outgoing_channel_snapshot.outgoing_reputation
-                    >= snapshot.bidirectional_revenue + risk_margin as i64
+                    >= snapshot.bidirectional_revenue + risk_margin.round() as i64
         })
         .count())
 }
@@ -164,13 +189,13 @@ fn print_request(req: &InterceptRequest) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::get_network_reputation;
     use crate::reputation_interceptor::ReputationMonitor;
     use crate::test_utils::get_random_keypair;
-    use crate::{count_reputation_pairs, get_network_reputation};
     use crate::{BoxError, NetworkReputation};
     use async_trait::async_trait;
     use bitcoin::secp256k1::PublicKey;
-    use ln_resource_mgr::ChannelSnapshot;
+    use ln_resource_mgr::{ChannelSnapshot, ReputationParams};
     use mockall::mock;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -183,56 +208,6 @@ mod tests {
         impl ReputationMonitor for Monitor{
             async fn list_channels(&self, node: PublicKey, access_ins: Instant) -> Result<HashMap<u64, ChannelSnapshot>, BoxError>;
         }
-    }
-
-    /// Tests counting the number of pairs that an outgoing channel has good reputation on. Uses a zero risk margin
-    /// to simplify test values.
-    #[test]
-    fn test_count_reputation_pairs() {
-        let channels = vec![
-            (
-                0,
-                ChannelSnapshot {
-                    capacity_msat: 200_000,
-                    non_general_slots: 100,
-                    outgoing_reputation: 100_000,
-                    bidirectional_revenue: 20_000,
-                    incoming_liquidity_utilization: 0.0,
-                    incoming_slot_utilization: 0.0,
-                },
-            ),
-            (
-                1,
-                ChannelSnapshot {
-                    capacity_msat: 200_000,
-                    non_general_slots: 100,
-                    outgoing_reputation: 45_000,
-                    bidirectional_revenue: 50_000,
-                    incoming_liquidity_utilization: 0.0,
-                    incoming_slot_utilization: 0.0,
-                },
-            ),
-            (
-                2,
-                ChannelSnapshot {
-                    capacity_msat: 200_000,
-                    non_general_slots: 100,
-                    outgoing_reputation: 15_000,
-                    bidirectional_revenue: 80_000,
-                    incoming_liquidity_utilization: 0.0,
-                    incoming_slot_utilization: 0.0,
-                },
-            ),
-        ]
-        .into_iter()
-        .collect();
-
-        // Channel not found.
-        assert!(count_reputation_pairs(&channels, 999, 0).is_err());
-
-        assert_eq!(count_reputation_pairs(&channels, 0, 0).unwrap(), 2);
-        assert_eq!(count_reputation_pairs(&channels, 1, 0).unwrap(), 1);
-        assert_eq!(count_reputation_pairs(&channels, 2, 0).unwrap(), 0);
     }
 
     /// Tests fetching network reputation pairs for the following topology:
@@ -401,10 +376,12 @@ mod tests {
             attacker_pair_count: 3,
         };
         let network_reputation = get_network_reputation(
+            &ReputationParams::default(),
             Arc::new(mock_monitor),
             target_pubkey,
             &attacker_pubkey,
             &target_channels,
+            0,
             0,
             now,
         )

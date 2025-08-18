@@ -171,16 +171,6 @@ async fn main() -> Result<(), BoxError> {
         }
     });
 
-    // Reputation is assessed for a channel pair and a specific HTLC that's being proposed. To assess whether pairs
-    // have reputation, we'll use LND's default fee policy to get the HTLC risk for our configured htlc size and hold
-    // time.
-    let risk_margin = forward_params
-        .reputation_params
-        .opportunity_cost_from_blocks(
-            1000 + (0.0001 * cli.reputation_margin_msat as f64) as u64,
-            cli.reputation_margin_expiry_blocks,
-        );
-
     // Next, setup the attack interceptor to use our custom attack.
     let attack = setup_attack(
         &cli,
@@ -188,7 +178,9 @@ async fn main() -> Result<(), BoxError> {
         Arc::clone(&clock),
         Arc::clone(&reputation_interceptor),
         Arc::clone(&revenue_interceptor),
-        risk_margin,
+        cli.reputation_margin_expiry_blocks,
+        cli.reputation_margin_msat,
+        forward_params.reputation_params,
     )?;
 
     let attack_setup = attack.setup_for_network()?;
@@ -204,11 +196,13 @@ async fn main() -> Result<(), BoxError> {
         target_channels.iter().map(|(k, v)| (*k, v.0)).collect();
 
     let start_reputation = get_network_reputation(
+        &forward_params.reputation_params,
         reputation_interceptor.clone(),
         target_pubkey,
         &attacker_pubkeys,
         &target_pubkey_map,
-        risk_margin,
+        cli.reputation_margin_expiry_blocks,
+        cli.reputation_margin_msat,
         // The reputation_interceptor clock has been set on decaying averages so we use the clock
         // to provide a new instant rather than the previous fixed point.
         InstantClock::now(&*clock),
@@ -300,11 +294,13 @@ async fn main() -> Result<(), BoxError> {
 
     // Write start and end state to a summary file.
     let end_reputation = get_network_reputation(
+        &forward_params.reputation_params,
         reputation_interceptor,
         network_dir.target.1,
         &attacker_pubkeys,
         &target_pubkey_map,
-        risk_margin,
+        cli.reputation_margin_expiry_blocks,
+        cli.reputation_margin_msat,
         InstantClock::now(&*clock),
     )
     .await?;

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
-use ln_resource_mgr::AccountableSignal;
+use ln_resource_mgr::{AccountableSignal, ReputationParams};
 use sim_cli::parsing::NetworkParser;
 use simln_lib::clock::{Clock, SimulationClock};
 use simln_lib::sim_node::{CustomRecords, ForwardingError, InterceptRequest, SimGraph, SimNode};
@@ -37,9 +37,11 @@ where
     target_pubkey: PublicKey,
     attacker_pubkey: PublicKey,
     target_channels: HashMap<u64, (PublicKey, String)>,
-    risk_margin: u64,
+    margin_blocks: u32,
+    margin_msat: u64,
     reputation_monitor: Arc<R>,
     peacetime_revenue: Arc<M>,
+    reputation_params: ReputationParams,
 }
 
 impl<R: ReputationMonitor + Send + Sync, M: PeacetimeRevenueMonitor + Send + Sync>
@@ -51,9 +53,11 @@ impl<R: ReputationMonitor + Send + Sync, M: PeacetimeRevenueMonitor + Send + Syn
         network: &[NetworkParser],
         target_pubkey: PublicKey,
         attacker_pubkeys: Vec<PublicKey>,
-        risk_margin: u64,
+        margin_blocks: u32,
+        margin_msat: u64,
         reputation_monitor: Arc<R>,
         peacetime_revenue: Arc<M>,
+        reputation_params: ReputationParams,
     ) -> Self {
         // For sink attack we only use one attacker node.
         assert!(attacker_pubkeys.len() == 1);
@@ -77,9 +81,11 @@ impl<R: ReputationMonitor + Send + Sync, M: PeacetimeRevenueMonitor + Send + Syn
                     None
                 }
             })),
-            risk_margin,
+            margin_blocks,
+            margin_msat,
             reputation_monitor,
             peacetime_revenue,
+            reputation_params,
         }
     }
 
@@ -274,6 +280,7 @@ where
                     );
 
                     let current_reputation = get_network_reputation(
+                        &self.reputation_params,
                         self.reputation_monitor.clone(),
                         self.target_pubkey,
                         &[self.attacker_pubkey],
@@ -282,7 +289,8 @@ where
                             .iter()
                             .map(|(k, v)| (*k, v.0))
                             .collect(),
-                        self.risk_margin,
+                        self.margin_blocks,
+                        self.margin_msat,
                         InstantClock::now(&*self.clock),
                     )
                     .await?;
@@ -311,7 +319,7 @@ mod tests {
     };
     use crate::{accountable_from_records, NetworkReputation};
     use bitcoin::secp256k1::PublicKey;
-    use ln_resource_mgr::AccountableSignal;
+    use ln_resource_mgr::{AccountableSignal, ReputationParams};
     use sim_cli::parsing::NetworkParser;
     use simln_lib::clock::SimulationClock;
     use simln_lib::sim_node::ForwardingError;
@@ -329,8 +337,10 @@ mod tests {
             target,
             vec![attacker],
             0,
+            0,
             Arc::new(MockReputationInterceptor::new()),
             Arc::new(MockPeacetimeMonitor::new()),
+            ReputationParams::default(),
         )
     }
 
