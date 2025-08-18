@@ -1,19 +1,39 @@
+use std::ops::Add;
 use std::time::{Duration, Instant};
 
 use crate::ReputationError;
 
+/// Defines the operations required for values tracked in decaying averages that use a f64 decay
+/// factor.
+pub(super) trait DecayingAverageOps: Copy + Add<Output = Self> + Default {
+    fn mul_f64(self, rhs: f64) -> Self;
+    fn saturating_add(self, rhs: Self) -> Self;
+}
+
+impl DecayingAverageOps for i64 {
+    fn mul_f64(self, rhs: f64) -> Self {
+        (self as f64 * rhs).round() as i64
+    }
+    fn saturating_add(self, rhs: Self) -> Self {
+        self.saturating_add(rhs)
+    }
+}
+
 /// Tracks a timestamped decaying average, which may be positive or negative. Acts
 #[derive(Clone, Debug)]
-pub(super) struct DecayingAverage {
-    value: i64,
+pub(super) struct DecayingAverage<T> {
+    value: T,
     last_updated: Option<Instant>,
     decay_rate: f64,
 }
 
-impl DecayingAverage {
+impl<T> DecayingAverage<T>
+where
+    T: DecayingAverageOps,
+{
     pub(super) fn new(period: Duration) -> Self {
         DecayingAverage {
-            value: 0,
+            value: T::default(),
             last_updated: None,
             decay_rate: Self::calc_decay_rate(period),
         }
@@ -28,7 +48,7 @@ impl DecayingAverage {
     pub(super) fn value_at_instant(
         &mut self,
         access_instant: Instant,
-    ) -> Result<i64, ReputationError> {
+    ) -> Result<T, ReputationError> {
         if let Some(last_updated) = self.last_updated {
             // Enforce that the access_instant must be after the last update on our average, but tolerate nanosecond
             // differences - these will just reflect as an update with the same update as last_updated.
@@ -42,7 +62,7 @@ impl DecayingAverage {
             }
 
             let elapsed = access_instant.duration_since(last_updated).as_secs_f64();
-            self.value = (self.value as f64 * self.decay_rate.powf(elapsed)).round() as i64;
+            self.value = self.value.mul_f64(self.decay_rate.powf(elapsed))
         }
 
         self.last_updated = Some(access_instant);
@@ -53,9 +73,9 @@ impl DecayingAverage {
     /// will act as a saturating add if it exceeds i64::MAX.
     pub(super) fn add_value(
         &mut self,
-        value: i64,
+        value: T,
         update_time: Instant,
-    ) -> Result<i64, ReputationError> {
+    ) -> Result<T, ReputationError> {
         // Progress current value to the new timestamp so that it'll be appropriately decayed.
         self.value_at_instant(update_time)?;
 

@@ -53,7 +53,7 @@ struct RevenueAverage {
     /// [`Self::aggregated_revenue_decaying`] will track average revenue over 24 weeks. The two week revenue window
     /// revenue average can then be obtained by adjusting for the window side, which has the effect of evenly
     /// distributing revenue between the windows.
-    aggregated_revenue_decaying: DecayingAverage,
+    aggregated_revenue_decaying: DecayingAverage<i64>,
 }
 
 impl RevenueAverage {

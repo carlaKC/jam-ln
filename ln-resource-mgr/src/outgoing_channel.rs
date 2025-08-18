@@ -13,7 +13,7 @@ pub(super) struct OutgoingChannel {
 
     /// The reputation that the channel has accrued as the outgoing link in htlc forwards. Tracked as a decaying
     /// average over the reputation_window that the tracker is created with.
-    outgoing_reputation: DecayingAverage,
+    outgoing_reputation: DecayingAverage<i64>,
 
     /// Tracks the last instant that the outgoing channel misused congested resources, if any.
     last_congestion_misuse: Option<Instant>,
