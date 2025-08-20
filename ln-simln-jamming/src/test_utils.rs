@@ -163,20 +163,6 @@ pub fn test_bootstrap_forward(
     }
 }
 
-pub fn get_test_policy(pubkey: PublicKey) -> ChannelPolicy {
-    ChannelPolicy {
-        pubkey,
-        alias: "test_node".into(),
-        max_htlc_count: 483,
-        max_in_flight_msat: 100_000,
-        min_htlc_size_msat: 1000,
-        max_htlc_size_msat: 100_000,
-        cltv_expiry_delta: 40,
-        base_fee: 1000,
-        fee_rate_prop: 1,
-    }
-}
-
 fn setup_test_policy(node: PublicKey) -> ChannelPolicy {
     ChannelPolicy {
         pubkey: node,

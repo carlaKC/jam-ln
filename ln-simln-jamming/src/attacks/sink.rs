@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use ln_resource_mgr::AccountableSignal;
-use sim_cli::parsing::NetworkParser;
 use simln_lib::clock::{Clock, SimulationClock};
 use simln_lib::sim_node::{CustomRecords, ForwardingError, InterceptRequest, SimGraph, SimNode};
 use std::collections::HashMap;
@@ -36,7 +35,8 @@ where
     clock: Arc<SimulationClock>,
     target_pubkey: PublicKey,
     attacker_pubkey: PublicKey,
-    target_channels: HashMap<u64, (PublicKey, String)>,
+    target_channels: HashMap<u64, PublicKey>,
+    attacker_channels: HashMap<u64, PublicKey>,
     risk_margin: u64,
     reputation_monitor: Arc<R>,
     peacetime_revenue: Arc<M>,
@@ -48,9 +48,10 @@ impl<R: ReputationMonitor + Send + Sync, M: PeacetimeRevenueMonitor + Send + Syn
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         clock: Arc<SimulationClock>,
-        network: &[NetworkParser],
         target_pubkey: PublicKey,
         attacker_pubkeys: Vec<PublicKey>,
+        target_channels: HashMap<u64, PublicKey>,
+        attacker_channels: HashMap<u64, PublicKey>,
         risk_margin: u64,
         reputation_monitor: Arc<R>,
         peacetime_revenue: Arc<M>,
@@ -62,45 +63,61 @@ impl<R: ReputationMonitor + Send + Sync, M: PeacetimeRevenueMonitor + Send + Syn
             clock,
             target_pubkey,
             attacker_pubkey: attacker_pubkeys[0],
-            target_channels: HashMap::from_iter(network.iter().filter_map(|channel| {
-                if channel.node_1.pubkey == target_pubkey {
-                    Some((
-                        channel.scid.into(),
-                        (channel.node_2.pubkey, channel.node_2.alias.clone()),
-                    ))
-                } else if channel.node_2.pubkey == target_pubkey {
-                    Some((
-                        channel.scid.into(),
-                        (channel.node_1.pubkey, channel.node_1.alias.clone()),
-                    ))
-                } else {
-                    None
-                }
-            })),
+            target_channels,
+            attacker_channels,
             risk_margin,
             reputation_monitor,
             peacetime_revenue,
         }
     }
 
-    /// Validates that there's only one channel between the target and the attacking node.
+    /// Validates that there's only one channel between the target and the attacking node,
+    /// and that both target_channels and attacker_channels report the same channel.
     fn validate(&self) -> Result<(), BoxError> {
-        let target_to_attacker_len = self
+        let target_to_attacker_channels: Vec<u64> = self
             .target_channels
             .iter()
-            .filter_map(|(scid, (pk, _))| {
+            .filter_map(|(scid, pk)| {
                 if *pk == self.attacker_pubkey {
                     Some(*scid)
                 } else {
                     None
                 }
             })
-            .count();
+            .collect();
 
-        if target_to_attacker_len != 1 {
+        let attacker_to_target_channels: Vec<u64> = self
+            .attacker_channels
+            .iter()
+            .filter_map(|(scid, pk)| {
+                if *pk == self.target_pubkey {
+                    Some(*scid)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if target_to_attacker_channels.len() != 1 {
             return Err(format!(
                 "expected one target -> attacker channel, got: {}",
-                target_to_attacker_len,
+                target_to_attacker_channels.len(),
+            )
+            .into());
+        }
+
+        if attacker_to_target_channels.len() != 1 {
+            return Err(format!(
+                "expected one attacker -> target channel, got: {}",
+                attacker_to_target_channels.len(),
+            )
+            .into());
+        }
+
+        if target_to_attacker_channels[0] != attacker_to_target_channels[0] {
+            return Err(format!(
+                "target and attacker channels don't match: target sees {}, attacker sees {}",
+                target_to_attacker_channels[0], attacker_to_target_channels[0]
             )
             .into());
         }
@@ -180,7 +197,7 @@ where
             general_jammed_nodes: self
                 .target_channels
                 .iter()
-                .flat_map(|(scid, (pk, _))| {
+                .flat_map(|(scid, pk)| {
                     if *pk != self.attacker_pubkey {
                         let scid = *scid;
                         vec![(scid, *pk), (scid, self.target_pubkey)]
@@ -250,6 +267,7 @@ where
     ) -> Result<(), BoxError> {
         // Poll every 5 minutes to check if the attack is done.
         let interval = Duration::from_secs(300);
+
         loop {
             select! {
                 _ = shutdown_listener.clone() => break,
@@ -277,11 +295,7 @@ where
                         self.reputation_monitor.clone(),
                         self.target_pubkey,
                         &[self.attacker_pubkey],
-                        &self
-                            .target_channels
-                            .iter()
-                            .map(|(k, v)| (*k, v.0))
-                            .collect(),
+                        &self.target_channels,
                         self.risk_margin,
                         InstantClock::now(&*self.clock),
                     )
@@ -300,19 +314,17 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
     use crate::attacks::sink::inner_simulation_completed;
     use crate::attacks::JammingAttack;
     use crate::test_utils::{
-        get_random_keypair, get_test_policy, setup_test_request, MockPeacetimeMonitor,
-        MockReputationInterceptor,
+        get_random_keypair, setup_test_request, MockPeacetimeMonitor, MockReputationInterceptor,
     };
     use crate::{accountable_from_records, NetworkReputation};
     use bitcoin::secp256k1::PublicKey;
     use ln_resource_mgr::AccountableSignal;
-    use sim_cli::parsing::NetworkParser;
     use simln_lib::clock::SimulationClock;
     use simln_lib::sim_node::ForwardingError;
 
@@ -321,13 +333,15 @@ mod tests {
     fn setup_test_attack(
         target: PublicKey,
         attacker: PublicKey,
-        network: &[NetworkParser],
+        target_channels: HashMap<u64, PublicKey>,
+        attacker_channels: HashMap<u64, PublicKey>,
     ) -> SinkAttack<MockReputationInterceptor, MockPeacetimeMonitor> {
         SinkAttack::new(
             Arc::new(SimulationClock::new(1).unwrap()),
-            network,
             target,
             vec![attacker],
+            target_channels,
+            attacker_channels,
             0,
             Arc::new(MockReputationInterceptor::new()),
             Arc::new(MockPeacetimeMonitor::new()),
@@ -350,28 +364,15 @@ mod tests {
         let regular_1 = get_random_keypair().1;
         let regular_2 = get_random_keypair().1;
 
-        let network = vec![
-            NetworkParser {
-                scid: 0.into(),
-                capacity_msat: 100_000,
-                node_1: get_test_policy(target),
-                node_2: get_test_policy(regular_1),
-            },
-            NetworkParser {
-                scid: 1.into(),
-                capacity_msat: 100_000,
-                node_1: get_test_policy(target),
-                node_2: get_test_policy(regular_2),
-            },
-            NetworkParser {
-                scid: 2.into(),
-                capacity_msat: 100_000,
-                node_1: get_test_policy(target),
-                node_2: get_test_policy(attacker),
-            },
-        ];
+        let target_channels: HashMap<u64, PublicKey> =
+            HashMap::from([(0, regular_1), (1, regular_2), (2, attacker)]);
 
-        (setup_test_attack(target, attacker, &network), 2)
+        let attacker_channels: HashMap<u64, PublicKey> = HashMap::from([(2, target)]);
+
+        (
+            setup_test_attack(target, attacker, target_channels, attacker_channels),
+            2,
+        )
     }
 
     #[test]
@@ -381,49 +382,64 @@ mod tests {
         let regular_1 = get_random_keypair().1;
         let regular_2 = get_random_keypair().1;
 
-        let network = vec![
-            NetworkParser {
-                scid: 0.into(),
-                capacity_msat: 100_000,
-                node_1: get_test_policy(target),
-                node_2: get_test_policy(regular_1),
-            },
-            NetworkParser {
-                scid: 1.into(),
-                capacity_msat: 100_000,
-                node_1: get_test_policy(target),
-                node_2: get_test_policy(regular_2),
-            },
-            NetworkParser {
-                scid: 2.into(),
-                capacity_msat: 100_000,
-                node_1: get_test_policy(target),
-                node_2: get_test_policy(attacker),
-            },
-            NetworkParser {
-                scid: 2.into(),
-                capacity_msat: 100_000,
-                node_1: get_test_policy(attacker),
-                node_2: get_test_policy(regular_1),
-            },
-            NetworkParser {
-                scid: 4.into(),
-                capacity_msat: 100_000,
-                node_1: get_test_policy(target),
-                node_2: get_test_policy(attacker),
-            },
-        ];
-
         // Two target <--> attacker channels should fail.
-        let attack = setup_test_attack(target, attacker, &network);
+        let target_channels_multi_attacker: HashMap<u64, PublicKey> =
+            HashMap::from([(0, regular_1), (1, regular_2), (2, attacker), (4, attacker)]);
+        let attacker_channels_multi: HashMap<u64, PublicKey> =
+            HashMap::from([(2, target), (4, target)]);
+        let attack = setup_test_attack(
+            target,
+            attacker,
+            target_channels_multi_attacker,
+            attacker_channels_multi,
+        );
         assert!(attack.setup_for_network().is_err());
 
         // No target <--> attacker should fail.
-        let attack = setup_test_attack(target, attacker, &network[0..1]);
+        let target_channels_no_attacker: HashMap<u64, PublicKey> =
+            HashMap::from([(0, regular_1), (1, regular_2)]);
+        let attack = setup_test_attack(
+            target,
+            attacker,
+            target_channels_no_attacker,
+            HashMap::new(),
+        );
+        assert!(attack.setup_for_network().is_err());
+
+        // Mismatched channels - both have one channel but different scids should fail.
+        let target_channels_mismatch: HashMap<u64, PublicKey> =
+            HashMap::from([(0, regular_1), (2, attacker)]);
+        let attacker_channels_mismatch: HashMap<u64, PublicKey> = HashMap::from([(3, target)]);
+        let attack = setup_test_attack(
+            target,
+            attacker,
+            target_channels_mismatch,
+            attacker_channels_mismatch,
+        );
+        assert!(attack.setup_for_network().is_err());
+
+        // Different numbers of target <-> attacker channels should fail.
+        let target_channels_one: HashMap<u64, PublicKey> =
+            HashMap::from([(0, regular_1), (2, attacker)]);
+        let attacker_channels_zero: HashMap<u64, PublicKey> = HashMap::new();
+        let attack = setup_test_attack(
+            target,
+            attacker,
+            target_channels_one,
+            attacker_channels_zero,
+        );
         assert!(attack.setup_for_network().is_err());
 
         // It's okay for the target to have multiple channels with other nodes.
-        let attack = setup_test_attack(target, attacker, &network[0..3]);
+        let attacker_channels_valid: HashMap<u64, PublicKey> = HashMap::from([(2, target)]);
+        let target_channels_valid: HashMap<u64, PublicKey> =
+            HashMap::from([(0, regular_1), (1, regular_2), (2, attacker)]);
+        let attack = setup_test_attack(
+            target,
+            attacker,
+            target_channels_valid,
+            attacker_channels_valid,
+        );
         let setup = attack.setup_for_network().unwrap();
 
         // Expect that all of the target's non-attacker channels are jammed, order doesn't matter.

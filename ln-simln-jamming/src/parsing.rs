@@ -373,8 +373,6 @@ where
     R: ReputationMonitor + Send + Sync + 'static,
     M: PeacetimeRevenueMonitor + Send + Sync + 'static,
 {
-    let sim_network = simulation.sim_network.clone();
-
     // NOTE: If you are implementing your own attack and have added the variant to AttackType, you can
     // then do any setup specific to your attack here and return.
     match cli.attack {
@@ -383,9 +381,18 @@ where
                 simulation.attackers.iter().map(|a| a.1).collect();
             let attack = Arc::new(SinkAttack::new(
                 clock,
-                &sim_network,
                 simulation.target.1,
                 attacker_pubkeys,
+                simulation
+                    .target_channels()
+                    .iter()
+                    .map(|(k, v)| (*k, v.0))
+                    .collect(),
+                simulation
+                    .attacker_channels()?
+                    .iter()
+                    .map(|(k, v)| (*k, v.0))
+                    .collect(),
                 risk_margin,
                 reputation_monitor,
                 revenue_monitor,
