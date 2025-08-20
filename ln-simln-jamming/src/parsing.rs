@@ -186,6 +186,50 @@ impl SimulationFiles {
     pub fn attacktime_traffic(&self) -> PathBuf {
         self.dir.join("attacktime_traffic.csv")
     }
+
+    // Returns a map of the target's channels to their pubkey and alias.
+    pub fn target_channels(&self) -> HashMap<u64, (PublicKey, String)> {
+        self.get_channels(self.target.1)
+    }
+
+    // Returns a map of attacker channel scid to the pubkey and alias of its peer. Note that
+    // for multiple attackers, all channels are merged to one hashmap.
+    pub fn attacker_channels(&self) -> Result<HashMap<u64, (PublicKey, String)>, BoxError> {
+        self.attackers
+            .iter()
+            .try_fold(HashMap::new(), |mut acc, (_, pubkey)| {
+                for (scid, channel_info) in self.get_channels(*pubkey) {
+                    if acc.contains_key(&scid) {
+                        // TODO: attacking nodes could possibly want to share a scid, so we
+                        // should allow this if the channel is with another attacker.
+                        return Err(format!("Duplicate scid {} found", scid).into());
+                    }
+                    acc.insert(scid, channel_info);
+                }
+                Ok(acc)
+            })
+    }
+
+    fn get_channels(&self, pubkey: PublicKey) -> HashMap<u64, (PublicKey, String)> {
+        self.sim_network
+            .iter()
+            .filter_map(|channel| {
+                if channel.node_1.pubkey == pubkey {
+                    Some((
+                        channel.scid.into(),
+                        (channel.node_2.pubkey, channel.node_2.alias.clone()),
+                    ))
+                } else if channel.node_2.pubkey == pubkey {
+                    Some((
+                        channel.scid.into(),
+                        (channel.node_1.pubkey, channel.node_1.alias.clone()),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 }
 
 /// Checks that the only difference in the peacetime and attack time channel graphs are attacker

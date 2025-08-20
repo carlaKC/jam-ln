@@ -55,26 +55,7 @@ async fn main() -> Result<(), BoxError> {
     let tasks = TaskTracker::new();
     let (shutdown, listener) = triggered::trigger();
 
-    let target_channels: HashMap<u64, (PublicKey, String)> = network_dir
-        .sim_network
-        .iter()
-        .filter_map(|channel| {
-            if channel.node_1.pubkey == target_pubkey {
-                Some((
-                    channel.scid.into(),
-                    (channel.node_2.pubkey, channel.node_2.alias.clone()),
-                ))
-            } else if channel.node_2.pubkey == target_pubkey {
-                Some((
-                    channel.scid.into(),
-                    (channel.node_1.pubkey, channel.node_1.alias.clone()),
-                ))
-            } else {
-                None
-            }
-        })
-        .collect();
-
+    let target_channels = network_dir.target_channels();
     let clock = Arc::new(SimulationClock::new(cli.clock_speedup)?);
 
     // Use the channel jamming interceptor and latency for simulated payments.
