@@ -1,7 +1,8 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs::{File, OpenOptions},
     io::Write,
+    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
@@ -13,12 +14,13 @@ use ln_resource_mgr::forward_manager::{ForwardManager, ForwardManagerParams};
 use ln_simln_jamming::{
     analysis::BatchForwardWriter,
     clock::InstantClock,
+    get_reputation_pairs,
     parsing::{
         get_history_for_bootstrap, history_from_file, parse_duration, NetworkParams,
         ReputationParams, SimulationFiles, TrafficType,
     },
     reputation_interceptor::{BootstrapRecords, ReputationInterceptor, ReputationMonitor},
-    BoxError,
+    BoxError, ReputationPair,
 };
 use log::LevelFilter;
 use simln_lib::clock::SimulationClock;
@@ -140,7 +142,8 @@ async fn main() -> Result<(), BoxError> {
         node_pubkeys.insert(chan.node_2.pubkey);
     }
 
-    let (reputation_state, target_revenue) = network_dir.reputation_summary(cli.attacker_bootstrap);
+    let (reputation_state, target_revenue, target_rep, attacker_rep) =
+        network_dir.reputation_summary(cli.attacker_bootstrap);
 
     let mut target_revenue = File::create(target_revenue)?;
     write!(target_revenue, "{}", bootstrap_revenue)?;
@@ -160,10 +163,9 @@ async fn main() -> Result<(), BoxError> {
         "bidirectional_revenue",
     ])?;
 
+    let now = InstantClock::now(&*clock);
     for pubkey in node_pubkeys {
-        let channels = reputation_interceptor
-            .list_channels(pubkey, InstantClock::now(&*clock))
-            .await?;
+        let channels = reputation_interceptor.list_channels(pubkey, now).await?;
 
         for channel in channels {
             csv_writer.serialize((
@@ -182,6 +184,68 @@ async fn main() -> Result<(), BoxError> {
         reputation_state,
         target_revenue
     );
+
+    // In addition to writing reputation snapshots, we'll create individual files for the attacker
+    // and target, showing their peers view of their reputation standing. This is helpful for
+    // debugging reputation-related issues.
+    let target_channels_vec: Vec<(PublicKey, u64)> = network_dir
+        .target_channels()
+        .iter()
+        .map(|(scid, (pubkey, _))| (*pubkey, *scid))
+        .collect();
+
+    let attacker_channels_vec: Vec<(PublicKey, u64)> = network_dir
+        .attacker_channels()?
+        .iter()
+        .map(|(scid, (pubkey, _))| (*pubkey, *scid))
+        .collect();
+
+    let reputation_monitor = Arc::new(reputation_interceptor);
+    write_reputation_paris(
+        target_rep,
+        get_reputation_pairs(reputation_monitor.clone(), &target_channels_vec, now).await?,
+    )?;
+
+    write_reputation_paris(
+        attacker_rep,
+        get_reputation_pairs(reputation_monitor, &attacker_channels_vec, now).await?,
+    )?;
+    Ok(())
+}
+
+pub fn write_reputation_paris(
+    file: PathBuf,
+    pairs: HashMap<PublicKey, HashMap<u64, Vec<ReputationPair>>>,
+) -> Result<(), BoxError> {
+    let reputation_file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .create(true)
+        .open(&file)?;
+
+    let mut csv_writer = Writer::from_writer(reputation_file);
+    csv_writer.write_record([
+        "peer_pubkey",
+        "outgoing_channel",
+        "incoming_channel",
+        "outgoing_reputation",
+        "incoming_revenue",
+    ])?;
+
+    for (peer, channels) in pairs.iter() {
+        for (scid, pairs) in channels {
+            for pair in pairs {
+                csv_writer.serialize((
+                    peer,
+                    scid,
+                    pair.scid,
+                    pair.outgoing_reputation,
+                    pair.incoming_revenue,
+                ))?;
+            }
+        }
+    }
+    csv_writer.flush()?;
 
     Ok(())
 }

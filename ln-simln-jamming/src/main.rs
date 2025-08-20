@@ -102,7 +102,8 @@ async fn main() -> Result<(), BoxError> {
         }
     });
 
-    let (reputation_state, target_revenue) = network_dir.reputation_summary(cli.attacker_bootstrap);
+    let (reputation_state, target_revenue, _, _) =
+        network_dir.reputation_summary(cli.attacker_bootstrap);
     let reputation_snapshot = reputation_snapshot_from_file(&reputation_state).map_err(|e| {
         format!(
             "could not find reputation snapshot {:?}, try generating one with reputation-builder: {:?}",

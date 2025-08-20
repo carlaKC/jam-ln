@@ -162,7 +162,10 @@ impl SimulationFiles {
     /// Returns the location of a reputation and target revenue summary for the period of time
     /// that the attacker in the network is bootstrapped for, creating sub-directories to hold
     /// these files is necessary.
-    pub fn reputation_summary(&self, duration: Option<Duration>) -> (PathBuf, PathBuf) {
+    pub fn reputation_summary(
+        &self,
+        duration: Option<Duration>,
+    ) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
         let reputation_dir = self
             .dir
             .join("reputation")
@@ -174,6 +177,8 @@ impl SimulationFiles {
         (
             reputation_dir.join("reputation_summary.csv"),
             reputation_dir.join("target_revenue.txt"),
+            reputation_dir.join("target_reputation.txt"),
+            reputation_dir.join("attacker_reputation.txt"),
         )
     }
 
