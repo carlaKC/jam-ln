@@ -56,6 +56,7 @@ async fn main() -> Result<(), BoxError> {
     let (shutdown, listener) = triggered::trigger();
 
     let target_channels = network_dir.target_channels();
+    let attacker_channels = network_dir.attacker_channels()?;
     let clock = Arc::new(SimulationClock::new(cli.clock_speedup)?);
 
     // Use the channel jamming interceptor and latency for simulated payments.
@@ -178,14 +179,21 @@ async fn main() -> Result<(), BoxError> {
 
     // Do some preliminary checks on our reputation state - there isn't much point in running if we haven't built up
     // some reputation.
-    let target_pubkey_map: HashMap<u64, PublicKey> =
-        target_channels.iter().map(|(k, v)| (*k, v.0)).collect();
+    let target_chan_vec: Vec<(PublicKey, u64)> = target_channels
+        .iter()
+        .map(|(scid, (pubkey, _))| (*pubkey, *scid))
+        .collect();
+    let attacker_chan_vec: Vec<(PublicKey, u64)> = attacker_channels
+        .iter()
+        .map(|(scid, (pubkey, _))| (*pubkey, *scid))
+        .collect();
 
     let start_reputation = get_network_reputation(
         reputation_interceptor.clone(),
         target_pubkey,
-        &attacker_pubkeys,
-        &target_pubkey_map,
+        attacker_pubkeys.clone(),
+        &target_chan_vec,
+        &attacker_chan_vec,
         risk_margin,
         // The reputation_interceptor clock has been set on decaying averages so we use the clock
         // to provide a new instant rather than the previous fixed point.
@@ -280,8 +288,9 @@ async fn main() -> Result<(), BoxError> {
     let end_reputation = get_network_reputation(
         reputation_interceptor,
         network_dir.target.1,
-        &attacker_pubkeys,
-        &target_pubkey_map,
+        attacker_pubkeys,
+        &target_chan_vec,
+        &attacker_chan_vec,
         risk_margin,
         InstantClock::now(&*clock),
     )

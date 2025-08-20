@@ -1,6 +1,7 @@
 use bitcoin::secp256k1::PublicKey;
-use ln_resource_mgr::{AccountableSignal, ChannelSnapshot};
+use ln_resource_mgr::AccountableSignal;
 use simln_lib::sim_node::{CustomRecords, InterceptRequest};
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
@@ -65,6 +66,68 @@ pub fn records_from_signal(signal: AccountableSignal) -> CustomRecords {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ReputationPair {
+    pub incoming_revenue: i64,
+    pub outgoing_reputation: i64,
+    pub scid: u64,
+}
+
+pub async fn get_reputation_pairs<R: ReputationMonitor>(
+    reputation_monitor: Arc<R>,
+    channels: &[(PublicKey, u64)],
+    access_ins: Instant,
+) -> Result<HashMap<PublicKey, HashMap<u64, Vec<ReputationPair>>>, BoxError> {
+    let mut reputation_view = HashMap::new();
+
+    // For each our of our node's channels with its peers.
+    for (peer_pubkey, our_channel) in channels.iter() {
+        // Look up the peer's reputation scores for all of its channels.
+        let peer_channels = reputation_monitor
+            .list_channels(*peer_pubkey, access_ins)
+            .await?;
+
+        let our_channel_reputation = peer_channels
+            .get(our_channel)
+            .ok_or(format!(
+                "our channel: {our_channel} not found with peer: {peer_pubkey}"
+            ))?
+            .outgoing_reputation;
+
+        // Create reputation pairs for our channel with each one of the peer's other channels.
+        let mut reputation_pairs = Vec::with_capacity(peer_channels.len() - 1);
+        for (pair_scid, reputation_snapshot) in peer_channels {
+            // We don't need to make a reputation pair with our own channel.
+            if pair_scid == *our_channel {
+                continue;
+            }
+
+            reputation_pairs.push(ReputationPair {
+                incoming_revenue: reputation_snapshot.bidirectional_revenue,
+                outgoing_reputation: our_channel_reputation,
+                scid: pair_scid,
+            });
+        }
+
+        // We should allow multiple channels per peer, but should not allow adding the same
+        // channel more than once.
+        match reputation_view
+            .entry(*peer_pubkey)
+            .or_insert_with(HashMap::new)
+            .entry(*our_channel)
+        {
+            Entry::Occupied(_) => {
+                return Err(format!("unexpected duplicate scid: {our_channel}").into())
+            }
+            Entry::Vacant(e) => {
+                e.insert(reputation_pairs);
+            }
+        }
+    }
+
+    Ok(reputation_view)
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct NetworkReputation {
     pub target_reputation: usize,
     pub target_pair_count: usize,
@@ -72,73 +135,58 @@ pub struct NetworkReputation {
     pub attacker_pair_count: usize,
 }
 
+/// Provides a summary of the following reputation statistics:
+/// - Target's reputation with honest peers: the reputation that the target has with any honest
+///   peers, filtering out the attacker.
+/// - Attacker's reputation with target: the reputation that the attacker has on any channels
+///   with the target, filtering out any honest peers.
 #[allow(clippy::too_many_arguments)]
 pub async fn get_network_reputation<R: ReputationMonitor>(
     reputation_monitor: Arc<R>,
     target_pubkey: PublicKey,
-    attacker_pubkeys: &[PublicKey],
-    target_channels: &HashMap<u64, PublicKey>,
+    attacker_pubkeys: Vec<PublicKey>,
+    target_chanels: &[(PublicKey, u64)],
+    attacker_channels: &[(PublicKey, u64)],
     risk_margin: u64,
     access_ins: Instant,
 ) -> Result<NetworkReputation, BoxError> {
-    let target_channels_snapshot = reputation_monitor
-        .list_channels(target_pubkey, access_ins)
-        .await?;
+    let mut peers_view_of_target =
+        get_reputation_pairs(reputation_monitor.clone(), target_chanels, access_ins).await?;
+    let peers_view_of_attacker =
+        get_reputation_pairs(reputation_monitor, attacker_channels, access_ins).await?;
 
-    let mut network_reputation = NetworkReputation {
-        attacker_reputation: 0,
-        attacker_pair_count: 0,
-        target_pair_count: 0,
-        target_reputation: 0,
-    };
-
-    for (scid, pubkey) in target_channels {
-        // If we've got a chanel with the attacker, we want to get a snapshot of what its reputation is with the
-        // target node. Otherwise, we'll get a snapshot of what the target node's reputation is with its peers.
-        let (channels, is_attacker) = if attacker_pubkeys.contains(pubkey) {
-            (&target_channels_snapshot, true)
-        } else {
-            (
-                &reputation_monitor
-                    .list_channels(*pubkey, access_ins)
-                    .await?,
-                false,
-            )
-        };
-
-        let repuation_pairs = count_reputation_pairs(channels, *scid, risk_margin)?;
-        let total_paris = channels.len() - 1;
-
-        if is_attacker {
-            network_reputation.attacker_reputation += repuation_pairs;
-            network_reputation.attacker_pair_count += total_paris;
-        } else {
-            network_reputation.target_reputation += repuation_pairs;
-            network_reputation.target_pair_count += total_paris;
-        }
+    // We don't care what the attacker's opinion of the target's reputation is, so we filter out
+    // any attacker nodes from the view of the target.
+    for pk in attacker_pubkeys.iter() {
+        peers_view_of_target.remove(pk);
     }
 
-    Ok(network_reputation)
-}
+    // TODO: make this more generic, checking attacker's reputation with all its peers.
+    let target_view_of_attacker = peers_view_of_attacker
+        .get(&target_pubkey)
+        .ok_or("attacker does not have a channel with the target")?;
 
-/// Counts the number of pairs that the outgoing channel has reputation for.
-fn count_reputation_pairs(
-    channels: &HashMap<u64, ChannelSnapshot>,
-    outgoing_channel: u64,
-    risk_margin: u64,
-) -> Result<usize, BoxError> {
-    let outgoing_channel_snapshot = channels
-        .get(&outgoing_channel)
-        .ok_or(format!("outgoing channel: {} not found", outgoing_channel))?;
-
-    Ok(channels
-        .iter()
-        .filter(|(scid, snapshot)| {
-            **scid != outgoing_channel
-                && outgoing_channel_snapshot.outgoing_reputation
-                    >= snapshot.bidirectional_revenue + risk_margin as i64
-        })
-        .count())
+    Ok(NetworkReputation {
+        target_reputation: peers_view_of_target
+            .values()
+            .flat_map(|scid_map| scid_map.values().flatten())
+            .filter(|pair| pair.outgoing_reputation >= pair.incoming_revenue + risk_margin as i64)
+            .count(),
+        target_pair_count: peers_view_of_target
+            .values()
+            .flat_map(|scid_map| scid_map.values())
+            .flat_map(|pairs| pairs.iter())
+            .count(),
+        attacker_reputation: target_view_of_attacker
+            .iter()
+            .flat_map(|pairs| pairs.1)
+            .filter(|pair| pair.outgoing_reputation >= pair.incoming_revenue + risk_margin as i64)
+            .count(),
+        attacker_pair_count: target_view_of_attacker
+            .iter()
+            .flat_map(|pairs| pairs.1.iter())
+            .count(),
+    })
 }
 
 /// Prints the details of an interception request.
@@ -164,9 +212,9 @@ fn print_request(req: &InterceptRequest) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::get_network_reputation;
     use crate::reputation_interceptor::ReputationMonitor;
     use crate::test_utils::get_random_keypair;
-    use crate::{count_reputation_pairs, get_network_reputation};
     use crate::{BoxError, NetworkReputation};
     use async_trait::async_trait;
     use bitcoin::secp256k1::PublicKey;
@@ -185,54 +233,13 @@ mod tests {
         }
     }
 
-    /// Tests counting the number of pairs that an outgoing channel has good reputation on. Uses a zero risk margin
-    /// to simplify test values.
-    #[test]
-    fn test_count_reputation_pairs() {
-        let channels = vec![
-            (
-                0,
-                ChannelSnapshot {
-                    capacity_msat: 200_000,
-                    outgoing_reputation: 100_000,
-                    bidirectional_revenue: 20_000,
-                },
-            ),
-            (
-                1,
-                ChannelSnapshot {
-                    capacity_msat: 200_000,
-                    outgoing_reputation: 45_000,
-                    bidirectional_revenue: 50_000,
-                },
-            ),
-            (
-                2,
-                ChannelSnapshot {
-                    capacity_msat: 200_000,
-                    outgoing_reputation: 15_000,
-                    bidirectional_revenue: 80_000,
-                },
-            ),
-        ]
-        .into_iter()
-        .collect();
-
-        // Channel not found.
-        assert!(count_reputation_pairs(&channels, 999, 0).is_err());
-
-        assert_eq!(count_reputation_pairs(&channels, 0, 0).unwrap(), 2);
-        assert_eq!(count_reputation_pairs(&channels, 1, 0).unwrap(), 1);
-        assert_eq!(count_reputation_pairs(&channels, 2, 0).unwrap(), 0);
-    }
-
     /// Tests fetching network reputation pairs for the following topology:
     ///
     /// --(4) --+
     ///         |
     /// --(5)-- P1 --(1) ---+
     ///				        |
-    /// --(6)-- P2 --(2) -- Target --(0) -- Attacker
+    /// --(6)-- P2 --(2) -- Target --(0) -- Attacker -- (7) -- P4
     ///				        |
     ///         P3 --(3) ---+
     #[tokio::test]
@@ -241,19 +248,16 @@ mod tests {
         let now = Instant::now();
 
         let target_pubkey = get_random_keypair().1;
-        let attacker_pubkey = vec![get_random_keypair().1];
+        let attacker_pubkey = get_random_keypair().1;
 
         let peer_1 = get_random_keypair().1;
         let peer_2 = get_random_keypair().1;
         let peer_3 = get_random_keypair().1;
-        let target_channels: HashMap<u64, PublicKey> = vec![
-            (0, attacker_pubkey[0]),
-            (1, peer_1),
-            (2, peer_2),
-            (3, peer_3),
-        ]
-        .into_iter()
-        .collect();
+        let peer_4 = get_random_keypair().1;
+        let target_channels: Vec<(PublicKey, u64)> =
+            vec![(peer_1, 1), (peer_2, 2), (peer_3, 3), (attacker_pubkey, 0)];
+
+        let attacker_channels: Vec<(PublicKey, u64)> = vec![(target_pubkey, 0), (peer_4, 7)];
 
         mock_monitor
             .expect_list_channels()
@@ -290,6 +294,28 @@ mod tests {
                                 capacity_msat: 200_000,
                                 outgoing_reputation: 75,
                                 bidirectional_revenue: 100,
+                            },
+                        ),
+                    ]
+                } else if pubkey == attacker_pubkey {
+                    vec![
+                        (
+                            0,
+                            ChannelSnapshot {
+                                capacity_msat: 200_000,
+                                // The target will have reputation with the attacker, but this
+                                // shouldn't matter because we trim the attacking channel from our
+                                // results.
+                                outgoing_reputation: 900_000,
+                                bidirectional_revenue: 0,
+                            },
+                        ),
+                        (
+                            7,
+                            ChannelSnapshot {
+                                capacity_msat: 500_000,
+                                outgoing_reputation: 0,
+                                bidirectional_revenue: 0,
                             },
                         ),
                     ]
@@ -348,8 +374,22 @@ mod tests {
                             bidirectional_revenue: 50,
                         },
                     )]
+                } else if pubkey == peer_4 {
+                    vec![(
+                        7,
+                        ChannelSnapshot {
+                            capacity_msat: 500_000,
+                            // The attacker has reputation with peer_3, but this value should
+                            // be trimmed because we only care about the target's opinion.
+                            outgoing_reputation: 5000,
+                            bidirectional_revenue: 0,
+                        },
+                    )]
                 } else {
-                    panic!("unexpected pubkey");
+                    panic!(
+                        "unexpected pubkey: {}, expect: target {} or 1: {} or 2: {} or 3: {}",
+                        pubkey, target_pubkey, peer_1, peer_2, peer_3
+                    );
                 };
 
                 Ok(data.into_iter().collect())
@@ -364,8 +404,9 @@ mod tests {
         let network_reputation = get_network_reputation(
             Arc::new(mock_monitor),
             target_pubkey,
-            &attacker_pubkey,
+            vec![attacker_pubkey],
             &target_channels,
+            &attacker_channels,
             0,
             now,
         )

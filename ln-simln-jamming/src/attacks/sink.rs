@@ -267,6 +267,16 @@ where
     ) -> Result<(), BoxError> {
         // Poll every 5 minutes to check if the attack is done.
         let interval = Duration::from_secs(300);
+        let target_channel_vec: Vec<(PublicKey, u64)> = self
+            .target_channels
+            .iter()
+            .map(|(scid, pubkey)| (*pubkey, *scid))
+            .collect();
+        let attacker_channel_vec: Vec<(PublicKey, u64)> = self
+            .attacker_channels
+            .iter()
+            .map(|(scid, pubkey)| (*pubkey, *scid))
+            .collect();
 
         loop {
             select! {
@@ -294,8 +304,9 @@ where
                     let current_reputation = get_network_reputation(
                         self.reputation_monitor.clone(),
                         self.target_pubkey,
-                        &[self.attacker_pubkey],
-                        &self.target_channels,
+                        vec![self.attacker_pubkey],
+                        &target_channel_vec,
+                        &attacker_channel_vec,
                         self.risk_margin,
                         InstantClock::now(&*self.clock),
                     )
