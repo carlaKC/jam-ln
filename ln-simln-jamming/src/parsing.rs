@@ -563,14 +563,14 @@ pub fn reputation_snapshot_from_file(
         let scid: u64 = record[1].parse()?;
         let capacity_msat: u64 = record[2].parse()?;
         let outgoing_reputation: i64 = record[3].parse()?;
-        let bidirectional_revenue: i64 = record[4].parse()?;
+        let revenue: i64 = record[4].parse()?;
 
         reputation_snapshot.entry(pubkey).or_default().insert(
             scid,
             ChannelSnapshot {
                 capacity_msat,
                 outgoing_reputation,
-                bidirectional_revenue,
+                revenue,
             },
         );
     }

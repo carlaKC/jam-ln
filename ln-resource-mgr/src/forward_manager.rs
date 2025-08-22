@@ -362,7 +362,7 @@ impl ReputationManager for ForwardManager {
 
                         let mut revenue =
                             RevenueAverage::new(&self.params.reputation_params, add_ins);
-                        revenue.add_value(channel.bidirectional_revenue, add_ins)?;
+                        revenue.add_value(channel.revenue, add_ins)?;
                         revenue
                     }
                     None => RevenueAverage::new(&self.params.reputation_params, add_ins),
@@ -569,9 +569,7 @@ impl ReputationManager for ForwardManager {
                     outgoing_reputation: channel
                         .outgoing_direction
                         .outgoing_reputation(access_ins)?,
-                    bidirectional_revenue: channel
-                        .channel_revenue
-                        .value_at_instant(access_ins)?,
+                    revenue: channel.channel_revenue.value_at_instant(access_ins)?,
                 },
             );
         }
@@ -742,7 +740,7 @@ mod tests {
         let snapshot = ChannelSnapshot {
             capacity_msat: 10_000_000,
             outgoing_reputation: 1000,
-            bidirectional_revenue: 500,
+            revenue: 500,
         };
         assert!(fwd_manager
             .add_channel(1, channel_capacity, now, Some(snapshot.clone()))
@@ -770,7 +768,7 @@ mod tests {
         // Check values on 2nd channel added from snapshot
         assert!(channels.get(&1).unwrap().capacity_msat == channel_capacity);
         assert!(channels.get(&1).unwrap().outgoing_reputation == 1000);
-        assert!(channels.get(&1).unwrap().bidirectional_revenue == 500);
+        assert!(channels.get(&1).unwrap().revenue == 500);
 
         assert!(fwd_manager.remove_channel(0).is_ok());
         assert!(
@@ -839,7 +837,7 @@ mod tests {
         let snapshot = ChannelSnapshot {
             capacity_msat: channel_capacity,
             outgoing_reputation: 10_000_000,
-            bidirectional_revenue: 1_000_000,
+            revenue: 1_000_000,
         };
         let channel_with_reputation = 2;
 
@@ -888,7 +886,7 @@ mod tests {
         let snapshot = ChannelSnapshot {
             capacity_msat: channel_capacity,
             outgoing_reputation: 10_000_000,
-            bidirectional_revenue: 1_000_000,
+            revenue: 1_000_000,
         };
         let channel_with_reputation = 2;
 

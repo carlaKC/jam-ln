@@ -945,12 +945,12 @@ mod tests {
             let node_1_snapshot = ChannelSnapshot {
                 capacity_msat: edge.capacity_msat,
                 outgoing_reputation: 0,
-                bidirectional_revenue: 0,
+                revenue: 0,
             };
             let node_2_snapshot = ChannelSnapshot {
                 capacity_msat: edge.capacity_msat,
                 outgoing_reputation: 0,
-                bidirectional_revenue: 0,
+                revenue: 0,
             };
 
             reputation_snapshot
@@ -1065,13 +1065,7 @@ mod tests {
             .list_channels(Instant::now())
             .unwrap();
 
-        assert!(
-            bob_reputation
-                .get(&alice_to_bob)
-                .unwrap()
-                .bidirectional_revenue
-                != 0
-        );
+        assert!(bob_reputation.get(&alice_to_bob).unwrap().revenue != 0);
         assert!(
             bob_reputation
                 .get(&bob_to_carol)
@@ -1197,7 +1191,7 @@ mod tests {
         let node_1_snapshot = ChannelSnapshot {
             capacity_msat: edge.capacity_msat,
             outgoing_reputation: 0,
-            bidirectional_revenue: 0,
+            revenue: 0,
         };
         reputation_snapshot
             .entry(edge.node_1.pubkey)
