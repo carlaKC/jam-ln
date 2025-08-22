@@ -6,8 +6,107 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::decaying_average::DecayingAverage;
-use crate::{ReputationError, ResourceBucketType};
+use crate::{ReputationError, ReputationParams, ResourceBucketType};
 
+/// Tracks the average bi-directional revenue of a channel over multiple windows of time to smooth out this value over
+/// time. The number of windows that this average is tracked over is determined by [`Self::window_count`].
+///
+/// For example: if we're interested in tracking revenue over two weeks and we're interested in aggregating over ten
+/// windows, we will track the aggregate revenue over the last ten two week windows.
+#[derive(Debug)]
+pub(super) struct RevenueAverage {
+    /// Tracks when the average started to be tracked. Used to track the actual number of windows we've been tracking
+    /// for when we haven't yet reached the full [`Self::window_count`]. This gives us some robustness on startup,
+    /// rather than underestimating.
+    ///
+    /// For example: if we've only been tracking for two windows of time, and we're averaging over ten windows we only
+    /// want to average across the two tracked windows (rather than averaging over ten and including eight windows that
+    /// are effectively zero).
+    start_ins: Instant,
+    /// The number of windows that we want to track our average revenue.
+    window_count: u8,
+    /// The length of the window we're tracking average values for.
+    window_duration: Duration,
+    /// Tracks the channel's average bi-directional revenue over the full period of time that we're interested in
+    /// aggregating. This is a decent approximation of tracking each window separately, and saves us needing to store
+    /// multiple data points per channel.
+    ///
+    /// For example:
+    /// - 2 week revenue period
+    /// - 12 window_count
+    ///
+    /// [`Self::aggregated_revenue_decaying`] will track average revenue over 24 weeks. The two week revenue window
+    /// revenue average can then be obtained by adjusting for the window side, which has the effect of evenly
+    /// distributing revenue between the windows.
+    aggregated_revenue_decaying: DecayingAverage<i64>,
+}
+
+impl RevenueAverage {
+    fn new(
+        params: &ReputationParams,
+        start_ins: Instant,
+        start_value: Option<i64>,
+    ) -> Result<Self, ReputationError> {
+        let mut s = RevenueAverage {
+            start_ins,
+            window_count: params.reputation_multiplier,
+            window_duration: params.revenue_window,
+            aggregated_revenue_decaying: DecayingAverage::new(
+                params.revenue_window * params.reputation_multiplier.into(),
+            ),
+        };
+
+        if let Some(start) = start_value {
+            s.add_value(start, start_ins)?;
+        }
+
+        Ok(s)
+    }
+
+    /// Decays the tracked value to its value at the instant provided and returns the updated value. The access_instant
+    /// must be after the last_updated time of the decaying average, tolerant to nanosecond differences.
+    pub(super) fn add_value(
+        &mut self,
+        value: i64,
+        update_time: Instant,
+    ) -> Result<i64, ReputationError> {
+        self.aggregated_revenue_decaying
+            .add_value(value, update_time)
+    }
+
+    /// The number of full windows that have been tracked since the average started. Returned as a float so that the
+    /// average can be gradually scaled.
+    fn windows_tracked(&self, access_ins: Instant) -> f64 {
+        access_ins.duration_since(self.start_ins).as_secs_f64() / self.window_duration.as_secs_f64()
+    }
+
+    /// Updates the current value of the decaying average and then adds the new value provided. The value provided
+    /// will act as a saturating add if it exceeds i64::MAX.
+    pub(super) fn value_at_instant(&mut self, access_ins: Instant) -> Result<i64, ReputationError> {
+        // If we're below our count of windows, we only want to aggregate for the amount of windows we've tracked so
+        // far. If we've reached out count, we just use that because the average only tracks this number of windows.
+        let windows_tracked = self.windows_tracked(access_ins);
+        let window_divisor = f64::min(
+            // If less than one window has been tracked, this will be a fraction which will inflate our revenue so we
+            // just flatten it to 1.
+            // TODO: better strategy for first window?
+            if windows_tracked < 1.0 {
+                1.0
+            } else {
+                windows_tracked
+            },
+            self.window_count as f64,
+        );
+
+        // To give the value for this longer-running average over an equivalent two week period, we just divide it by
+        // the number of windows we're counting.
+        Ok((self
+            .aggregated_revenue_decaying
+            .value_at_instant(access_ins)? as f64
+            / window_divisor)
+            .round() as i64)
+    }
+}
 /// Describes the size of a resource bucket.
 #[derive(Clone, Debug)]
 pub struct BucketParameters {
@@ -33,23 +132,31 @@ pub(super) struct IncomingChannel {
 
     /// Tracks the rate at which protected and congested resources are utilized on the channel.
     pub(super) utilization: ChannelUtilization,
+
+    /// The revenue that this node has earned us as the incoming forwarder.
+    pub(super) revenue: RevenueAverage,
 }
 
 impl IncomingChannel {
     pub(super) fn new(
+        params: &ReputationParams,
         scid: u64,
         general_bucket: BucketParameters,
         congestion_bucket: BucketParameters,
         protected_bucket: BucketParameters,
-        utilization_period: Duration,
-        // Starting stat for (slots, liquidity) utilization.
-        utilization_start: Option<(f64, f64, Instant)>,
+        start_ins: Instant,
+        // Starting state for (slots, liquidity, revenue).
+        start_state: Option<(f64, f64, i64)>,
     ) -> Result<Self, ReputationError> {
         Ok(Self {
             general_bucket: GeneralBucket::new(scid, general_bucket)?,
             congestion_bucket,
             protected_bucket,
-            utilization: ChannelUtilization::new(utilization_period, utilization_start)?,
+            utilization: ChannelUtilization::new(
+                params.revenue_window,
+                start_state.map(|v| (v.0, v.1, start_ins)),
+            )?,
+            revenue: RevenueAverage::new(params, start_ins, start_state.map(|v| v.2))?,
         })
     }
 
@@ -624,5 +731,90 @@ mod tests {
 
         bucket.remove_htlc(scid_2, htlc_amt).unwrap();
         bucket.remove_htlc(scid_1, htlc_amt).unwrap();
+    }
+
+    #[test]
+    fn test_revenue_average() {
+        let params = ReputationParams {
+            revenue_window: Duration::from_secs(60 * 60 * 24 * 14),
+            reputation_multiplier: 10,
+            resolution_period: Duration::from_secs(90),
+            expected_block_speed: None,
+        };
+
+        let now = Instant::now();
+        let mut revenue_average = RevenueAverage::new(&params, now, None).unwrap();
+
+        assert_eq!(revenue_average.value_at_instant(now).unwrap(), 0);
+
+        let value = 10_000;
+
+        // When we're right at the beginning our our tracking, revenue shouldn't be divided over multiple periods,
+        // because we haven't tracked that long yet.
+        revenue_average.add_value(value, now).unwrap();
+        assert_eq!(revenue_average.value_at_instant(now).unwrap(), value);
+
+        // Progress our timestamp to the end of the first window of time. We're testing the division of total revenue
+        // tracked over windows, not the actual decaying average, so we peek under the hood to get the value that we've
+        // decayed to and then assert that
+        let end_first_window = now.checked_add(params.revenue_window).unwrap();
+        let decayed_value = revenue_average
+            .aggregated_revenue_decaying
+            .value_at_instant(end_first_window)
+            .unwrap();
+
+        assert_eq!(
+            revenue_average.value_at_instant(end_first_window).unwrap(),
+            decayed_value
+        );
+
+        // Move to half way through the second window, the value should now be split between two periods. Again, we'll
+        // peek under at the decayed value and then check that it's being split over periods.
+        let half_second_window = end_first_window
+            .checked_add(params.revenue_window / 2)
+            .unwrap();
+        let decayed_value = revenue_average
+            .aggregated_revenue_decaying
+            .value_at_instant(half_second_window)
+            .unwrap();
+
+        assert_eq!(
+            revenue_average
+                .value_at_instant(half_second_window)
+                .unwrap(),
+            (decayed_value as f64 / 1.5).round() as i64,
+        );
+
+        // Finally, test that once we reach our total window count, we don't continue to divide by more and more
+        // windows.
+        let final_window = now
+            .checked_add(params.revenue_window * params.reputation_multiplier.into())
+            .unwrap();
+        let decayed_value = revenue_average
+            .aggregated_revenue_decaying
+            .value_at_instant(final_window)
+            .unwrap();
+
+        assert_eq!(
+            revenue_average.value_at_instant(final_window).unwrap(),
+            (decayed_value as f64 / params.reputation_multiplier as f64).round() as i64,
+        );
+
+        // Once we get beyond the window count, it's just the decay at play and we're using the count to divide our
+        // running average.
+        let beyond_final_window = now
+            .checked_add(params.revenue_window * params.reputation_multiplier.into() * 5)
+            .unwrap();
+        let decayed_value = revenue_average
+            .aggregated_revenue_decaying
+            .value_at_instant(beyond_final_window)
+            .unwrap();
+
+        assert_eq!(
+            revenue_average
+                .value_at_instant(beyond_final_window)
+                .unwrap(),
+            (decayed_value as f64 / params.reputation_multiplier as f64).round() as i64,
+        );
     }
 }

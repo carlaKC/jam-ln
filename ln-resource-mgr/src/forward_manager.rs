@@ -1,4 +1,3 @@
-use crate::decaying_average::DecayingAverage;
 use crate::htlc_manager::{InFlightHtlc, InFlightManager};
 use crate::incoming_channel::{BucketParameters, IncomingChannel};
 use crate::outgoing_channel::OutgoingChannel;
@@ -10,7 +9,7 @@ use crate::{
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Tracks reputation and revenue for a channel.
 #[derive(Debug)]
@@ -18,93 +17,6 @@ struct TrackedChannel {
     capacity_msat: u64,
     outgoing_direction: OutgoingChannel,
     incoming_direction: IncomingChannel,
-    revenue: RevenueAverage,
-}
-
-/// Tracks the average bi-directional revenue of a channel over multiple windows of time to smooth out this value over
-/// time. The number of windows that this average is tracked over is determined by [`Self::window_count`].
-///
-/// For example: if we're interested in tracking revenue over two weeks and we're interested in aggregating over ten
-/// windows, we will track the aggregate revenue over the last ten two week windows.
-#[derive(Debug)]
-struct RevenueAverage {
-    /// Tracks when the average started to be tracked. Used to track the actual number of windows we've been tracking
-    /// for when we haven't yet reached the full [`Self::window_count`]. This gives us some robustness on startup,
-    /// rather than underestimating.
-    ///
-    /// For example: if we've only been tracking for two windows of time, and we're averaging over ten windows we only
-    /// want to average across the two tracked windows (rather than averaging over ten and including eight windows that
-    /// are effectively zero).
-    start_ins: Instant,
-    /// The number of windows that we want to track our average revenue.
-    window_count: u8,
-    /// The length of the window we're tracking average values for.
-    window_duration: Duration,
-    /// Tracks the channel's average bi-directional revenue over the full period of time that we're interested in
-    /// aggregating. This is a decent approximation of tracking each window separately, and saves us needing to store
-    /// multiple data points per channel.
-    ///
-    /// For example:
-    /// - 2 week revenue period
-    /// - 12 window_count
-    ///
-    /// [`Self::aggregated_revenue_decaying`] will track average revenue over 24 weeks. The two week revenue window
-    /// revenue average can then be obtained by adjusting for the window side, which has the effect of evenly
-    /// distributing revenue between the windows.
-    aggregated_revenue_decaying: DecayingAverage<i64>,
-}
-
-impl RevenueAverage {
-    fn new(params: &ReputationParams, start_ins: Instant) -> Self {
-        RevenueAverage {
-            start_ins,
-            window_count: params.reputation_multiplier,
-            window_duration: params.revenue_window,
-            aggregated_revenue_decaying: DecayingAverage::new(
-                params.revenue_window * params.reputation_multiplier.into(),
-            ),
-        }
-    }
-
-    /// Decays the tracked value to its value at the instant provided and returns the updated value. The access_instant
-    /// must be after the last_updated time of the decaying average, tolerant to nanosecond differences.
-    fn add_value(&mut self, value: i64, update_time: Instant) -> Result<i64, ReputationError> {
-        self.aggregated_revenue_decaying
-            .add_value(value, update_time)
-    }
-
-    /// The number of full windows that have been tracked since the average started. Returned as a float so that the
-    /// average can be gradually scaled.
-    fn windows_tracked(&self, access_ins: Instant) -> f64 {
-        access_ins.duration_since(self.start_ins).as_secs_f64() / self.window_duration.as_secs_f64()
-    }
-
-    /// Updates the current value of the decaying average and then adds the new value provided. The value provided
-    /// will act as a saturating add if it exceeds i64::MAX.
-    fn value_at_instant(&mut self, access_ins: Instant) -> Result<i64, ReputationError> {
-        // If we're below our count of windows, we only want to aggregate for the amount of windows we've tracked so
-        // far. If we've reached out count, we just use that because the average only tracks this number of windows.
-        let windows_tracked = self.windows_tracked(access_ins);
-        let window_divisor = f64::min(
-            // If less than one window has been tracked, this will be a fraction which will inflate our revenue so we
-            // just flatten it to 1.
-            // TODO: better strategy for first window?
-            if windows_tracked < 1.0 {
-                1.0
-            } else {
-                windows_tracked
-            },
-            self.window_count as f64,
-        );
-
-        // To give the value for this longer-running average over an equivalent two week period, we just divide it by
-        // the number of windows we're counting.
-        Ok((self
-            .aggregated_revenue_decaying
-            .value_at_instant(access_ins)? as f64
-            / window_divisor)
-            .round() as i64)
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -199,6 +111,7 @@ impl ForwardManagerImpl {
             ))?;
 
         let incoming_revenue_threshold = incoming_channel
+            .incoming_direction
             .revenue
             .value_at_instant(forward.added_at)?;
 
@@ -366,26 +279,19 @@ impl ReputationManager for ForwardManager {
                     .as_ref()
                     .map(|channel| (channel.outgoing_reputation, add_ins));
 
-                let revenue = match &channel_reputation {
-                    Some(channel) => {
-                        if channel.capacity_msat != capacity_msat {
-                            return Err(ReputationError::ErrChannelCapacityMismatch(
-                                capacity_msat,
-                                channel.capacity_msat,
-                            ));
-                        }
-
-                        let mut revenue =
-                            RevenueAverage::new(&self.params.reputation_params, add_ins);
-                        revenue.add_value(channel.incoming_revenue, add_ins)?;
-                        revenue
+                if let Some(ref channel) = channel_reputation {
+                    if channel.capacity_msat != capacity_msat {
+                        return Err(ReputationError::ErrChannelCapacityMismatch(
+                            capacity_msat,
+                            channel.capacity_msat,
+                        ));
                     }
-                    None => RevenueAverage::new(&self.params.reputation_params, add_ins),
-                };
+                }
 
                 v.insert(TrackedChannel {
                     capacity_msat,
                     incoming_direction: IncomingChannel::new(
+                        &self.params.reputation_params,
                         channel_id,
                         BucketParameters {
                             slot_count: general_slot_count,
@@ -399,12 +305,12 @@ impl ReputationManager for ForwardManager {
                             slot_count: protected_slot_count,
                             liquidity_msat: protected_liquidity_amount,
                         },
-                        self.params.reputation_params.revenue_window,
+                        add_ins,
                         channel_reputation.map(|snapshot| {
                             (
                                 snapshot.incoming_slot_utilization,
                                 snapshot.incoming_liquidity_utilization,
-                                add_ins,
+                                snapshot.incoming_revenue,
                             )
                         }),
                     )?,
@@ -412,7 +318,6 @@ impl ReputationManager for ForwardManager {
                         self.params.reputation_params,
                         outgoing_reputation,
                     )?,
-                    revenue,
                 });
 
                 Ok(())
@@ -562,6 +467,7 @@ impl ReputationManager for ForwardManager {
             .channels
             .get_mut(&outgoing_channel)
             .ok_or(ReputationError::ErrOutgoingNotFound(outgoing_channel))?
+            .incoming_direction
             .revenue
             .add_value(fee_i64, resolved_instant)?;
 
@@ -571,6 +477,7 @@ impl ReputationManager for ForwardManager {
             .ok_or(ReputationError::ErrIncomingNotFound(
                 incoming_ref.channel_id,
             ))?
+            .incoming_direction
             .revenue
             .add_value(fee_i64, resolved_instant)?;
 
@@ -603,7 +510,10 @@ impl ReputationManager for ForwardManager {
                     outgoing_reputation: channel
                         .outgoing_direction
                         .outgoing_reputation(access_ins)?,
-                    incoming_revenue: channel.revenue.value_at_instant(access_ins)?,
+                    incoming_revenue: channel
+                        .incoming_direction
+                        .revenue
+                        .value_at_instant(access_ins)?,
                     incoming_slot_utilization,
                     incoming_liquidity_utilization,
                 },
@@ -618,7 +528,7 @@ impl ReputationManager for ForwardManager {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{ForwardManagerParams, RevenueAverage};
+    use super::ForwardManagerParams;
     use crate::{
         forward_manager::{ForwardManager, SimulationDebugManager},
         AccountableSignal, ChannelSnapshot, FailureReason, ForwardingOutcome, HtlcRef,
@@ -658,91 +568,6 @@ mod tests {
             .incoming_direction;
         assert!(channel_0.general_bucket.params.slot_count == 0);
         assert!(channel_0.congestion_bucket.slot_count == 0);
-    }
-
-    #[test]
-    fn test_revenue_average() {
-        let params = ReputationParams {
-            revenue_window: Duration::from_secs(60 * 60 * 24 * 14),
-            reputation_multiplier: 10,
-            resolution_period: Duration::from_secs(90),
-            expected_block_speed: None,
-        };
-
-        let now = Instant::now();
-        let mut revenue_average = RevenueAverage::new(&params, now);
-
-        assert_eq!(revenue_average.value_at_instant(now).unwrap(), 0);
-
-        let value = 10_000;
-
-        // When we're right at the beginning our our tracking, revenue shouldn't be divided over multiple periods,
-        // because we haven't tracked that long yet.
-        revenue_average.add_value(value, now).unwrap();
-        assert_eq!(revenue_average.value_at_instant(now).unwrap(), value);
-
-        // Progress our timestamp to the end of the first window of time. We're testing the division of total revenue
-        // tracked over windows, not the actual decaying average, so we peek under the hood to get the value that we've
-        // decayed to and then assert that
-        let end_first_window = now.checked_add(params.revenue_window).unwrap();
-        let decayed_value = revenue_average
-            .aggregated_revenue_decaying
-            .value_at_instant(end_first_window)
-            .unwrap();
-
-        assert_eq!(
-            revenue_average.value_at_instant(end_first_window).unwrap(),
-            decayed_value
-        );
-
-        // Move to half way through the second window, the value should now be split between two periods. Again, we'll
-        // peek under at the decayed value and then check that it's being split over periods.
-        let half_second_window = end_first_window
-            .checked_add(params.revenue_window / 2)
-            .unwrap();
-        let decayed_value = revenue_average
-            .aggregated_revenue_decaying
-            .value_at_instant(half_second_window)
-            .unwrap();
-
-        assert_eq!(
-            revenue_average
-                .value_at_instant(half_second_window)
-                .unwrap(),
-            (decayed_value as f64 / 1.5).round() as i64,
-        );
-
-        // Finally, test that once we reach our total window count, we don't continue to divide by more and more
-        // windows.
-        let final_window = now
-            .checked_add(params.revenue_window * params.reputation_multiplier.into())
-            .unwrap();
-        let decayed_value = revenue_average
-            .aggregated_revenue_decaying
-            .value_at_instant(final_window)
-            .unwrap();
-
-        assert_eq!(
-            revenue_average.value_at_instant(final_window).unwrap(),
-            (decayed_value as f64 / params.reputation_multiplier as f64).round() as i64,
-        );
-
-        // Once we get beyond the window count, it's just the decay at play and we're using the count to divide our
-        // running average.
-        let beyond_final_window = now
-            .checked_add(params.revenue_window * params.reputation_multiplier.into() * 5)
-            .unwrap();
-        let decayed_value = revenue_average
-            .aggregated_revenue_decaying
-            .value_at_instant(beyond_final_window)
-            .unwrap();
-
-        assert_eq!(
-            revenue_average
-                .value_at_instant(beyond_final_window)
-                .unwrap(),
-            (decayed_value as f64 / params.reputation_multiplier as f64).round() as i64,
-        );
     }
 
     fn test_forward_manager_params() -> ForwardManagerParams {
