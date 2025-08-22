@@ -106,7 +106,7 @@ pub async fn build_reputation<R: ReputationMonitor>(
     let current_target_revenue = channels
         .get(&target_channel.1)
         .ok_or(format!("target channel {} not found", target_channel.1))?
-        .bidirectional_revenue;
+        .incoming_revenue;
 
     let current_attacker_reputation = channels
         .get(&last_hop_channel)
@@ -169,7 +169,7 @@ pub async fn build_reputation<R: ReputationMonitor>(
     let target_revenue = channels
         .get(&target_channel.1)
         .ok_or(format!("target channel {} not found", target_channel.1))?
-        .bidirectional_revenue;
+        .incoming_revenue;
 
     let attacker_reputation = channels
         .get(&last_hop_channel)

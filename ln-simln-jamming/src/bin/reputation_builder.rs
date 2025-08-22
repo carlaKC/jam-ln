@@ -160,7 +160,7 @@ async fn main() -> Result<(), BoxError> {
         "channel_capacity",
         "non_general_slots",
         "outgoing_reputation",
-        "bidirectional_revenue",
+        "incoming_revenue",
         "slot_utilization",
         "liquidity_utilization",
     ])?;
@@ -177,7 +177,7 @@ async fn main() -> Result<(), BoxError> {
                 channel.1.capacity_msat,
                 channel.1.non_general_slots,
                 channel.1.outgoing_reputation,
-                channel.1.bidirectional_revenue,
+                channel.1.incoming_revenue,
                 channel.1.incoming_slot_utilization,
                 channel.1.incoming_liquidity_utilization,
             ))?;

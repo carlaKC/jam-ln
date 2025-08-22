@@ -935,7 +935,7 @@ mod tests {
                 capacity_msat: edge.capacity_msat,
                 non_general_slots: 337, // 70% of slots.
                 outgoing_reputation: 0,
-                bidirectional_revenue: 0,
+                incoming_revenue: 0,
                 incoming_liquidity_utilization: 0.1,
                 incoming_slot_utilization: 0.5,
             };
@@ -943,7 +943,7 @@ mod tests {
                 capacity_msat: edge.capacity_msat,
                 non_general_slots: 337, // 70% of slots.
                 outgoing_reputation: 0,
-                bidirectional_revenue: 0,
+                incoming_revenue: 0,
                 incoming_liquidity_utilization: 0.0,
                 incoming_slot_utilization: 0.0,
             };
@@ -1051,13 +1051,7 @@ mod tests {
             .list_channels(Instant::now())
             .unwrap();
 
-        assert!(
-            bob_reputation
-                .get(&alice_to_bob)
-                .unwrap()
-                .bidirectional_revenue
-                != 0
-        );
+        assert!(bob_reputation.get(&alice_to_bob).unwrap().incoming_revenue != 0);
         assert!(
             bob_reputation
                 .get(&bob_to_carol)
@@ -1186,7 +1180,7 @@ mod tests {
             capacity_msat: edge.capacity_msat,
             non_general_slots: 100,
             outgoing_reputation: 0,
-            bidirectional_revenue: 0,
+            incoming_revenue: 0,
             incoming_liquidity_utilization: 0.0,
             incoming_slot_utilization: 0.0,
         };

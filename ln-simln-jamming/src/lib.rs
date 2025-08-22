@@ -161,7 +161,7 @@ fn count_reputation_pairs(
 
             **scid != outgoing_channel
                 && outgoing_channel_snapshot.outgoing_reputation
-                    >= snapshot.bidirectional_revenue + risk_margin.round() as i64
+                    >= snapshot.incoming_revenue + risk_margin.round() as i64
         })
         .count())
 }
@@ -250,7 +250,7 @@ mod tests {
                                 capacity_msat: 200_000,
                                 non_general_slots: 100,
                                 outgoing_reputation: 100,
-                                bidirectional_revenue: 15,
+                                incoming_revenue: 15,
                                 incoming_liquidity_utilization: 0.0,
                                 incoming_slot_utilization: 0.0,
                             },
@@ -261,7 +261,7 @@ mod tests {
                                 capacity_msat: 200_000,
                                 non_general_slots: 100,
                                 outgoing_reputation: 150,
-                                bidirectional_revenue: 110,
+                                incoming_revenue: 110,
                                 incoming_liquidity_utilization: 0.0,
                                 incoming_slot_utilization: 0.0,
                             },
@@ -272,7 +272,7 @@ mod tests {
                                 capacity_msat: 200_000,
                                 non_general_slots: 100,
                                 outgoing_reputation: 200,
-                                bidirectional_revenue: 90,
+                                incoming_revenue: 90,
                                 incoming_liquidity_utilization: 0.0,
                                 incoming_slot_utilization: 0.0,
                             },
@@ -283,7 +283,7 @@ mod tests {
                                 capacity_msat: 200_000,
                                 non_general_slots: 100,
                                 outgoing_reputation: 75,
-                                bidirectional_revenue: 100,
+                                incoming_revenue: 100,
                                 incoming_liquidity_utilization: 0.0,
                                 incoming_slot_utilization: 0.0,
                             },
@@ -297,7 +297,7 @@ mod tests {
                                 capacity_msat: 200_000,
                                 non_general_slots: 100,
                                 outgoing_reputation: 500,
-                                bidirectional_revenue: 15,
+                                incoming_revenue: 15,
                                 incoming_liquidity_utilization: 0.0,
                                 incoming_slot_utilization: 0.0,
                             },
@@ -308,7 +308,7 @@ mod tests {
                                 capacity_msat: 200_000,
                                 non_general_slots: 100,
                                 outgoing_reputation: 150,
-                                bidirectional_revenue: 600,
+                                incoming_revenue: 600,
                                 incoming_liquidity_utilization: 0.0,
                                 incoming_slot_utilization: 0.0,
                             },
@@ -319,7 +319,7 @@ mod tests {
                                 capacity_msat: 200_000,
                                 non_general_slots: 100,
                                 outgoing_reputation: 200,
-                                bidirectional_revenue: 250,
+                                incoming_revenue: 250,
                                 incoming_liquidity_utilization: 0.0,
                                 incoming_slot_utilization: 0.0,
                             },
@@ -333,7 +333,7 @@ mod tests {
                                 capacity_msat: 200_000,
                                 non_general_slots: 100,
                                 outgoing_reputation: 1000,
-                                bidirectional_revenue: 50,
+                                incoming_revenue: 50,
                                 incoming_liquidity_utilization: 0.0,
                                 incoming_slot_utilization: 0.0,
                             },
@@ -344,7 +344,7 @@ mod tests {
                                 capacity_msat: 200_000,
                                 non_general_slots: 100,
                                 outgoing_reputation: 350,
-                                bidirectional_revenue: 800,
+                                incoming_revenue: 800,
                                 incoming_liquidity_utilization: 0.0,
                                 incoming_slot_utilization: 0.0,
                             },
@@ -357,7 +357,7 @@ mod tests {
                             capacity_msat: 200_000,
                             non_general_slots: 100,
                             outgoing_reputation: 1000,
-                            bidirectional_revenue: 50,
+                            incoming_revenue: 50,
                             incoming_liquidity_utilization: 0.0,
                             incoming_slot_utilization: 0.0,
                         },

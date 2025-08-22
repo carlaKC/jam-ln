@@ -377,7 +377,7 @@ impl ReputationManager for ForwardManager {
 
                         let mut revenue =
                             RevenueAverage::new(&self.params.reputation_params, add_ins);
-                        revenue.add_value(channel.bidirectional_revenue, add_ins)?;
+                        revenue.add_value(channel.incoming_revenue, add_ins)?;
                         revenue
                     }
                     None => RevenueAverage::new(&self.params.reputation_params, add_ins),
@@ -603,7 +603,7 @@ impl ReputationManager for ForwardManager {
                     outgoing_reputation: channel
                         .outgoing_direction
                         .outgoing_reputation(access_ins)?,
-                    bidirectional_revenue: channel.revenue.value_at_instant(access_ins)?,
+                    incoming_revenue: channel.revenue.value_at_instant(access_ins)?,
                     incoming_slot_utilization,
                     incoming_liquidity_utilization,
                 },
@@ -777,7 +777,7 @@ mod tests {
             capacity_msat: 10_000_000,
             non_general_slots: 100,
             outgoing_reputation: 1000,
-            bidirectional_revenue: 500,
+            incoming_revenue: 500,
             incoming_liquidity_utilization: 0.0,
             incoming_slot_utilization: 0.0,
         };
@@ -807,7 +807,7 @@ mod tests {
         // Check values on 2nd channel added from snapshot
         assert!(channels.get(&1).unwrap().capacity_msat == channel_capacity);
         assert!(channels.get(&1).unwrap().outgoing_reputation == 1000);
-        assert!(channels.get(&1).unwrap().bidirectional_revenue == 500);
+        assert!(channels.get(&1).unwrap().incoming_revenue == 500);
 
         assert!(fwd_manager.remove_channel(0).is_ok());
         assert!(
@@ -877,7 +877,7 @@ mod tests {
             capacity_msat: channel_capacity,
             non_general_slots: 100,
             outgoing_reputation: 10_000_000,
-            bidirectional_revenue: 1_000_000,
+            incoming_revenue: 1_000_000,
             incoming_liquidity_utilization: 0.0,
             incoming_slot_utilization: 0.0,
         };
@@ -929,7 +929,7 @@ mod tests {
             capacity_msat: channel_capacity,
             non_general_slots: 100,
             outgoing_reputation: 10_000_000,
-            bidirectional_revenue: 1_000_000,
+            incoming_revenue: 1_000_000,
             incoming_liquidity_utilization: 0.0,
             incoming_slot_utilization: 0.0,
         };
