@@ -460,17 +460,8 @@ impl ReputationManager for ForwardManager {
             return Ok(());
         }
 
-        // If the htlc was settled, update *both* the outgoing and incoming channel's revenue trackers.
+        // If the htlc was settled, update the incoming channel's revenue.
         let fee_i64 = i64::try_from(in_flight.fee_msat).unwrap_or(i64::MAX);
-
-        inner_lock
-            .channels
-            .get_mut(&outgoing_channel)
-            .ok_or(ReputationError::ErrOutgoingNotFound(outgoing_channel))?
-            .incoming_direction
-            .revenue
-            .add_value(fee_i64, resolved_instant)?;
-
         inner_lock
             .channels
             .get_mut(&incoming_ref.channel_id)
