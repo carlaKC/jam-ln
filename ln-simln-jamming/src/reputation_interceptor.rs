@@ -128,6 +128,7 @@ where
     pub fn new_for_network(
         params: ForwardManagerParams,
         edges: &[NetworkParser],
+        now: Instant,
         clock: Arc<SimulationClock>,
         results: Option<Arc<Mutex<R>>>,
     ) -> Result<Self, BoxError> {
@@ -142,7 +143,7 @@ where
                         let _ = forward_manager.add_channel(
                             $channel.scid.into(),
                             $channel.capacity_msat,
-                            clock.now(),
+                            now,
                             None,
                         )?;
 
@@ -152,7 +153,7 @@ where
                         let _ = e.get_mut().forward_manager.add_channel(
                             $channel.scid.into(),
                             $channel.capacity_msat,
-                            clock.now(),
+                            now,
                             None,
                         )?;
                     }
@@ -976,19 +977,14 @@ mod tests {
     #[tokio::test]
     async fn test_new_for_network_node_creation() {
         let (params, edges, _) = setup_three_hop_network_edges();
-
+        let clock = Arc::new(SimulationClock::new(1).unwrap());
+        let now = InstantClock::now(&*clock);
         let interceptor: ReputationInterceptor<BatchForwardWriter, ForwardManager> =
-            ReputationInterceptor::new_for_network(
-                params,
-                &edges,
-                Arc::new(SimulationClock::new(1).unwrap()),
-                None,
-            )
-            .unwrap();
+            ReputationInterceptor::new_for_network(params, &edges, now, clock, None).unwrap();
 
         // Alice only has one channel tracked.
         let alice_channels = interceptor
-            .list_channels(edges[0].node_1.pubkey, Instant::now())
+            .list_channels(edges[0].node_1.pubkey, now)
             .await
             .unwrap();
         assert_eq!(alice_channels.len(), 1);
@@ -996,7 +992,7 @@ mod tests {
 
         // Bob has two channels tracked.
         let bob_channels = interceptor
-            .list_channels(edges[1].node_1.pubkey, Instant::now())
+            .list_channels(edges[1].node_1.pubkey, now)
             .await
             .unwrap();
 
@@ -1007,7 +1003,7 @@ mod tests {
 
         // Carol has one channel tracked.
         let carol_channels = interceptor
-            .list_channels(edges[1].node_2.pubkey, Instant::now())
+            .list_channels(edges[1].node_2.pubkey, now)
             .await
             .unwrap();
         assert_eq!(carol_channels.len(), 1);
@@ -1039,14 +1035,10 @@ mod tests {
 
         // Create an interceptor that is intended to general jam payments on Bob -> Carol in the three hop network
         // Alice -> Bob -> Carol.
+        let clock = Arc::new(SimulationClock::new(1).unwrap());
+        let now = InstantClock::now(&*clock);
         let mut interceptor: ReputationInterceptor<BatchForwardWriter, ForwardManager> =
-            ReputationInterceptor::new_for_network(
-                params,
-                &edges,
-                Arc::new(SimulationClock::new(1).unwrap()),
-                None,
-            )
-            .unwrap();
+            ReputationInterceptor::new_for_network(params, &edges, now, clock, None).unwrap();
 
         interceptor
             .bootstrap_network_history(&BootstrapRecords {

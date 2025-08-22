@@ -269,6 +269,7 @@ mod tests {
         attacks::utils::{
             build_custom_route, build_reputation, BuildReputationParams, CLTV_OFFSET_LDK,
         },
+        clock::InstantClock,
         records_from_signal,
         reputation_interceptor::{ChannelJammer, ReputationInterceptor},
         test_utils::{get_random_keypair, setup_test_edge},
@@ -432,8 +433,9 @@ mod tests {
         let target_channel_id: u64 = edges[2].scid.into();
 
         let clock = Arc::new(SimulationClock::new(1).unwrap());
+        let now = InstantClock::now(&*clock);
         let reputation_interceptor: ReputationInterceptor<BatchForwardWriter, ForwardManager> =
-            ReputationInterceptor::new_for_network(params, &edges, Arc::clone(&clock), None)
+            ReputationInterceptor::new_for_network(params, &edges, now, Arc::clone(&clock), None)
                 .unwrap();
 
         let network_graph = {

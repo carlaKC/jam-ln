@@ -60,6 +60,7 @@ async fn main() -> Result<(), BoxError> {
     let network_dir = SimulationFiles::new(cli.network.network_dir.clone(), cli.traffic_type)?;
 
     let clock = Arc::new(SimulationClock::new(1000)?);
+    let now = InstantClock::now(&*clock);
     let tasks = TaskTracker::new();
 
     // Forwarding traffic can either be created for the peacetime or attacktime graphs. We'll
@@ -74,6 +75,7 @@ async fn main() -> Result<(), BoxError> {
     let reputation_interceptor = Arc::new(ReputationInterceptor::new_for_network(
         cli.reputation_params.into(),
         &network_dir.sim_network,
+        now,
         clock.clone(),
         Some(Arc::new(Mutex::new(BootstrapWriter::new(
             clock.clone(),

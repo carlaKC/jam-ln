@@ -121,11 +121,13 @@ async fn main() -> Result<(), BoxError> {
     };
 
     let clock = Arc::new(SimulationClock::new(1)?);
+    let now = InstantClock::now(&*clock);
     let reputation_clock = Arc::clone(&clock);
     let mut reputation_interceptor: ReputationInterceptor<BatchForwardWriter, ForwardManager> =
         ReputationInterceptor::new_for_network(
             forward_params,
             &network_dir.sim_network,
+            now,
             reputation_clock,
             None,
         )?;
