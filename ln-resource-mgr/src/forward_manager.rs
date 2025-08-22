@@ -121,12 +121,7 @@ pub struct ForwardManagerParams {
 impl Default for ForwardManagerParams {
     fn default() -> Self {
         ForwardManagerParams {
-            reputation_params: ReputationParams {
-                revenue_window: Duration::from_secs(60 * 60 * 24 * 14),
-                reputation_multiplier: 12,
-                resolution_period: Duration::from_secs(90),
-                expected_block_speed: Some(Duration::from_secs(10 * 60)),
-            },
+            reputation_params: ReputationParams::default(),
             general_slot_portion: 30,
             general_liquidity_portion: 30,
             congestion_slot_portion: 20,

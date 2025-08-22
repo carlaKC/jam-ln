@@ -28,6 +28,17 @@ pub struct ReputationParams {
     pub expected_block_speed: Option<Duration>,
 }
 
+impl Default for ReputationParams {
+    fn default() -> Self {
+        ReputationParams {
+            revenue_window: Duration::from_secs(60 * 60 * 24 * 14),
+            reputation_multiplier: 12,
+            resolution_period: Duration::from_secs(90),
+            expected_block_speed: Some(Duration::from_secs(10 * 60)),
+        }
+    }
+}
+
 impl ReputationParams {
     /// Calculates the opportunity_cost of a htlc being held on our channel - allowing one [`reputation_period`]'s
     /// grace period, then charging for every subsequent period.

@@ -622,7 +622,7 @@ mod tests {
     };
     use ln_resource_mgr::{
         AccountableSignal, AllocationCheck, ChannelSnapshot, ForwardResolution, ForwardingOutcome,
-        HtlcRef, ProposedForward, ReputationError, ReputationManager, ReputationParams,
+        HtlcRef, ProposedForward, ReputationError, ReputationManager,
     };
     use mockall::mock;
     use sim_cli::parsing::NetworkParser;
@@ -631,7 +631,7 @@ mod tests {
     use simln_lib::ShortChannelID;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
     use tokio::sync::Mutex;
 
     use crate::analysis::BatchForwardWriter;
@@ -923,19 +923,7 @@ mod tests {
         let alice_bob = ShortChannelID::from(1);
         let bob_carol = ShortChannelID::from(2);
 
-        let params = ForwardManagerParams {
-            reputation_params: ReputationParams {
-                revenue_window: Duration::from_secs(60),
-                reputation_multiplier: 60,
-                resolution_period: Duration::from_secs(90),
-                expected_block_speed: None,
-            },
-            general_slot_portion: 30,
-            general_liquidity_portion: 30,
-            congestion_slot_portion: 20,
-            congestion_liquidity_portion: 20,
-        };
-
+        let params = ForwardManagerParams::default();
         let edges = vec![
             setup_test_edge(alice_bob, alice, bob),
             setup_test_edge(bob_carol, bob, carol),
