@@ -188,12 +188,12 @@ where
         edges: &[NetworkParser],
         reputation_snapshot: HashMap<PublicKey, HashMap<u64, ChannelSnapshot>>,
         no_reputation: HashSet<PublicKey>,
+        now: Instant,
         clock: Arc<SimulationClock>,
         results: Option<Arc<Mutex<R>>>,
     ) -> Result<Self, BoxError> {
         let mut network_nodes = HashMap::with_capacity(reputation_snapshot.len());
 
-        let add_ins = clock.now();
         macro_rules! add_node_to_network {
             ($channel:expr, $node:tt, $counterparty:tt) => {{
                 let scid = $channel.scid.into();
@@ -235,7 +235,7 @@ where
                         forward_manager.add_channel(
                             scid,
                             $channel.capacity_msat,
-                            add_ins,
+                            now,
                             snapshot,
                         )?;
                         e.insert(Node::new(forward_manager, alias));
@@ -244,7 +244,7 @@ where
                         e.get_mut().forward_manager.add_channel(
                             scid,
                             $channel.capacity_msat,
-                            add_ins,
+                            now,
                             snapshot,
                         )?;
                     }
@@ -1138,6 +1138,7 @@ mod tests {
         let (params, edges, reputation_snapshot) = setup_three_hop_network_edges();
 
         let clock = Arc::new(SimulationClock::new(1).unwrap());
+        let now = InstantClock::now(&*clock);
         let interceptor: Result<
             ReputationInterceptor<BatchForwardWriter, ForwardManager>,
             BoxError,
@@ -1146,6 +1147,7 @@ mod tests {
             &edges,
             reputation_snapshot.clone(),
             HashSet::new(),
+            now,
             clock.clone(),
             None,
         )
@@ -1163,7 +1165,7 @@ mod tests {
                 .get(&edge.node_1.pubkey)
                 .unwrap()
                 .forward_manager
-                .list_channels(InstantClock::now(&*clock))
+                .list_channels(now)
                 .unwrap();
             let snapshot_channels_1 = reputation_snapshot.get(&edge.node_1.pubkey).unwrap();
             assert_eq!(&node_1_channels, snapshot_channels_1);
@@ -1175,7 +1177,7 @@ mod tests {
                 .get(&edge.node_2.pubkey)
                 .unwrap()
                 .forward_manager
-                .list_channels(InstantClock::now(&*clock))
+                .list_channels(now)
                 .unwrap();
             let snapshot_channels_2 = reputation_snapshot.get(&edge.node_2.pubkey).unwrap();
             assert_eq!(&node_2_channels, snapshot_channels_2)
@@ -1205,6 +1207,8 @@ mod tests {
             .or_default()
             .insert(edge.scid.into(), node_1_snapshot);
 
+        let clock = Arc::new(SimulationClock::new(1).unwrap());
+        let now = InstantClock::now(&*clock);
         let interceptor: Result<
             ReputationInterceptor<BatchForwardWriter, ForwardManager>,
             BoxError,
@@ -1213,7 +1217,8 @@ mod tests {
             &edges,
             reputation_snapshot,
             HashSet::new(),
-            Arc::new(SimulationClock::new(1).unwrap()),
+            now,
+            clock,
             None,
         )
         .await;
@@ -1233,6 +1238,8 @@ mod tests {
         let edge = &edges[0];
         reputation_snapshot.entry(edge.node_1.pubkey).or_default();
 
+        let clock = Arc::new(SimulationClock::new(1).unwrap());
+        let now = InstantClock::now(&*clock);
         let interceptor: Result<
             ReputationInterceptor<BatchForwardWriter, ForwardManager>,
             BoxError,
@@ -1241,7 +1248,8 @@ mod tests {
             &edges,
             reputation_snapshot,
             HashSet::new(),
-            Arc::new(SimulationClock::new(1).unwrap()),
+            now,
+            clock,
             None,
         )
         .await;
@@ -1262,6 +1270,8 @@ mod tests {
             .unwrap();
         channel_snapshot.capacity_msat = 1000;
 
+        let clock = Arc::new(SimulationClock::new(1).unwrap());
+        let now = InstantClock::now(&*clock);
         let interceptor: Result<
             ReputationInterceptor<BatchForwardWriter, ForwardManager>,
             BoxError,
@@ -1270,7 +1280,8 @@ mod tests {
             &edges,
             reputation_snapshot,
             HashSet::new(),
-            Arc::new(SimulationClock::new(1).unwrap()),
+            now,
+            clock,
             None,
         )
         .await;
@@ -1289,6 +1300,8 @@ mod tests {
             .unwrap();
         channels.remove(&edges[0].scid.into()).unwrap();
 
+        let clock = Arc::new(SimulationClock::new(1).unwrap());
+        let now = InstantClock::now(&*clock);
         let interceptor: Result<
             ReputationInterceptor<BatchForwardWriter, ForwardManager>,
             BoxError,
@@ -1297,7 +1310,8 @@ mod tests {
             &edges,
             reputation_snapshot,
             HashSet::new(),
-            Arc::new(SimulationClock::new(1).unwrap()),
+            now,
+            clock,
             None,
         )
         .await;
