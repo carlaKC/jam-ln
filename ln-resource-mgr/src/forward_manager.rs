@@ -18,9 +18,7 @@ struct TrackedChannel {
     capacity_msat: u64,
     outgoing_direction: OutgoingChannel,
     incoming_direction: IncomingChannel,
-    /// Tracks the revenue that this channel has been responsible for, considering htlcs where the channel has been the
-    /// incoming or outgoing forwarding channel.
-    bidirectional_revenue: RevenueAverage,
+    channel_revenue: RevenueAverage,
 }
 
 /// Tracks the average bi-directional revenue of a channel over multiple windows of time to smooth out this value over
@@ -189,7 +187,7 @@ impl ForwardManagerImpl {
             ))?;
 
         let incoming_revenue_threshold = incoming_channel
-            .bidirectional_revenue
+            .channel_revenue
             .value_at_instant(forward.added_at)?;
 
         Ok(AllocationCheck {
@@ -391,7 +389,7 @@ impl ReputationManager for ForwardManager {
                         self.params.reputation_params,
                         outgoing_reputation,
                     )?,
-                    bidirectional_revenue: revenue,
+                    channel_revenue: revenue,
                 });
 
                 Ok(())
@@ -535,7 +533,7 @@ impl ReputationManager for ForwardManager {
             .channels
             .get_mut(&outgoing_channel)
             .ok_or(ReputationError::ErrOutgoingNotFound(outgoing_channel))?
-            .bidirectional_revenue
+            .channel_revenue
             .add_value(fee_i64, resolved_instant)?;
 
         inner_lock
@@ -544,7 +542,7 @@ impl ReputationManager for ForwardManager {
             .ok_or(ReputationError::ErrIncomingNotFound(
                 incoming_ref.channel_id,
             ))?
-            .bidirectional_revenue
+            .channel_revenue
             .add_value(fee_i64, resolved_instant)?;
 
         Ok(())
@@ -572,7 +570,7 @@ impl ReputationManager for ForwardManager {
                         .outgoing_direction
                         .outgoing_reputation(access_ins)?,
                     bidirectional_revenue: channel
-                        .bidirectional_revenue
+                        .channel_revenue
                         .value_at_instant(access_ins)?,
                 },
             );
