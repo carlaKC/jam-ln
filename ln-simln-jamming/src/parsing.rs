@@ -162,7 +162,10 @@ impl SimulationFiles {
     /// Returns the location of a reputation and target revenue summary for the period of time
     /// that the attacker in the network is bootstrapped for, creating sub-directories to hold
     /// these files is necessary.
-    pub fn reputation_summary(&self, duration: Option<Duration>) -> (PathBuf, PathBuf) {
+    pub fn reputation_summary(
+        &self,
+        duration: Option<Duration>,
+    ) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
         let reputation_dir = self
             .dir
             .join("reputation")
@@ -174,6 +177,8 @@ impl SimulationFiles {
         (
             reputation_dir.join("reputation_summary.csv"),
             reputation_dir.join("target_revenue.txt"),
+            reputation_dir.join("target_reputation.txt"),
+            reputation_dir.join("attacker_reputation.txt"),
         )
     }
 
@@ -185,6 +190,50 @@ impl SimulationFiles {
     /// Returns the location of the file used to generate reputation snapshots from.
     pub fn attacktime_traffic(&self) -> PathBuf {
         self.dir.join("attacktime_traffic.csv")
+    }
+
+    // Returns a map of the target's channels to their pubkey and alias.
+    pub fn target_channels(&self) -> HashMap<u64, (PublicKey, String)> {
+        self.get_channels(self.target.1)
+    }
+
+    // Returns a map of attacker channel scid to the pubkey and alias of its peer. Note that
+    // for multiple attackers, all channels are merged to one hashmap.
+    pub fn attacker_channels(&self) -> Result<HashMap<u64, (PublicKey, String)>, BoxError> {
+        self.attackers
+            .iter()
+            .try_fold(HashMap::new(), |mut acc, (_, pubkey)| {
+                for (scid, channel_info) in self.get_channels(*pubkey) {
+                    if acc.contains_key(&scid) {
+                        // TODO: attacking nodes could possibly want to share a scid, so we
+                        // should allow this if the channel is with another attacker.
+                        return Err(format!("Duplicate scid {} found", scid).into());
+                    }
+                    acc.insert(scid, channel_info);
+                }
+                Ok(acc)
+            })
+    }
+
+    fn get_channels(&self, pubkey: PublicKey) -> HashMap<u64, (PublicKey, String)> {
+        self.sim_network
+            .iter()
+            .filter_map(|channel| {
+                if channel.node_1.pubkey == pubkey {
+                    Some((
+                        channel.scid.into(),
+                        (channel.node_2.pubkey, channel.node_2.alias.clone()),
+                    ))
+                } else if channel.node_2.pubkey == pubkey {
+                    Some((
+                        channel.scid.into(),
+                        (channel.node_1.pubkey, channel.node_1.alias.clone()),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }
 
@@ -329,8 +378,6 @@ where
     R: ReputationMonitor + Send + Sync + 'static,
     M: PeacetimeRevenueMonitor + Send + Sync + 'static,
 {
-    let sim_network = simulation.sim_network.clone();
-
     // NOTE: If you are implementing your own attack and have added the variant to AttackType, you can
     // then do any setup specific to your attack here and return.
     match cli.attack {
@@ -339,9 +386,18 @@ where
                 simulation.attackers.iter().map(|a| a.1).collect();
             let attack = Arc::new(SinkAttack::new(
                 clock,
-                &sim_network,
                 simulation.target.1,
                 attacker_pubkeys,
+                simulation
+                    .target_channels()
+                    .iter()
+                    .map(|(k, v)| (*k, v.0))
+                    .collect(),
+                simulation
+                    .attacker_channels()?
+                    .iter()
+                    .map(|(k, v)| (*k, v.0))
+                    .collect(),
                 risk_margin,
                 reputation_monitor,
                 revenue_monitor,
