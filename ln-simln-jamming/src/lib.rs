@@ -20,6 +20,9 @@ pub(crate) mod test_utils;
 /// Error type for errors that can be erased, includes 'static so that down-casting is possible.
 pub type BoxError = Box<dyn Error + Send + Sync + 'static>;
 
+/// The default CLTV delta that we assume for channels in the network.
+pub const DEFAULT_CLTV_DELTA: u32 = 80;
+
 /// The TLV type used to represent experimental accountable signals.
 pub const ACCOUNTABLE_TYPE: u64 = 106823;
 

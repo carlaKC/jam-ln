@@ -134,24 +134,26 @@ where
         let mut network_nodes: HashMap<PublicKey, Node<ForwardManager>> = HashMap::new();
 
         macro_rules! add_node_to_network {
-            ($network_nodes:expr, $node_pubkey:expr, $node_alias:expr, $channel:expr) => {
-                match $network_nodes.entry($node_pubkey) {
+            ($network_nodes:expr, $channel:expr, $policy:expr) => {
+                match $network_nodes.entry($policy.pubkey) {
                     Entry::Vacant(e) => {
                         let forward_manager = ForwardManager::new(params);
 
                         let _ = forward_manager.add_channel(
                             $channel.scid.into(),
                             $channel.capacity_msat,
+                            $policy.cltv_expiry_delta,
                             clock.now(),
                             None,
                         )?;
 
-                        e.insert(Node::new(forward_manager, $node_alias));
+                        e.insert(Node::new(forward_manager, $policy.alias.clone()));
                     }
                     Entry::Occupied(mut e) => {
                         let _ = e.get_mut().forward_manager.add_channel(
                             $channel.scid.into(),
                             $channel.capacity_msat,
+                            $policy.cltv_expiry_delta,
                             clock.now(),
                             None,
                         )?;
@@ -161,18 +163,8 @@ where
         }
 
         for channel in edges {
-            add_node_to_network!(
-                network_nodes,
-                channel.node_1.pubkey,
-                channel.node_1.alias.clone(),
-                channel
-            );
-            add_node_to_network!(
-                network_nodes,
-                channel.node_2.pubkey,
-                channel.node_2.alias.clone(),
-                channel
-            );
+            add_node_to_network!(network_nodes, channel, channel.node_1);
+            add_node_to_network!(network_nodes, channel, channel.node_2);
         }
 
         Ok(Self {
@@ -234,6 +226,7 @@ where
                         forward_manager.add_channel(
                             scid,
                             $channel.capacity_msat,
+							$channel.$node.cltv_expiry_delta,
                             add_ins,
                             snapshot,
                         )?;
@@ -243,6 +236,7 @@ where
                         e.get_mut().forward_manager.add_channel(
                             scid,
                             $channel.capacity_msat,
+							$channel.$node.cltv_expiry_delta,
                             add_ins,
                             snapshot,
                         )?;
@@ -657,6 +651,7 @@ mod tests {
                 &self,
                 channel_id: u64,
                 capacity_msat: u64,
+                cltv_expiry_delta: u32,
                 add_ins: Instant,
                 channel_reputation: Option<ChannelSnapshot>
             ) -> Result<(), ln_resource_mgr::ReputationError>;

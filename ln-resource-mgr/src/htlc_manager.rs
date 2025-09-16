@@ -9,6 +9,7 @@ pub(super) struct InFlightHtlc {
     pub(super) outgoing_channel_id: u64,
     pub(super) fee_msat: u64,
     pub(super) hold_blocks: u32,
+    pub(super) cltv_expiry_delta: u32,
     pub(super) incoming_amt_msat: u64,
     pub(super) added_instant: Instant,
     pub(super) outgoing_accountable: AccountableSignal,
@@ -35,12 +36,17 @@ impl ReputationParams {
         (hold_time.as_secs() / self.resolution_period.as_secs()).saturating_mul(fee_msat)
     }
 
-    /// Calculates the worst case reputation damage of a htlc, assuming it'll be held for its full expiry_delta.
-    pub fn htlc_risk(&self, fee_msat: u64, expiry_delta: u32) -> u64 {
+    /// Calculates the worst case reputation damage of a htlc if it is held until its expiry.
+    pub fn htlc_risk(&self, fee_msat: u64, htlc_hold_blocks: u32, cltv_expiry_delta: u32) -> u64 {
+        assert!(
+            htlc_hold_blocks >= cltv_expiry_delta,
+            "htlc must always be held for at least our specified delta"
+        );
         let max_hold_time = self
             .expected_block_speed
             .unwrap_or_else(|| Duration::from_secs(60 * 10))
-            * expiry_delta;
+            * htlc_hold_blocks
+            / cltv_expiry_delta;
 
         self.opportunity_cost(fee_msat, max_hold_time)
     }
@@ -143,7 +149,10 @@ impl InFlightManager {
                     ChannelFilter::OutgoingChannel(scid) => v.outgoing_channel_id == scid,
                 }
             })
-            .map(|(_, v)| self.params.htlc_risk(v.fee_msat, v.hold_blocks))
+            .map(|(_, v)| {
+                self.params
+                    .htlc_risk(v.fee_msat, v.hold_blocks, v.cltv_expiry_delta)
+            })
             .sum()
     }
 
@@ -215,6 +224,7 @@ mod tests {
         InFlightHtlc {
             outgoing_channel_id: outgoing_channel,
             hold_blocks: 1000,
+            cltv_expiry_delta: 40,
             incoming_amt_msat: 2000,
             fee_msat,
             added_instant: Instant::now(),
@@ -343,7 +353,7 @@ mod tests {
         let htlc_1 = get_test_htlc(channel_1, true, ResourceBucketType::Protected, 1000);
         let htlc_1_risk = tracker
             .params
-            .htlc_risk(htlc_1.fee_msat, htlc_1.hold_blocks);
+            .htlc_risk(htlc_1.fee_msat, htlc_1.hold_blocks, 40);
 
         // Accountable htlc contribute to in flight risk and count despite general bucket, 0 -> 1.
         let htlc_2_ref = HtlcRef {
@@ -353,7 +363,7 @@ mod tests {
         let htlc_2 = get_test_htlc(channel_0, true, ResourceBucketType::General, 5000);
         let htlc_2_risk = tracker
             .params
-            .htlc_risk(htlc_2.fee_msat, htlc_2.hold_blocks);
+            .htlc_risk(htlc_2.fee_msat, htlc_2.hold_blocks, 40);
 
         // Unaccountable htlc no contribution to in flight risk, 1 -> 2.
         let htlc_3_ref = HtlcRef {
@@ -370,7 +380,7 @@ mod tests {
         let htlc_4 = get_test_htlc(channel_2, true, ResourceBucketType::Congestion, 1250);
         let htlc_4_risk = tracker
             .params
-            .htlc_risk(htlc_4.fee_msat, htlc_4.hold_blocks);
+            .htlc_risk(htlc_4.fee_msat, htlc_4.hold_blocks, 40);
 
         assert!(tracker.add_htlc(htlc_1_ref, htlc_1).is_ok());
         assert!(tracker.add_htlc(htlc_2_ref, htlc_2).is_ok());

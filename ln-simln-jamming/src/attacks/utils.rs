@@ -17,7 +17,9 @@ use simln_lib::{
 use tokio::sync::Mutex;
 use triggered::Listener;
 
-use crate::{clock::InstantClock, reputation_interceptor::ReputationMonitor, BoxError};
+use crate::{
+    clock::InstantClock, reputation_interceptor::ReputationMonitor, BoxError, DEFAULT_CLTV_DELTA,
+};
 
 // When calculating the fee we should pay to build_reputation, we'll add this offset to account
 // for the random one that LDK adds in `build_route_from_hops`.
@@ -218,9 +220,11 @@ fn fee_to_build_reputation(
                     .sum();
 
                 let target_hop = &path.hops[target_idx];
-                let current_htlc_risk = forward_params
-                    .reputation_params
-                    .htlc_risk(target_hop.fee_msat, cltv_expiry + CLTV_OFFSET_LDK);
+                let current_htlc_risk = forward_params.reputation_params.htlc_risk(
+                    target_hop.fee_msat,
+                    cltv_expiry + CLTV_OFFSET_LDK,
+                    DEFAULT_CLTV_DELTA, // TODO: this should be more accurate!
+                );
 
                 total_htlc_risk += current_htlc_risk;
             }
@@ -273,6 +277,7 @@ mod tests {
         records_from_signal,
         reputation_interceptor::{ChannelJammer, ReputationInterceptor},
         test_utils::{get_random_keypair, setup_test_edge},
+        DEFAULT_CLTV_DELTA,
     };
 
     fn build_route_with_target_hop(
@@ -352,11 +357,11 @@ mod tests {
                 risk += fwd_params.reputation_params.htlc_risk(
                     (*htlc as f64 * fee_pct) as u64,
                     expiry_delta + CLTV_OFFSET_LDK,
+                    DEFAULT_CLTV_DELTA,
                 );
             }
             risk
         };
-
         let cases = vec![
             // The fee that we expect to pay is the sum of:
             // - Revenue/reputation diff -> 1000000 - 700000 = 300000
@@ -384,9 +389,9 @@ mod tests {
             TestCase {
                 htlc_amounts,
                 channel_revenue: 1_000_000,
-                peer_reputation: 1_010_000,
-                fee_buffer: 1_000,
-                expected_fee: htlc_risk + 1_000 - 10_000,
+                peer_reputation: 1_000_200,
+                fee_buffer: 1000,
+                expected_fee: htlc_risk + 1000 - 200,
                 expected_risk: htlc_risk,
             },
         ];

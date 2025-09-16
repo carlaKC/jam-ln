@@ -12,7 +12,8 @@ use ln_simln_jamming::revenue_interceptor::{
     PeacetimeRevenueMonitor, RevenueInterceptor, RevenueSnapshot,
 };
 use ln_simln_jamming::{
-    get_network_reputation, BoxError, NetworkReputation, ACCOUNTABLE_TYPE, UPGRADABLE_TYPE,
+    get_network_reputation, BoxError, NetworkReputation, ACCOUNTABLE_TYPE, DEFAULT_CLTV_DELTA,
+    UPGRADABLE_TYPE,
 };
 use log::LevelFilter;
 use sim_cli::parsing::{create_simulation_with_network, SimParams};
@@ -176,6 +177,7 @@ async fn main() -> Result<(), BoxError> {
     let risk_margin = forward_params.reputation_params.htlc_risk(
         1000 + (0.0001 * cli.reputation_margin_msat as f64) as u64,
         cli.reputation_margin_expiry_blocks,
+        DEFAULT_CLTV_DELTA,
     );
 
     // Next, setup the attack interceptor to use our custom attack.

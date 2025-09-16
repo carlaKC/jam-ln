@@ -123,6 +123,7 @@ mod tests {
         InFlightHtlc {
             outgoing_channel_id: 1,
             hold_blocks: 1000,
+            cltv_expiry_delta: 100,
             incoming_amt_msat: 2000,
             fee_msat,
             added_instant: Instant::now(),

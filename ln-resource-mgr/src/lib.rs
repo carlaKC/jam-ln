@@ -545,6 +545,7 @@ pub trait ReputationManager {
         &self,
         channel_id: u64,
         capacity_msat: u64,
+        cltv_expiry_delta: u32,
         add_ins: Instant,
         channel_reputation: Option<ChannelSnapshot>,
     ) -> Result<(), ReputationError>;

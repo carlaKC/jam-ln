@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 #[derive(Debug)]
 struct TrackedChannel {
     capacity_msat: u64,
+    cltv_expiry_delta: u32,
     outgoing_direction: OutgoingChannel,
     incoming_direction: IncomingChannel,
     /// Tracks the revenue that this channel has been responsible for, considering htlcs where the channel has been the
@@ -162,14 +163,12 @@ impl ForwardManagerImpl {
         forward.validate()?;
 
         // Check reputation and resources available for the forward.
-        let outgoing_channel = &mut self
-            .channels
-            .get_mut(&forward.outgoing_channel_id)
-            .ok_or(ReputationError::ErrOutgoingNotFound(
-                forward.outgoing_channel_id,
-            ))?
-            .outgoing_direction;
+        let outgoing_channel_tracked = self.channels.get_mut(&forward.outgoing_channel_id).ok_or(
+            ReputationError::ErrOutgoingNotFound(forward.outgoing_channel_id),
+        )?;
+        let cltv_expiry_delta = outgoing_channel_tracked.cltv_expiry_delta;
 
+        let outgoing_channel = &mut outgoing_channel_tracked.outgoing_direction;
         let no_congestion_misuse = outgoing_channel.no_congestion_misuse(forward.added_at);
         let outgoing_reputation = outgoing_channel.outgoing_reputation(forward.added_at)?;
 
@@ -191,10 +190,11 @@ impl ForwardManagerImpl {
                 in_flight_total_risk: self.htlcs.channel_in_flight_risk(
                     ChannelFilter::OutgoingChannel(forward.outgoing_channel_id),
                 ),
-                htlc_risk: self
-                    .htlcs
-                    .params
-                    .htlc_risk(forward.fee_msat(), forward.expiry_in_height),
+                htlc_risk: self.htlcs.params.htlc_risk(
+                    forward.fee_msat(),
+                    forward.expiry_in_height,
+                    cltv_expiry_delta,
+                ),
             },
             general_eligible: incoming_channel
                 .incoming_direction
@@ -311,6 +311,7 @@ impl ReputationManager for ForwardManager {
         &self,
         channel_id: u64,
         capacity_msat: u64,
+        cltv_expiry_delta: u32,
         add_ins: Instant,
         channel_reputation: Option<ChannelSnapshot>,
     ) -> Result<(), ReputationError> {
@@ -365,6 +366,7 @@ impl ReputationManager for ForwardManager {
 
                 v.insert(TrackedChannel {
                     capacity_msat,
+                    cltv_expiry_delta,
                     incoming_direction: IncomingChannel::new(
                         channel_id,
                         BucketParameters {
@@ -434,6 +436,14 @@ impl ReputationManager for ForwardManager {
             .lock()
             .map_err(|e| ReputationError::ErrUnrecoverable(e.to_string()))?;
 
+        let cltv_expiry_delta = inner_lock
+            .channels
+            .get(&forward.outgoing_channel_id)
+            .ok_or(ReputationError::ErrOutgoingNotFound(
+                forward.outgoing_channel_id,
+            ))?
+            .cltv_expiry_delta;
+
         let allocation_check = inner_lock.get_allocation_snapshot(forward)?;
 
         let fwd_outcome = allocation_check.inner_forwarding_outcome(
@@ -466,6 +476,7 @@ impl ReputationManager for ForwardManager {
                     InFlightHtlc {
                         outgoing_channel_id: forward.outgoing_channel_id,
                         hold_blocks: forward.expiry_in_height,
+                        cltv_expiry_delta,
                         incoming_amt_msat: forward.amount_in_msat,
                         fee_msat: forward.fee_msat(),
                         added_instant: forward.added_at,
@@ -594,7 +605,7 @@ mod tests {
         let now = Instant::now();
         let channel_capacity = 10_000_000;
         fwd_manager
-            .add_channel(0, channel_capacity, now, None)
+            .add_channel(0, channel_capacity, 80, now, None)
             .unwrap();
 
         let inner_fwd_manager = fwd_manager.inner.lock().unwrap();
@@ -730,7 +741,7 @@ mod tests {
 
         let channel_capacity = 10_000_000;
         assert!(fwd_manager
-            .add_channel(0, channel_capacity, now, None)
+            .add_channel(0, channel_capacity, 80, now, None)
             .is_ok());
 
         // Test adding channel from a snapshot
@@ -740,19 +751,19 @@ mod tests {
             bidirectional_revenue: 500,
         };
         assert!(fwd_manager
-            .add_channel(1, channel_capacity, now, Some(snapshot.clone()))
+            .add_channel(1, channel_capacity, 80, now, Some(snapshot.clone()))
             .is_ok());
 
         assert!(
             fwd_manager
-                .add_channel(0, channel_capacity, now, None)
+                .add_channel(0, channel_capacity, 80, now, None)
                 .err()
                 .unwrap()
                 == ReputationError::ErrChannelExists(0)
         );
         assert!(
             fwd_manager
-                .add_channel(5, 20_000_000, now, Some(snapshot))
+                .add_channel(5, 20_000_000, 80, now, Some(snapshot))
                 .err()
                 .unwrap()
                 == ReputationError::ErrChannelCapacityMismatch(20_000_000, 10_000_000)
@@ -804,10 +815,10 @@ mod tests {
 
         let channel_capacity = 10_000_000;
         fwd_manager
-            .add_channel(0, channel_capacity, now, None)
+            .add_channel(0, channel_capacity, 80, now, None)
             .unwrap();
         fwd_manager
-            .add_channel(1, channel_capacity, now, None)
+            .add_channel(1, channel_capacity, 80, now, None)
             .unwrap();
 
         let htlc_1 = test_proposed_forward(0, 1, 1, AccountableSignal::Unaccountable);
@@ -842,6 +853,7 @@ mod tests {
             .add_channel(
                 channel_with_reputation,
                 channel_capacity,
+                80,
                 now,
                 Some(snapshot),
             )
@@ -867,10 +879,10 @@ mod tests {
 
         let channel_capacity = 10_000_000;
         fwd_manager
-            .add_channel(0, channel_capacity, now, None)
+            .add_channel(0, channel_capacity, 80, now, None)
             .unwrap();
         fwd_manager
-            .add_channel(1, channel_capacity, now, None)
+            .add_channel(1, channel_capacity, 80, now, None)
             .unwrap();
 
         let htlc_1 = test_proposed_forward(0, 1, 1, AccountableSignal::Accountable);
@@ -891,6 +903,7 @@ mod tests {
             .add_channel(
                 channel_with_reputation,
                 channel_capacity,
+                80,
                 now,
                 Some(snapshot),
             )
