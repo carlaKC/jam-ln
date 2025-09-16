@@ -193,6 +193,7 @@ impl ForwardManagerImpl {
                 ),
                 htlc_risk: self
                     .htlcs
+                    .params
                     .htlc_risk(forward.fee_msat(), forward.expiry_in_height),
             },
             general_eligible: incoming_channel

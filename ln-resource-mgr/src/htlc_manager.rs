@@ -87,7 +87,7 @@ pub enum ChannelFilter {
 #[derive(Debug)]
 pub(super) struct InFlightManager {
     in_flight: HashMap<HtlcRef, InFlightHtlc>,
-    params: ReputationParams,
+    pub(super) params: ReputationParams,
 }
 
 impl InFlightManager {
@@ -183,11 +183,6 @@ impl InFlightManager {
             v.bucket == ResourceBucketType::Congestion
                 && v.outgoing_channel_id == outgoing_channel_id
         })
-    }
-
-    /// Calculates the worst case reputation damage of a htlc, assuming it'll be held for its full expiry_delta.
-    pub(super) fn htlc_risk(&self, fee_msat: u64, expiry_delta: u32) -> u64 {
-        self.params.htlc_risk(fee_msat, expiry_delta)
     }
 }
 
