@@ -36,7 +36,7 @@ impl ReputationParams {
     }
 
     /// Calculates the worst case reputation damage of a htlc, assuming it'll be held for its full expiry_delta.
-    pub(super) fn htlc_risk(&self, fee_msat: u64, expiry_delta: u32) -> u64 {
+    pub fn htlc_risk(&self, fee_msat: u64, expiry_delta: u32) -> u64 {
         let max_hold_time = self
             .expected_block_speed
             .unwrap_or_else(|| Duration::from_secs(60 * 10))

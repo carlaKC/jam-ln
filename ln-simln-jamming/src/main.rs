@@ -173,7 +173,7 @@ async fn main() -> Result<(), BoxError> {
     // Reputation is assessed for a channel pair and a specific HTLC that's being proposed. To assess whether pairs
     // have reputation, we'll use LND's default fee policy to get the HTLC risk for our configured htlc size and hold
     // time.
-    let risk_margin = forward_params.htlc_opportunity_cost(
+    let risk_margin = forward_params.reputation_params.htlc_risk(
         1000 + (0.0001 * cli.reputation_margin_msat as f64) as u64,
         cli.reputation_margin_expiry_blocks,
     );

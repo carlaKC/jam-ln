@@ -219,7 +219,8 @@ fn fee_to_build_reputation(
 
                 let target_hop = &path.hops[target_idx];
                 let current_htlc_risk = forward_params
-                    .htlc_opportunity_cost(target_hop.fee_msat, cltv_expiry + CLTV_OFFSET_LDK);
+                    .reputation_params
+                    .htlc_risk(target_hop.fee_msat, cltv_expiry + CLTV_OFFSET_LDK);
 
                 total_htlc_risk += current_htlc_risk;
             }
@@ -348,7 +349,7 @@ mod tests {
         let htlc_risk = {
             let mut risk = 0;
             for htlc in htlc_amounts.iter() {
-                risk += fwd_params.htlc_opportunity_cost(
+                risk += fwd_params.reputation_params.htlc_risk(
                     (*htlc as f64 * fee_pct) as u64,
                     expiry_delta + CLTV_OFFSET_LDK,
                 );
