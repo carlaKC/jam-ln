@@ -1,6 +1,7 @@
 use bitcoin::secp256k1::PublicKey;
 use clap::Parser;
 use core::panic;
+use ln_simln_jamming::analysis::stats_writer::StatsWriter;
 use ln_simln_jamming::analysis::{batch_writer::BatchForwardWriter, ForwardReporter};
 use ln_simln_jamming::attack_interceptor::AttackInterceptor;
 use ln_simln_jamming::clock::InstantClock;
@@ -120,6 +121,9 @@ async fn main() -> Result<(), BoxError> {
         }
     });
 
+    // Create writer to store basic network results.
+    let stats_writer = Arc::new(Mutex::new(StatsWriter::new(results_dir.clone())));
+
     let (reputation_state, target_revenue) = network_dir.reputation_summary(cli.attacker_bootstrap);
     let reputation_snapshot = reputation_snapshot_from_file(&reputation_state).map_err(|e| {
         format!(
@@ -143,7 +147,7 @@ async fn main() -> Result<(), BoxError> {
                 HashSet::from_iter(attacker_pubkeys.clone())
             },
             clock.clone(),
-            vec![batch_writer],
+            vec![batch_writer, stats_writer.clone()],
         )
         .await?,
     );
@@ -319,6 +323,9 @@ async fn main() -> Result<(), BoxError> {
         &end_reputation,
         attack_setup.general_jammed_nodes.len(),
     )?;
+
+    // We just need to write stats once, as they're a small amount of data.
+    stats_writer.lock().await.write(true).await?;
 
     Ok(())
 }
