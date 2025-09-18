@@ -118,7 +118,7 @@ where
 {
     network_nodes: Arc<Mutex<HashMap<PublicKey, Node<M>>>>,
     clock: Arc<SimulationClock>,
-    results: Option<Arc<Mutex<R>>>,
+    results: Vec<Arc<Mutex<R>>>,
 }
 
 impl<R> ReputationInterceptor<R, ForwardManager>
@@ -129,7 +129,7 @@ where
         params: ForwardManagerParams,
         edges: &[NetworkParser],
         clock: Arc<SimulationClock>,
-        results: Option<Arc<Mutex<R>>>,
+        results: Vec<Arc<Mutex<R>>>,
     ) -> Result<Self, BoxError> {
         let mut network_nodes: HashMap<PublicKey, Node<ForwardManager>> = HashMap::new();
 
@@ -188,7 +188,7 @@ where
         reputation_snapshot: HashMap<PublicKey, HashMap<u64, ChannelSnapshot>>,
         no_reputation: HashSet<PublicKey>,
         clock: Arc<SimulationClock>,
-        results: Option<Arc<Mutex<R>>>,
+        results: Vec<Arc<Mutex<R>>>,
     ) -> Result<Self, BoxError> {
         let mut network_nodes = HashMap::with_capacity(reputation_snapshot.len());
 
@@ -463,11 +463,15 @@ where
             };
         drop(network_lock);
 
-        if let Some(r) = &self.results {
+        for r in &self.results {
             if report {
                 r.lock()
                     .await
-                    .report_forward(htlc_add.forwarding_node, allocation_check, htlc.clone())
+                    .report_forward(
+                        htlc_add.forwarding_node,
+                        allocation_check.clone(),
+                        htlc.clone(),
+                    )
                     .await
                     .map_err(|e| ReputationError::ErrUnrecoverable(e.to_string()))?;
             }
@@ -726,7 +730,7 @@ mod tests {
             ReputationInterceptor {
                 network_nodes: Arc::new(Mutex::new(nodes)),
                 clock: Arc::new(SimulationClock::new(1).unwrap()),
-                results: None,
+                results: vec![],
             },
             pubkeys,
         )
@@ -976,7 +980,7 @@ mod tests {
                 params,
                 &edges,
                 Arc::new(SimulationClock::new(1).unwrap()),
-                None,
+                vec![],
             )
             .unwrap();
 
@@ -1038,7 +1042,7 @@ mod tests {
                 params,
                 &edges,
                 Arc::new(SimulationClock::new(1).unwrap()),
-                None,
+                vec![],
             )
             .unwrap();
 
@@ -1143,7 +1147,7 @@ mod tests {
             reputation_snapshot.clone(),
             HashSet::new(),
             clock.clone(),
-            None,
+            vec![],
         )
         .await;
 
@@ -1207,7 +1211,7 @@ mod tests {
             reputation_snapshot,
             HashSet::new(),
             Arc::new(SimulationClock::new(1).unwrap()),
-            None,
+            vec![],
         )
         .await;
 
@@ -1235,7 +1239,7 @@ mod tests {
             reputation_snapshot,
             HashSet::new(),
             Arc::new(SimulationClock::new(1).unwrap()),
-            None,
+            vec![],
         )
         .await;
 
@@ -1264,7 +1268,7 @@ mod tests {
             reputation_snapshot,
             HashSet::new(),
             Arc::new(SimulationClock::new(1).unwrap()),
-            None,
+            vec![],
         )
         .await;
 
@@ -1291,7 +1295,7 @@ mod tests {
             reputation_snapshot,
             HashSet::new(),
             Arc::new(SimulationClock::new(1).unwrap()),
-            None,
+            vec![],
         )
         .await;
 
