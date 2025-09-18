@@ -11,7 +11,6 @@ use clap::Parser;
 use csv::Writer;
 use ln_resource_mgr::forward_manager::{ForwardManager, ForwardManagerParams};
 use ln_simln_jamming::{
-    analysis::BatchForwardWriter,
     clock::InstantClock,
     parsing::{
         get_history_for_bootstrap, history_from_file, parse_duration, NetworkParams,
@@ -122,7 +121,7 @@ async fn main() -> Result<(), BoxError> {
 
     let clock = Arc::new(SimulationClock::new(1)?);
     let reputation_clock = Arc::clone(&clock);
-    let mut reputation_interceptor: ReputationInterceptor<BatchForwardWriter, ForwardManager> =
+    let mut reputation_interceptor: ReputationInterceptor<ForwardManager> =
         ReputationInterceptor::new_for_network(
             forward_params,
             &network_dir.sim_network,

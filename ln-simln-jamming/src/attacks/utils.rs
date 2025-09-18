@@ -265,7 +265,6 @@ mod tests {
 
     use super::fee_to_build_reputation;
     use crate::{
-        analysis::BatchForwardWriter,
         attacks::utils::{
             build_custom_route, build_reputation, BuildReputationParams, CLTV_OFFSET_LDK,
         },
@@ -432,7 +431,7 @@ mod tests {
         let target_channel_id: u64 = edges[2].scid.into();
 
         let clock = Arc::new(SimulationClock::new(1).unwrap());
-        let reputation_interceptor: ReputationInterceptor<BatchForwardWriter, ForwardManager> =
+        let reputation_interceptor: ReputationInterceptor<ForwardManager> =
             ReputationInterceptor::new_for_network(params, &edges, Arc::clone(&clock), vec![])
                 .unwrap();
 
@@ -479,7 +478,7 @@ mod tests {
         let target_channel = (target_pubkey, target_channel_id);
         let hops = vec![target_pubkey, attacker_receiver_pubkey];
 
-        let reputation_monitor: Arc<ReputationInterceptor<BatchForwardWriter, ForwardManager>> =
+        let reputation_monitor: Arc<ReputationInterceptor<ForwardManager>> =
             Arc::clone(&reputation_interceptor);
 
         let hops_with_target_channel =
