@@ -9,6 +9,7 @@ use triggered::Listener;
 
 use crate::{accountable_from_records, records_from_signal, BoxError, NetworkReputation};
 
+pub mod fast_jam;
 pub mod sink;
 pub mod utils;
 

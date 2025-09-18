@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use bitcoin::secp256k1::PublicKey;
 use lightning::{
@@ -46,6 +46,32 @@ pub fn build_custom_route(
         &WrappedLog {},
         &[0; 32],
     )
+}
+
+pub async fn sufficient_reputation<R: ReputationMonitor>(
+    reputation_monitor: Arc<R>,
+    attacker_channel: u64,
+    target_channel: (PublicKey, u64),
+    risk_margin: u64,
+    access_ins: Instant,
+) -> Result<bool, BoxError> {
+    let target_channel_snapshots = reputation_monitor
+        .list_channels(target_channel.0, access_ins)
+        .await?;
+
+    let attacker_reputation = target_channel_snapshots
+        .get(&attacker_channel)
+        .ok_or(format!("Channel {} not found", attacker_channel))?
+        .outgoing_reputation;
+
+    let target_revenue = target_channel_snapshots
+        .get(&target_channel.1)
+        .ok_or(format!("Channel {} not found", target_channel.1))?
+        .bidirectional_revenue;
+
+    let sufficient_reputation = attacker_reputation > (target_revenue + risk_margin as i64);
+
+    Ok(sufficient_reputation)
 }
 
 pub struct BuildReputationParams<'a, R: ReputationMonitor> {

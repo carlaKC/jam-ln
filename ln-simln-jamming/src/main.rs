@@ -185,7 +185,7 @@ async fn main() -> Result<(), BoxError> {
         Arc::clone(&clock),
         Arc::clone(&reputation_interceptor),
         Arc::clone(&revenue_interceptor),
-        risk_margin,
+        Arc::clone(&reputation_interceptor),
     )?;
 
     let attack_setup = attack.setup_for_network()?;

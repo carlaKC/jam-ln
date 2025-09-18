@@ -1,18 +1,24 @@
+use crate::attacks::fast_jam::FastJam;
 use crate::attacks::sink::SinkAttack;
 use crate::attacks::JammingAttack;
-use crate::reputation_interceptor::{BootstrapForward, BootstrapRecords, ReputationMonitor};
+use crate::reputation_interceptor::{
+    BootstrapForward, BootstrapRecords, ChannelJammer, ReputationMonitor,
+};
 use crate::revenue_interceptor::{PeacetimeRevenueMonitor, RevenueEvent};
 use crate::BoxError;
 use bitcoin::secp256k1::PublicKey;
 use clap::{Parser, ValueEnum};
 use csv::{ReaderBuilder, StringRecord};
 use humantime::Duration as HumanDuration;
+use lightning::routing::gossip::NetworkGraph;
 use ln_resource_mgr::forward_manager::ForwardManagerParams;
 use ln_resource_mgr::ChannelSnapshot;
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use sim_cli::parsing::NetworkParser;
 use simln_lib::clock::SimulationClock;
+use simln_lib::sim_node::{populate_network_graph, SimulatedChannel, WrappedLog};
+use simln_lib::SimulationError;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Seek};
@@ -319,22 +325,25 @@ pub struct Cli {
 #[derive(Debug, Clone, ValueEnum)]
 pub enum AttackType {
     Sink,
+    FastJam,
     // NOTE: add your attack that you want to run here.
 }
 
-pub fn setup_attack<R, M>(
+pub fn setup_attack<R, M, J>(
     cli: &Cli,
     simulation: &SimulationFiles,
     clock: Arc<SimulationClock>,
     reputation_monitor: Arc<R>,
     revenue_monitor: Arc<M>,
-    risk_margin: u64,
+    channel_jammer: Arc<J>,
 ) -> Result<Arc<dyn JammingAttack + Send + Sync>, BoxError>
 where
     R: ReputationMonitor + Send + Sync + 'static,
     M: PeacetimeRevenueMonitor + Send + Sync + 'static,
+    J: ChannelJammer + Send + Sync + 'static,
 {
     let sim_network = simulation.sim_network.clone();
+    let forward_params: ForwardManagerParams = cli.reputation_params.clone().into();
 
     // NOTE: If you are implementing your own attack and have added the variant to AttackType, you can
     // then do any setup specific to your attack here and return.
@@ -342,6 +351,15 @@ where
         AttackType::Sink => {
             let attacker_pubkeys: Vec<PublicKey> =
                 simulation.attackers.iter().map(|a| a.1).collect();
+
+            // Reputation is assessed for a channel pair and a specific HTLC that's being proposed. To assess whether pairs
+            // have reputation, we'll use LND's default fee policy to get the HTLC risk for our configured htlc size and hold
+            // time.
+            let risk_margin = forward_params.htlc_opportunity_cost(
+                1000 + (0.0001 * cli.reputation_margin_msat as f64) as u64,
+                cli.reputation_margin_expiry_blocks,
+            );
+
             let attack = Arc::new(SinkAttack::new(
                 clock,
                 &sim_network,
@@ -354,12 +372,75 @@ where
 
             Ok(attack)
         }
+        AttackType::FastJam => {
+            let attacker_pubkey_1 = simulation
+                .attackers
+                .iter()
+                .find(|a| a.0 == "70")
+                .ok_or("Required attacker with alias 70 not found")?;
+
+            // Attacker node that will be used to send malicious payments.
+            let attacker_sender = simulation
+                .attackers
+                .iter()
+                .find(|a| a.0 == "25")
+                .ok_or("Required attacker sender with alias 25 not found")?;
+
+            // Channel with target's peer that will be jammed.
+            let target_peer_pubkey = PublicKey::from_str(
+                "03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f",
+            )
+            .unwrap();
+            let channel_to_jam = (target_peer_pubkey, 348545186070528);
+
+            let network_graph = network_graph(sim_network.clone())?;
+
+            // Based on target channel
+            let risk_margin = forward_params.htlc_opportunity_cost(
+                1 + (0.00015 * 1_000_f64) as u64,
+                cli.reputation_margin_expiry_blocks,
+            );
+
+            let attack = Arc::new(FastJam::new(
+                Arc::clone(&clock),
+                &sim_network,
+                simulation.target.1,
+                attacker_sender.clone(),
+                attacker_pubkey_1.clone(),
+                channel_to_jam,
+                Arc::clone(&reputation_monitor),
+                Arc::clone(&revenue_monitor),
+                Arc::clone(&channel_jammer),
+                network_graph,
+                risk_margin,
+            ));
+
+            Ok(attack)
+        }
     }
+}
+
+fn network_graph(
+    network: Vec<NetworkParser>,
+) -> Result<Arc<NetworkGraph<Arc<WrappedLog>>>, BoxError> {
+    let channels = network
+        .clone()
+        .into_iter()
+        .map(SimulatedChannel::from)
+        .collect::<Vec<SimulatedChannel>>();
+
+    let clock = Arc::new(SimulationClock::new(1)?);
+
+    Ok(Arc::new(
+        populate_network_graph(channels, clock.clone())
+            .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
+    ))
 }
 
 impl Cli {
     pub fn validate(&self) -> Result<ForwardManagerParams, BoxError> {
-        if self.target_reputation_percent == 0 || self.target_reputation_percent > 100 {
+        //if self.target_reputation_percent == 0 || self.target_reputation_percent > 100 {
+        if self.target_reputation_percent > 100 {
             return Err(format!(
                 "target reputation percent {} must be in (0;100]",
                 self.target_reputation_percent
