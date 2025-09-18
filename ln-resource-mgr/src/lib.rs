@@ -111,7 +111,7 @@ impl Display for ReputationError {
 }
 
 /// The different possible accountable signals on a htlc's update_add message.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Hash)]
 pub enum AccountableSignal {
     Unaccountable,
     Accountable,
@@ -126,7 +126,7 @@ impl Display for AccountableSignal {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Hash)]
 pub enum ForwardingOutcome {
     /// Forward the outgoing htlc with the accountable signal provided.
     Forward(AccountableSignal),
@@ -149,7 +149,7 @@ impl Display for ForwardingOutcome {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Hash)]
 pub enum FailureReason {
     /// There is no space in the incoming channel's general resource bucket, which is all the HTLC
     /// is eligible to use, so the htlc should be failed back.

@@ -4,6 +4,7 @@ use bitcoin::secp256k1::PublicKey;
 use ln_resource_mgr::{AllocationCheck, ProposedForward};
 
 pub mod batch_writer;
+pub mod stats_writer;
 
 /// Implemented to report forwards for analytics and data recording.
 #[async_trait]
