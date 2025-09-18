@@ -143,7 +143,7 @@ async fn main() -> Result<(), BoxError> {
                 HashSet::from_iter(attacker_pubkeys.clone())
             },
             clock.clone(),
-            Some(results_writer),
+            vec![results_writer],
         )
         .await?,
     );

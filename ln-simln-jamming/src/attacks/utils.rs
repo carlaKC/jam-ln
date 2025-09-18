@@ -433,7 +433,7 @@ mod tests {
 
         let clock = Arc::new(SimulationClock::new(1).unwrap());
         let reputation_interceptor: ReputationInterceptor<BatchForwardWriter, ForwardManager> =
-            ReputationInterceptor::new_for_network(params, &edges, Arc::clone(&clock), None)
+            ReputationInterceptor::new_for_network(params, &edges, Arc::clone(&clock), vec![])
                 .unwrap();
 
         let network_graph = {

@@ -127,7 +127,7 @@ async fn main() -> Result<(), BoxError> {
             forward_params,
             &network_dir.sim_network,
             reputation_clock,
-            None,
+            vec![],
         )?;
 
     reputation_interceptor
