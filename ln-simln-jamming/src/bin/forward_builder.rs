@@ -173,4 +173,12 @@ impl ForwardReporter for BootstrapWriter {
             })
             .map_err(|e| e.into())
     }
+
+    async fn write(&mut self, force: bool) -> Result<(), BoxError> {
+        self.batch_writer
+            .lock()
+            .await
+            .write(force)
+            .map_err(|e| e.into())
+    }
 }
