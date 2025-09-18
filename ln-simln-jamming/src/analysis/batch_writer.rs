@@ -1,3 +1,4 @@
+use super::ForwardReporter;
 use crate::BoxError;
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
@@ -9,17 +10,6 @@ use std::collections::HashMap;
 use std::fs::{metadata, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-
-/// Implemented to report forwards for analytics and data recording.
-#[async_trait]
-pub trait ForwardReporter: Send + Sync {
-    async fn report_forward(
-        &mut self,
-        forwarding_node: PublicKey,
-        decision: AllocationCheck,
-        forward: ProposedForward,
-    ) -> Result<(), BoxError>;
-}
 
 struct Record {
     forward: ProposedForward,
@@ -159,24 +149,6 @@ impl BatchForwardWriter {
             start_ins,
         }
     }
-
-    pub fn write(&mut self, force: bool) -> Result<(), BoxError> {
-        if self.record_count < self.batch_size && !force {
-            return Ok(());
-        }
-
-        for (pubkey, (records, alias)) in self.nodes.iter_mut() {
-            if records.is_empty() {
-                continue;
-            }
-
-            write_records_for_node(get_file(&self.path, pubkey, alias.to_string()), records)?;
-            records.clear();
-        }
-        self.record_count = 0;
-
-        Ok(())
-    }
 }
 
 fn get_file(path: &Path, node: &PublicKey, alias: String) -> PathBuf {
@@ -219,6 +191,25 @@ impl ForwardReporter for BatchForwardWriter {
 
         Ok(())
     }
+
+    /// Writes records to disk when batch count is hit, forcing a flush when force is true.
+    async fn write(&mut self, force: bool) -> Result<(), BoxError> {
+        if self.record_count < self.batch_size && !force {
+            return Ok(());
+        }
+
+        for (pubkey, (records, alias)) in self.nodes.iter_mut() {
+            if records.is_empty() {
+                continue;
+            }
+
+            write_records_for_node(get_file(&self.path, pubkey, alias.to_string()), records)?;
+            records.clear();
+        }
+        self.record_count = 0;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -228,7 +219,7 @@ mod tests {
     use std::str::FromStr;
     use std::time::{Instant, SystemTime};
 
-    use crate::analysis::get_file;
+    use crate::analysis::batch_writer::get_file;
     use crate::test_utils::{get_random_keypair, test_allocation_check, test_proposed_forward};
 
     use super::{BatchForwardWriter, ForwardReporter};
@@ -301,7 +292,7 @@ mod tests {
         assert_eq!(writer.record_count, 1);
 
         // Writing with a single record shouldn't go to disk yet.
-        writer.write(false).unwrap();
+        writer.write(false).await.unwrap();
         assert!(!Path::new(&filename).exists());
 
         // Non-tracked node ignored and not written to disk.
@@ -313,7 +304,7 @@ mod tests {
             )
             .await
             .unwrap();
-        writer.write(false).unwrap();
+        writer.write(false).await.unwrap();
         assert!(!Path::new(&filename).exists());
 
         // Tracked record meets threshold is written to disk with a header line and our two records.
@@ -327,7 +318,7 @@ mod tests {
             .unwrap();
         assert_eq!(writer.record_count, 2);
 
-        writer.write(false).unwrap();
+        writer.write(false).await.unwrap();
         assert_eq!(read_to_string(&filename).unwrap().lines().count(), 3);
 
         // Write three more tracked forward and assert the file is updated.
@@ -356,7 +347,7 @@ mod tests {
             .await
             .unwrap();
 
-        writer.write(false).unwrap();
+        writer.write(false).await.unwrap();
         assert_eq!(read_to_string(&filename).unwrap().lines().count(), 6);
 
         std::fs::remove_file(filename).unwrap();

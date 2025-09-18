@@ -75,7 +75,7 @@ async fn main() -> Result<(), BoxError> {
         cli.reputation_params.into(),
         &network_dir.sim_network,
         clock.clone(),
-        Some(Arc::new(Mutex::new(BootstrapWriter::new(
+        vec![Arc::new(Mutex::new(BootstrapWriter::new(
             clock.clone(),
             // TODO: change API in SimLN so that we can just pass a path in here.
             cli.network.network_dir.clone(),
@@ -84,7 +84,7 @@ async fn main() -> Result<(), BoxError> {
                 .unwrap()
                 .to_string_lossy()
                 .to_string(),
-        )?))),
+        )?))],
     )?);
     let latency_interceptor = Arc::new(LatencyIntercepor::new_poisson(300.0)?);
 
@@ -171,6 +171,14 @@ impl ForwardReporter for BootstrapWriter {
                 channel_in_id: forward.incoming_ref.channel_id,
                 channel_out_id: forward.outgoing_channel_id,
             })
+            .map_err(|e| e.into())
+    }
+
+    async fn write(&mut self, force: bool) -> Result<(), BoxError> {
+        self.batch_writer
+            .lock()
+            .await
+            .write(force)
             .map_err(|e| e.into())
     }
 }

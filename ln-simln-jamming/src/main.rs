@@ -1,11 +1,12 @@
 use bitcoin::secp256k1::PublicKey;
 use clap::Parser;
 use core::panic;
-use ln_simln_jamming::analysis::BatchForwardWriter;
+use ln_simln_jamming::analysis::stats_writer::StatsWriter;
+use ln_simln_jamming::analysis::{batch_writer::BatchForwardWriter, ForwardReporter};
 use ln_simln_jamming::attack_interceptor::AttackInterceptor;
 use ln_simln_jamming::clock::InstantClock;
 use ln_simln_jamming::parsing::{
-    reputation_snapshot_from_file, setup_attack, Cli, SimulationFiles, TrafficType,
+    reputation_snapshot_from_file, setup_attack, AttackType, Cli, SimulationFiles, TrafficType,
 };
 use ln_simln_jamming::reputation_interceptor::{ChannelJammer, ReputationInterceptor};
 use ln_simln_jamming::revenue_interceptor::{
@@ -88,14 +89,14 @@ async fn main() -> Result<(), BoxError> {
     let mut monitor_channels: Vec<(PublicKey, String)> =
         target_channels.values().cloned().collect();
     monitor_channels.push((target_pubkey, network_dir.target.0.clone()));
-    let results_writer = Arc::new(Mutex::new(BatchForwardWriter::new(
+    let batch_writer = Arc::new(Mutex::new(BatchForwardWriter::new(
         results_dir.clone(),
         &monitor_channels,
         cli.result_batch_size,
         now,
     )));
 
-    let results_writer_1 = results_writer.clone();
+    let results_writer_1 = batch_writer.clone();
     let results_listener = listener.clone();
     let results_shutdown = shutdown.clone();
     let results_clock = clock.clone();
@@ -104,13 +105,13 @@ async fn main() -> Result<(), BoxError> {
         loop {
             select! {
                 _ = results_listener.clone() => {
-                    if let Err(e) = results_writer_1.lock().await.write(true) {
+                    if let Err(e) = results_writer_1.lock().await.write(true).await {
                         log::error!("Error writing results on shutdown: {e}");
                     }
                     return
                 },
                 _ = results_clock.sleep(interval) => {
-                      if let Err(e) = results_writer_1.lock().await.write(false) {
+                      if let Err(e) = results_writer_1.lock().await.write(false).await {
                         log::error!("Error writing results: {e}");
                         results_shutdown.trigger();
                         return
@@ -119,6 +120,9 @@ async fn main() -> Result<(), BoxError> {
             }
         }
     });
+
+    // Create writer to store basic network results.
+    let stats_writer = Arc::new(Mutex::new(StatsWriter::new(results_dir.clone())));
 
     let (reputation_state, target_revenue) = network_dir.reputation_summary(cli.attacker_bootstrap);
     let reputation_snapshot = reputation_snapshot_from_file(&reputation_state).map_err(|e| {
@@ -143,7 +147,7 @@ async fn main() -> Result<(), BoxError> {
                 HashSet::from_iter(attacker_pubkeys.clone())
             },
             clock.clone(),
-            Some(results_writer),
+            vec![batch_writer, stats_writer.clone()],
         )
         .await?,
     );
@@ -306,6 +310,10 @@ async fn main() -> Result<(), BoxError> {
     )
     .await?;
 
+    log::info!(
+        "Simulation complete, writing summary to: {}",
+        results_dir.to_string_lossy()
+    );
     let snapshot = revenue_interceptor.get_revenue_difference().await;
     write_simulation_summary(
         &cli,
@@ -315,6 +323,9 @@ async fn main() -> Result<(), BoxError> {
         &end_reputation,
         attack_setup.general_jammed_nodes.len(),
     )?;
+
+    // We just need to write stats once, as they're a small amount of data.
+    stats_writer.lock().await.write(true).await?;
 
     Ok(())
 }
@@ -373,6 +384,23 @@ fn write_simulation_summary(
 
     let mut writer = BufWriter::new(file);
 
+    match cli.attack {
+        AttackType::NoAttack => {
+            writeln!(
+                writer,
+                "No attack: {} runtime",
+                cli.runtime.ok_or("Expected runtime for no attack")?,
+            )?;
+        }
+        AttackType::Sink => {
+            writeln!(
+                writer,
+                "Sink Attack: bootstrapped reputation for: {} seconds",
+                cli.attacker_bootstrap.unwrap_or(Duration::ZERO).as_secs(),
+            )?;
+        }
+    }
+
     writeln!(writer, "Runtime (seconds): {:?}", revenue.runtime.as_secs())?;
     writeln!(
         writer,
@@ -398,11 +426,6 @@ fn write_simulation_summary(
             revenue.peacetime_revenue_msat - revenue.simulation_revenue_msat,
         )?;
     }
-    writeln!(
-        writer,
-        "Attacker bootstrapped reputation for: {} seconds",
-        cli.attacker_bootstrap.unwrap_or(Duration::ZERO).as_secs(),
-    )?;
     writeln!(
         writer,
         "Attacker start reputation (pairs): {}/{}",
