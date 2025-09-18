@@ -1,9 +1,11 @@
+use std::time::Duration;
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
-use simln_lib::clock::SimulationClock;
+use simln_lib::clock::{Clock, SimulationClock};
 use simln_lib::sim_node::{CustomRecords, ForwardingError, InterceptRequest, SimGraph, SimNode};
+use tokio::select;
 use tokio::sync::Mutex;
 use triggered::Listener;
 
@@ -80,4 +82,34 @@ pub trait JammingAttack {
         _attacker_nodes: HashMap<String, Arc<Mutex<SimNode<SimGraph, SimulationClock>>>>,
         _shutdown_listener: Listener,
     ) -> Result<(), BoxError>;
+}
+
+/// Runs the simulation with no attack for a set duration.
+pub struct NoAttack {
+    clock: Arc<SimulationClock>,
+    runtime: Duration,
+}
+
+impl NoAttack {
+    /// Creates a no-op attack that will just run the simulation for the runtime provided.
+    pub fn new(clock: Arc<SimulationClock>, runtime: Duration) -> Self {
+        Self { clock, runtime }
+    }
+}
+
+#[async_trait]
+impl JammingAttack for NoAttack {
+    async fn run_attack(
+        &self,
+        _start_reputation: NetworkReputation,
+        _attacker_nodes: HashMap<String, Arc<Mutex<SimNode<SimGraph, SimulationClock>>>>,
+        shutdown_listener: Listener,
+    ) -> Result<(), BoxError> {
+        select! {
+            _ = shutdown_listener.clone() => {},
+            _ = self.clock.sleep(self.runtime) => {},
+        }
+
+        Ok(())
+    }
 }

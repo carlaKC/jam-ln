@@ -1,5 +1,5 @@
 use crate::attacks::sink::SinkAttack;
-use crate::attacks::JammingAttack;
+use crate::attacks::{JammingAttack, NoAttack};
 use crate::reputation_interceptor::{BootstrapForward, BootstrapRecords, ReputationMonitor};
 use crate::revenue_interceptor::{PeacetimeRevenueMonitor, RevenueEvent};
 use crate::BoxError;
@@ -312,12 +312,17 @@ pub struct Cli {
     #[arg(long, value_enum, default_value = "sink")]
     pub attack: AttackType,
 
+    /// The total amount of time to run the attack for, used for the no-attack variant.
+    #[arg(long)]
+    pub runtime: Option<HumanDuration>,
+
     #[clap(long, default_value = "debug")]
     pub log_level: LevelFilter,
 }
 
-#[derive(Debug, Clone, ValueEnum)]
+#[derive(Debug, Clone, ValueEnum, PartialEq, Eq)]
 pub enum AttackType {
+    NoAttack,
     Sink,
     // NOTE: add your attack that you want to run here.
 }
@@ -339,6 +344,10 @@ where
     // NOTE: If you are implementing your own attack and have added the variant to AttackType, you can
     // then do any setup specific to your attack here and return.
     match cli.attack {
+        AttackType::NoAttack => Ok(Arc::new(NoAttack::new(
+            clock,
+            *cli.runtime.ok_or("Expected runtime for no-attack")?,
+        ))),
         AttackType::Sink => {
             let attacker_pubkeys: Vec<PublicKey> =
                 simulation.attackers.iter().map(|a| a.1).collect();
@@ -389,6 +398,10 @@ impl Cli {
                 )
                 .into());
             }
+        }
+
+        if self.runtime.is_some() != (self.attack == AttackType::NoAttack) {
+            return Err("Runtime should be set for no-attack option only".into());
         }
 
         Ok(forward_params)
