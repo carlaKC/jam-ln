@@ -306,6 +306,10 @@ async fn main() -> Result<(), BoxError> {
     )
     .await?;
 
+    log::info!(
+        "Simulation complete, writing summary to: {}",
+        results_dir.to_string_lossy()
+    );
     let snapshot = revenue_interceptor.get_revenue_difference().await;
     write_simulation_summary(
         &cli,
