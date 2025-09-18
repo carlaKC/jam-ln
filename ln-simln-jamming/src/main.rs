@@ -6,7 +6,7 @@ use ln_simln_jamming::analysis::{batch_writer::BatchForwardWriter, ForwardReport
 use ln_simln_jamming::attack_interceptor::AttackInterceptor;
 use ln_simln_jamming::clock::InstantClock;
 use ln_simln_jamming::parsing::{
-    reputation_snapshot_from_file, setup_attack, Cli, SimulationFiles, TrafficType,
+    reputation_snapshot_from_file, setup_attack, AttackType, Cli, SimulationFiles, TrafficType,
 };
 use ln_simln_jamming::reputation_interceptor::{ChannelJammer, ReputationInterceptor};
 use ln_simln_jamming::revenue_interceptor::{
@@ -384,6 +384,23 @@ fn write_simulation_summary(
 
     let mut writer = BufWriter::new(file);
 
+    match cli.attack {
+        AttackType::NoAttack => {
+            writeln!(
+                writer,
+                "No attack: {} runtime",
+                cli.runtime.ok_or("Expected runtime for no attack")?,
+            )?;
+        }
+        AttackType::Sink => {
+            writeln!(
+                writer,
+                "Sink Attack: bootstrapped reputation for: {} seconds",
+                cli.attacker_bootstrap.unwrap_or(Duration::ZERO).as_secs(),
+            )?;
+        }
+    }
+
     writeln!(writer, "Runtime (seconds): {:?}", revenue.runtime.as_secs())?;
     writeln!(
         writer,
@@ -409,11 +426,6 @@ fn write_simulation_summary(
             revenue.peacetime_revenue_msat - revenue.simulation_revenue_msat,
         )?;
     }
-    writeln!(
-        writer,
-        "Attacker bootstrapped reputation for: {} seconds",
-        cli.attacker_bootstrap.unwrap_or(Duration::ZERO).as_secs(),
-    )?;
     writeln!(
         writer,
         "Attacker start reputation (pairs): {}/{}",
