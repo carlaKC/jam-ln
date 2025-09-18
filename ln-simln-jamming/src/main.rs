@@ -1,7 +1,7 @@
 use bitcoin::secp256k1::PublicKey;
 use clap::Parser;
 use core::panic;
-use ln_simln_jamming::analysis::{BatchForwardWriter, ForwardReporter};
+use ln_simln_jamming::analysis::{batch_writer::BatchForwardWriter, ForwardReporter};
 use ln_simln_jamming::attack_interceptor::AttackInterceptor;
 use ln_simln_jamming::clock::InstantClock;
 use ln_simln_jamming::parsing::{
