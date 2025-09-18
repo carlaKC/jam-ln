@@ -88,14 +88,14 @@ async fn main() -> Result<(), BoxError> {
     let mut monitor_channels: Vec<(PublicKey, String)> =
         target_channels.values().cloned().collect();
     monitor_channels.push((target_pubkey, network_dir.target.0.clone()));
-    let results_writer = Arc::new(Mutex::new(BatchForwardWriter::new(
+    let batch_writer = Arc::new(Mutex::new(BatchForwardWriter::new(
         results_dir.clone(),
         &monitor_channels,
         cli.result_batch_size,
         now,
     )));
 
-    let results_writer_1 = results_writer.clone();
+    let results_writer_1 = batch_writer.clone();
     let results_listener = listener.clone();
     let results_shutdown = shutdown.clone();
     let results_clock = clock.clone();
@@ -143,7 +143,7 @@ async fn main() -> Result<(), BoxError> {
                 HashSet::from_iter(attacker_pubkeys.clone())
             },
             clock.clone(),
-            vec![results_writer],
+            vec![batch_writer],
         )
         .await?,
     );
