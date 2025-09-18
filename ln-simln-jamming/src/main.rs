@@ -1,7 +1,7 @@
 use bitcoin::secp256k1::PublicKey;
 use clap::Parser;
 use core::panic;
-use ln_simln_jamming::analysis::BatchForwardWriter;
+use ln_simln_jamming::analysis::{BatchForwardWriter, ForwardReporter};
 use ln_simln_jamming::attack_interceptor::AttackInterceptor;
 use ln_simln_jamming::clock::InstantClock;
 use ln_simln_jamming::parsing::{
@@ -104,13 +104,13 @@ async fn main() -> Result<(), BoxError> {
         loop {
             select! {
                 _ = results_listener.clone() => {
-                    if let Err(e) = results_writer_1.lock().await.write(true) {
+                    if let Err(e) = results_writer_1.lock().await.write(true).await {
                         log::error!("Error writing results on shutdown: {e}");
                     }
                     return
                 },
                 _ = results_clock.sleep(interval) => {
-                      if let Err(e) = results_writer_1.lock().await.write(false) {
+                      if let Err(e) = results_writer_1.lock().await.write(false).await {
                         log::error!("Error writing results: {e}");
                         results_shutdown.trigger();
                         return
