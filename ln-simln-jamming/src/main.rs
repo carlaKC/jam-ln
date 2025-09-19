@@ -294,6 +294,11 @@ async fn main() -> Result<(), BoxError> {
 
     // Run simulation until it shuts down, then wait for the graph to exit.
     simulation.run(&validated_activities).await?;
+    log::info!(
+        "Simulation sent: {} payment with success rate: {}",
+        simulation.get_total_payments().await,
+        simulation.get_success_rate().await
+    );
 
     // Write start and end state to a summary file.
     let end_reputation = get_network_reputation(
