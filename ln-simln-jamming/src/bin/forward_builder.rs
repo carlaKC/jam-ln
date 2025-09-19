@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use humantime::Duration as HumanDuration;
 use ln_resource_mgr::{AllocationCheck, ProposedForward};
 use ln_simln_jamming::analysis::ForwardReporter;
@@ -15,7 +15,7 @@ use sim_cli::parsing::{create_simulation_with_network, SimParams};
 use simln_lib::batched_writer::BatchedWriter;
 use simln_lib::clock::{Clock, SimulationClock};
 use simln_lib::latency_interceptor::LatencyIntercepor;
-use simln_lib::sim_node::CustomRecords;
+use simln_lib::sim_node::{CustomRecords, Interceptor};
 use simln_lib::SimulationCfg;
 use simple_logger::SimpleLogger;
 use std::path::PathBuf;
@@ -38,6 +38,24 @@ struct Cli {
 
     #[command(flatten)]
     sim_ln: SimLNParams,
+
+    /// The mode to run the network in.
+    #[arg(long, value_enum, default_value = "write")]
+    run_type: RunType,
+}
+
+// Note: this enum is flattened for the sake of clap, which makes its handling a little clunky.
+#[derive(Debug, Clone, ValueEnum, PartialEq)]
+pub enum RunType {
+    /// Run the network with the jamming mitigation enabled, writing forwarding history to disk
+    /// that can be used to generate reputation data for future simulations.
+    Write,
+    /// Run the network with the jamming mitigation enabled and do not write any network activity
+    /// to disk.
+    ReputationStats,
+    /// Run the network without the jamming mitigation disabled and do not write any network
+    /// activity to disk.
+    NoReputationStats,
 }
 
 #[tokio::main]
@@ -59,19 +77,19 @@ async fn main() -> Result<(), BoxError> {
     let clock = Arc::new(SimulationClock::new(1000)?);
     let tasks = TaskTracker::new();
 
-    // Forwarding traffic can either be created for the peacetime or attacktime graphs. We'll
-    // choose our output file accordingly.
-    let output_file = match cli.traffic_type {
-        TrafficType::Peacetime => network_dir.peacetime_traffic(),
-        TrafficType::Attacktime => network_dir.attacktime_traffic(),
-    };
+    let mut interceptors: Vec<Arc<dyn Interceptor>> =
+        vec![Arc::new(LatencyIntercepor::new_poisson(300.0)?)];
 
     // Create a reputation interceptor without any bootstrap (since here we're creating the
-    // bootstrap itself, we just want to run with reputation active).
-    let reputation_interceptor = Arc::new(ReputationInterceptor::new_for_network(
-        cli.reputation_params.into(),
-        &network_dir.sim_network,
-        clock.clone(),
+    // bootstrap itself, we just want to run with reputation active). Without this, we'll just
+    // run a regular lightning network with no jamming mitigation in place (and will not write any
+    // bootstrap data to disk).
+    let writer = if cli.run_type == RunType::Write {
+        let output_file = match cli.traffic_type {
+            TrafficType::Peacetime => network_dir.peacetime_traffic(),
+            TrafficType::Attacktime => network_dir.attacktime_traffic(),
+        };
+
         Some(Arc::new(Mutex::new(BootstrapWriter::new(
             clock.clone(),
             // TODO: change API in SimLN so that we can just pass a path in here.
@@ -81,9 +99,22 @@ async fn main() -> Result<(), BoxError> {
                 .unwrap()
                 .to_string_lossy()
                 .to_string(),
-        )?))),
-    )?);
-    let latency_interceptor = Arc::new(LatencyIntercepor::new_poisson(300.0)?);
+        )?)))
+    } else {
+        None
+    };
+
+    match cli.run_type {
+        RunType::Write | RunType::ReputationStats => {
+            interceptors.push(Arc::new(ReputationInterceptor::new_for_network(
+                cli.reputation_params.into(),
+                &network_dir.sim_network,
+                clock.clone(),
+                writer,
+            )?))
+        }
+        _ => {}
+    }
 
     // When we're generating payment activity, we do want to run for a fixed duration.
     if cli.sim_ln.duration.is_none() {
@@ -112,7 +143,7 @@ async fn main() -> Result<(), BoxError> {
         &sim_params,
         clock,
         tasks,
-        vec![reputation_interceptor, latency_interceptor],
+        interceptors,
         custom_records,
     )
     .await?;
