@@ -123,6 +123,12 @@ async fn main() -> Result<(), BoxError> {
 
     simulation.run(&validated_activities).await?;
 
+    log::info!(
+        "Simulation sent: {} payment with success rate: {}",
+        simulation.get_total_payments().await,
+        simulation.get_success_rate().await
+    );
+
     Ok(())
 }
 
