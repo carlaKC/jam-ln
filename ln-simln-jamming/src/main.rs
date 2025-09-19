@@ -241,7 +241,7 @@ async fn main() -> Result<(), BoxError> {
         exclude,
     };
 
-    let sim_cfg = SimulationCfg::new(None, 3_800_000, 2.0, None, Some(13995354354227336701));
+    let sim_cfg = SimulationCfg::from(cli.sim_ln);
     let (simulation, validated_activities, sim_nodes) = create_simulation_with_network(
         sim_cfg,
         &sim_params,
