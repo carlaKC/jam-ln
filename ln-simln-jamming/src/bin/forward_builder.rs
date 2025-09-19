@@ -1,11 +1,12 @@
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use clap::Parser;
+use humantime::Duration as HumanDuration;
 use ln_resource_mgr::{AllocationCheck, ProposedForward};
 use ln_simln_jamming::analysis::ForwardReporter;
 use ln_simln_jamming::clock::InstantClock;
 use ln_simln_jamming::parsing::{
-    parse_duration, NetworkParams, ReputationParams, SimulationFiles, TrafficType,
+    NetworkParams, ReputationParams, SimLNParams, SimulationFiles, TrafficType,
 };
 use ln_simln_jamming::reputation_interceptor::{BootstrapForward, ReputationInterceptor};
 use ln_simln_jamming::{BoxError, ACCOUNTABLE_TYPE, UPGRADABLE_TYPE};
@@ -19,21 +20,14 @@ use simln_lib::SimulationCfg;
 use simple_logger::SimpleLogger;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 use tokio::sync::Mutex;
 use tokio_util::task::TaskTracker;
-
-// The default amount of time data will be generated for.
-pub const DEFAULT_RUNTIME: &str = "6months";
 
 #[derive(Parser)]
 struct Cli {
     #[command(flatten)]
     network: NetworkParams,
-
-    /// The amount of time to generate forwarding history for.
-    #[arg(long, value_parser = parse_duration, default_value = DEFAULT_RUNTIME)]
-    pub duration: Duration,
 
     /// The network to generate forwarding traffic for.
     #[arg(long, short)]
@@ -41,6 +35,9 @@ struct Cli {
 
     #[command(flatten)]
     pub reputation_params: ReputationParams,
+
+    #[command(flatten)]
+    sim_ln: SimLNParams,
 }
 
 #[tokio::main]
@@ -55,7 +52,7 @@ async fn main() -> Result<(), BoxError> {
         .init()
         .unwrap();
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
 
     let network_dir = SimulationFiles::new(cli.network.network_dir.clone(), cli.traffic_type)?;
 
@@ -88,13 +85,12 @@ async fn main() -> Result<(), BoxError> {
     )?);
     let latency_interceptor = Arc::new(LatencyIntercepor::new_poisson(300.0)?);
 
-    let sim_cfg = SimulationCfg::new(
-        Some(cli.duration.as_secs() as u32),
-        3_800_000,
-        2.0,
-        None,
-        Some(13995354354227336701),
-    );
+    // When we're generating payment activity, we do want to run for a fixed duration.
+    if cli.sim_ln.duration.is_none() {
+        cli.sim_ln.duration = Some("6months".parse::<HumanDuration>()?.into());
+    }
+
+    let sim_cfg = SimulationCfg::from(cli.sim_ln);
 
     let mut exclude_pubkeys = vec![network_dir.target.1];
     for attacker in network_dir.attackers {
