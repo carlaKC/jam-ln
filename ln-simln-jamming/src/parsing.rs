@@ -13,6 +13,7 @@ use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use sim_cli::parsing::NetworkParser;
 use simln_lib::clock::SimulationClock;
+use simln_lib::SimulationCfg;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Seek};
@@ -42,6 +43,15 @@ pub const DEFAULT_REPUTATION_MARGIN_EXIPRY: &str = "200";
 
 /// The default batch size for writing results to disk.
 pub const DEFAULT_RESULT_BATCH_SIZE: &str = "500";
+
+/// The default expected payment amount for simulations.
+pub const DEFAULT_EXPECTED_PAYMENT_MSAT: &str = "3800000";
+
+/// The default multiplier for network activity.
+pub const DEFAULT_MULTIPLIER: &str = "2.0";
+
+/// The default seed provided sim-ln to fix random activity.
+pub const DEFAULT_SIMLN_SEED: &str = "13995354354227336701";
 
 #[derive(Clone, Parser)]
 pub struct ReputationParams {
@@ -78,6 +88,39 @@ pub struct NetworkParams {
     /// The directory containing all files required for the simulation.
     #[arg(long)]
     pub network_dir: PathBuf,
+}
+
+#[derive(Clone, Copy, Parser)]
+pub struct SimLNParams {
+    /// The amount of time to generate forwarding history for.
+    #[arg(long, value_parser = parse_duration)]
+    pub duration: Option<Duration>,
+
+    /// The expected payment amount in the network in msat, used to determine the size of payments
+    /// that will be propagated through the network.
+    #[arg(long, default_value = DEFAULT_EXPECTED_PAYMENT_MSAT)]
+    pub expected_payment_amt_msat: u64,
+
+    /// A multiplier that expresses the amount of times in a month that a node in the network
+    /// sends its full capacity in outgoing payments.
+    #[arg(long, default_value = DEFAULT_MULTIPLIER)]
+    pub activity_multiplier: f64,
+
+    /// The seed used to fix sim-ln payment activity.
+    #[arg(long, default_value = DEFAULT_SIMLN_SEED)]
+    pub seed: u64,
+}
+
+impl From<SimLNParams> for SimulationCfg {
+    fn from(value: SimLNParams) -> Self {
+        SimulationCfg::new(
+            value.duration.map(|d| d.as_secs() as u32),
+            value.expected_payment_amt_msat,
+            value.activity_multiplier,
+            None,
+            Some(value.seed),
+        )
+    }
 }
 
 /// Describes a network of files used to run a simulation.
@@ -311,6 +354,9 @@ pub struct Cli {
     /// The attack that will be run on the simulation.
     #[arg(long, value_enum, default_value = "sink")]
     pub attack: AttackType,
+
+    #[command(flatten)]
+    pub sim_ln: SimLNParams,
 
     #[clap(long, default_value = "debug")]
     pub log_level: LevelFilter,

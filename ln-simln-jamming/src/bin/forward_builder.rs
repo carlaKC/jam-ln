@@ -1,11 +1,12 @@
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+use humantime::Duration as HumanDuration;
 use ln_resource_mgr::{AllocationCheck, ProposedForward};
 use ln_simln_jamming::analysis::ForwardReporter;
 use ln_simln_jamming::clock::InstantClock;
 use ln_simln_jamming::parsing::{
-    parse_duration, NetworkParams, ReputationParams, SimulationFiles, TrafficType,
+    NetworkParams, ReputationParams, SimLNParams, SimulationFiles, TrafficType,
 };
 use ln_simln_jamming::reputation_interceptor::{BootstrapForward, ReputationInterceptor};
 use ln_simln_jamming::{BoxError, ACCOUNTABLE_TYPE, UPGRADABLE_TYPE};
@@ -14,26 +15,19 @@ use sim_cli::parsing::{create_simulation_with_network, SimParams};
 use simln_lib::batched_writer::BatchedWriter;
 use simln_lib::clock::{Clock, SimulationClock};
 use simln_lib::latency_interceptor::LatencyIntercepor;
-use simln_lib::sim_node::CustomRecords;
+use simln_lib::sim_node::{CustomRecords, Interceptor};
 use simln_lib::SimulationCfg;
 use simple_logger::SimpleLogger;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 use tokio::sync::Mutex;
 use tokio_util::task::TaskTracker;
-
-// The default amount of time data will be generated for.
-pub const DEFAULT_RUNTIME: &str = "6months";
 
 #[derive(Parser)]
 struct Cli {
     #[command(flatten)]
     network: NetworkParams,
-
-    /// The amount of time to generate forwarding history for.
-    #[arg(long, value_parser = parse_duration, default_value = DEFAULT_RUNTIME)]
-    pub duration: Duration,
 
     /// The network to generate forwarding traffic for.
     #[arg(long, short)]
@@ -41,6 +35,27 @@ struct Cli {
 
     #[command(flatten)]
     pub reputation_params: ReputationParams,
+
+    #[command(flatten)]
+    sim_ln: SimLNParams,
+
+    /// The mode to run the network in.
+    #[arg(long, value_enum, default_value = "write")]
+    run_type: RunType,
+}
+
+// Note: this enum is flattened for the sake of clap, which makes its handling a little clunky.
+#[derive(Debug, Clone, ValueEnum, PartialEq)]
+pub enum RunType {
+    /// Run the network with the jamming mitigation enabled, writing forwarding history to disk
+    /// that can be used to generate reputation data for future simulations.
+    Write,
+    /// Run the network with the jamming mitigation enabled and do not write any network activity
+    /// to disk.
+    ReputationStats,
+    /// Run the network without the jamming mitigation disabled and do not write any network
+    /// activity to disk.
+    NoReputationStats,
 }
 
 #[tokio::main]
@@ -55,26 +70,26 @@ async fn main() -> Result<(), BoxError> {
         .init()
         .unwrap();
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
 
     let network_dir = SimulationFiles::new(cli.network.network_dir.clone(), cli.traffic_type)?;
 
     let clock = Arc::new(SimulationClock::new(1000)?);
     let tasks = TaskTracker::new();
 
-    // Forwarding traffic can either be created for the peacetime or attacktime graphs. We'll
-    // choose our output file accordingly.
-    let output_file = match cli.traffic_type {
-        TrafficType::Peacetime => network_dir.peacetime_traffic(),
-        TrafficType::Attacktime => network_dir.attacktime_traffic(),
-    };
+    let mut interceptors: Vec<Arc<dyn Interceptor>> =
+        vec![Arc::new(LatencyIntercepor::new_poisson(300.0)?)];
 
     // Create a reputation interceptor without any bootstrap (since here we're creating the
-    // bootstrap itself, we just want to run with reputation active).
-    let reputation_interceptor = Arc::new(ReputationInterceptor::new_for_network(
-        cli.reputation_params.into(),
-        &network_dir.sim_network,
-        clock.clone(),
+    // bootstrap itself, we just want to run with reputation active). Without this, we'll just
+    // run a regular lightning network with no jamming mitigation in place (and will not write any
+    // bootstrap data to disk).
+    let writer = if cli.run_type == RunType::Write {
+        let output_file = match cli.traffic_type {
+            TrafficType::Peacetime => network_dir.peacetime_traffic(),
+            TrafficType::Attacktime => network_dir.attacktime_traffic(),
+        };
+
         Some(Arc::new(Mutex::new(BootstrapWriter::new(
             clock.clone(),
             // TODO: change API in SimLN so that we can just pass a path in here.
@@ -84,17 +99,29 @@ async fn main() -> Result<(), BoxError> {
                 .unwrap()
                 .to_string_lossy()
                 .to_string(),
-        )?))),
-    )?);
-    let latency_interceptor = Arc::new(LatencyIntercepor::new_poisson(300.0)?);
+        )?)))
+    } else {
+        None
+    };
 
-    let sim_cfg = SimulationCfg::new(
-        Some(cli.duration.as_secs() as u32),
-        3_800_000,
-        2.0,
-        None,
-        Some(13995354354227336701),
-    );
+    match cli.run_type {
+        RunType::Write | RunType::ReputationStats => {
+            interceptors.push(Arc::new(ReputationInterceptor::new_for_network(
+                cli.reputation_params.into(),
+                &network_dir.sim_network,
+                clock.clone(),
+                writer,
+            )?))
+        }
+        _ => {}
+    }
+
+    // When we're generating payment activity, we do want to run for a fixed duration.
+    if cli.sim_ln.duration.is_none() {
+        cli.sim_ln.duration = Some("6months".parse::<HumanDuration>()?.into());
+    }
+
+    let sim_cfg = SimulationCfg::from(cli.sim_ln);
 
     let mut exclude_pubkeys = vec![network_dir.target.1];
     for attacker in network_dir.attackers {
@@ -116,12 +143,18 @@ async fn main() -> Result<(), BoxError> {
         &sim_params,
         clock,
         tasks,
-        vec![reputation_interceptor, latency_interceptor],
+        interceptors,
         custom_records,
     )
     .await?;
 
     simulation.run(&validated_activities).await?;
+
+    log::info!(
+        "Simulation sent: {} payment with success rate: {}",
+        simulation.get_total_payments().await,
+        simulation.get_success_rate().await
+    );
 
     Ok(())
 }
