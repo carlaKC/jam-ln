@@ -90,7 +90,7 @@ pub async fn build_reputation<R: ReputationMonitor>(
 
     let mut attacker = params.attacker_node.lock().await;
     let attacker_pubkey = attacker.get_info().pubkey;
-    let mut route = build_custom_route(&attacker_pubkey, 1000, params.hops, params.network_graph)
+    let mut route = build_custom_route(&attacker_pubkey, 1_000, params.hops, params.network_graph)
         .map_err(|e| e.err)?;
 
     let last_hop_channel = route.paths[0]
