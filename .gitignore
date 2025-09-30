@@ -1,6 +1,3 @@
-*.json
-*.csv
-*.txt
 target
 data
 results/*
