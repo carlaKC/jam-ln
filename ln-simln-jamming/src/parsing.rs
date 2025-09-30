@@ -67,12 +67,6 @@ impl From<ReputationParams> for ForwardManagerParams {
     }
 }
 
-#[derive(Debug, Copy, Clone, Parser, ValueEnum)]
-pub enum TrafficType {
-    Peacetime,
-    Attacktime,
-}
-
 #[derive(Clone, Parser)]
 pub struct NetworkParams {
     /// The directory containing all files required for the simulation.
@@ -82,6 +76,10 @@ pub struct NetworkParams {
     /// The attack that will be run on the simulation.
     #[arg(long, value_enum)]
     pub attack: Option<AttackType>,
+
+    /// Whether to bootstrap the attacker's reputation for a period of time.
+    #[arg(long, value_parser = parse_duration)]
+    pub attacker_bootstrap: Option<Duration>,
 }
 
 /// Describes a network of files used to run a simulation.
@@ -92,40 +90,39 @@ pub struct SimulationFiles {
     /// The graph that the simulation will run on.
     pub sim_network: Vec<NetworkParser>,
 
-    /// Attacker nodes that will be used in the simulation.
-    pub attackers: Vec<(String, PublicKey)>,
-
-    /// The details of the target node.
+    /// The node that will be targeted under attack.
     pub target: (String, PublicKey),
+
+    // Details of the attack to run, if any.
+    pub attack_files: Option<AttackFiles>,
 }
 
-impl SimulationFiles {
-    /// Reads simulation relevant files and creates and directories necessary for the simulation.
-    pub fn new(network_dir: PathBuf, graph_type: TrafficType) -> Result<Self, BoxError> {
-        // We'll always read both graphs to make sure that they're sanely set up, even though
-        // we only need one or the other depending on graph type.
-        let peacetime_network: SimNetwork = serde_json::from_str(
-            &fs::read_to_string(network_dir.join("peacetime_network.json"))
-                .map_err(|e| format!("could not find peacetime_network.json: {}", e))?,
-        )?;
+pub struct AttackFiles {
+    attack: AttackType,
+    pub attackers: Vec<(String, PublicKey)>,
+    pub attacker_bootstrap: Option<Duration>,
+}
+
+impl AttackFiles {
+    fn new(
+        network_dir: PathBuf,
+        attack: AttackType,
+        attacker_bootstrap: Option<Duration>,
+    ) -> Result<(Vec<NetworkParser>, Self), BoxError> {
+        let attack_dir = network_dir.join("attacks").join(format!("{:?}", attack));
 
         let attacktime_network: SimNetwork = serde_json::from_str(
-            &fs::read_to_string(network_dir.join("attacktime_network.json"))
+            &fs::read_to_string(attack_dir.join("attacktime_network.json"))
                 .map_err(|e| format!("could not find attacktime_network.json: {}", e))?,
         )?;
 
-        let attacker_list = fs::read_to_string(network_dir.join("attacker.csv"))
+        let attacker_list = fs::read_to_string(attack_dir.join("attacker.csv"))
             .map_err(|e| format!("attacker.csv file containing attacker alias not found: {e}"))?;
         let attacker_aliases: Vec<&str> = attacker_list.trim().split(',').collect();
 
         if attacker_aliases.is_empty() {
             return Err("could not read attackers from attacker.csv".into());
         }
-        diff_peacetime_attacktime(
-            &peacetime_network.sim_network,
-            &attacktime_network.sim_network,
-            &attacker_aliases,
-        )?;
 
         let mut attackers = Vec::with_capacity(attacker_aliases.len());
         for alias in attacker_aliases {
@@ -133,26 +130,61 @@ impl SimulationFiles {
             attackers.push((alias.to_string(), attacker_pubkey));
         }
 
+        Ok((
+            attacktime_network.sim_network,
+            Self {
+                attack,
+                attackers,
+                attacker_bootstrap,
+            },
+        ))
+    }
+}
+
+impl SimulationFiles {
+    /// Reads simulation relevant files and creates and directories necessary for the simulation.
+    pub fn new(network_params: &NetworkParams) -> Result<Self, BoxError> {
+        // We always require that the peacetime graph exists, so that we can compare our attack
+        // time graph to it (or to just use it).
+        let network_dir = network_params.network_dir.clone();
+        let peacetime_network: SimNetwork = serde_json::from_str(
+            &fs::read_to_string(network_dir.join("peacetime_network.json"))
+                .map_err(|e| format!("could not find peacetime_network.json: {}", e))?,
+        )?;
+
+        let (sim_network, attack_files) = if let Some(attack) = &network_params.attack {
+            let attack_files = AttackFiles::new(
+                network_dir.clone(),
+                attack.clone(),
+                network_params.attacker_bootstrap,
+            )?;
+            diff_peacetime_attacktime(
+                &peacetime_network.sim_network,
+                &attack_files.0,
+                HashSet::from_iter(attack_files.1.attackers.iter().map(|s| s.0.clone())),
+            )?;
+
+            (attack_files.0, Some(attack_files.1))
+        } else {
+            (peacetime_network.sim_network, None)
+        };
+
         // We only allow one target node, but if there are multiple aliases in this file we'll
         // fail to find the pubkey by alias below.
         let target_alias = fs::read_to_string(network_dir.join("target.txt"))
             .map_err(|e| format!("target.txt file containing target alias not found: {}", e))?
             .trim()
             .to_owned();
-
-        let target_pubkey = find_pubkey_by_alias(&target_alias, &attacktime_network.sim_network)?;
+        let target_pubkey = find_pubkey_by_alias(&target_alias, &sim_network)?;
 
         // Create reputation directory that is part of the expected structure for the network.
         std::fs::create_dir_all(network_dir.join("reputation"))?;
 
         Ok(SimulationFiles {
             dir: network_dir,
-            sim_network: match graph_type {
-                TrafficType::Attacktime => attacktime_network.sim_network,
-                TrafficType::Peacetime => peacetime_network.sim_network,
-            },
-            attackers,
+            sim_network,
             target: (target_alias, target_pubkey),
+            attack_files,
         })
     }
 
@@ -171,29 +203,49 @@ impl SimulationFiles {
     /// Returns the location of a reputation and target revenue summary for the period of time
     /// that the attacker in the network is bootstrapped for, creating sub-directories to hold
     /// these files is necessary.
-    pub fn reputation_summary(&self, duration: Option<Duration>) -> (PathBuf, PathBuf) {
-        let reputation_dir = self
-            .dir
-            .join("reputation")
-            .join(duration.unwrap_or(Duration::ZERO).as_secs().to_string());
+    pub fn reputation_summary(&self) -> (PathBuf, Option<PathBuf>) {
+        match self.attack_files.as_ref() {
+            Some(
+                AttackFiles {
+                    attack,
+                    attacker_bootstrap: Some(bootstrap_dur),
+                    ..
+                },
+                ..,
+            ) => {
+                let reputation_dir = self
+                    .dir
+                    .join("attacks")
+                    .join(format!("{:?}", attack))
+                    .join("reputation")
+                    .join(bootstrap_dur.as_secs().to_string());
 
-        // Create the specific duration directory
-        let _ = std::fs::create_dir_all(&reputation_dir);
-
-        (
-            reputation_dir.join("reputation_summary.csv"),
-            reputation_dir.join("target_revenue.txt"),
-        )
+                // Create the specific duration directory
+                let _ = std::fs::create_dir_all(&reputation_dir);
+                (
+                    reputation_dir.join("reputation_summary.csv"),
+                    Some(reputation_dir.join("target_revenue.txt")),
+                )
+            }
+            None | _ => (self.dir.join("reputation.csv"), None),
+        }
     }
 
-    /// Returns the location of the file containing peacetime projections for the network.
-    pub fn peacetime_traffic(&self) -> PathBuf {
+    /// Returns the location of our peacetime projected traffic.
+    pub fn peacetime_file(&self) -> PathBuf {
         self.dir.join("peacetime_traffic.csv")
     }
 
-    /// Returns the location of the file used to generate reputation snapshots from.
-    pub fn attacktime_traffic(&self) -> PathBuf {
-        self.dir.join("attacktime_traffic.csv")
+    /// Returns the location of the file containing traffic projections for the network.
+    pub fn traffic_file(&self) -> PathBuf {
+        if let Some(attack) = &self.attack_files {
+            self.dir
+                .join("attacks")
+                .join(format!("{:?}", attack.attack))
+                .join("attacktime_traffic.json")
+        } else {
+            self.peacetime_file()
+        }
     }
 }
 
@@ -202,7 +254,7 @@ impl SimulationFiles {
 fn diff_peacetime_attacktime(
     peacetime: &[NetworkParser],
     attacktime: &[NetworkParser],
-    attacker_aliases: &[&str],
+    attacker_aliases: HashSet<String>,
 ) -> Result<(), BoxError> {
     let peacetime_map: HashMap<u64, (String, String)> = peacetime
         .iter()
@@ -223,9 +275,6 @@ fn diff_peacetime_attacktime(
             )
         })
         .collect();
-
-    let attacker_aliases: HashSet<String> =
-        HashSet::from_iter(attacker_aliases.iter().map(|s| s.to_string()));
 
     for (scid, (peacetime_1, peacetime_2)) in peacetime_map.iter() {
         if attacker_aliases.contains(peacetime_1) || attacker_aliases.contains(peacetime_2) {
@@ -323,7 +372,6 @@ pub enum AttackType {
 }
 
 pub fn setup_attack<R, M>(
-    cli: &Cli,
     simulation: &SimulationFiles,
     clock: Arc<SimulationClock>,
     reputation_monitor: Arc<R>,
@@ -338,15 +386,15 @@ where
 
     // NOTE: If you are implementing your own attack and have added the variant to AttackType, you can
     // then do any setup specific to your attack here and return.
-    match cli
-        .network
-        .attack
+    let attack_files = simulation
+        .attack_files
         .as_ref()
-        .ok_or("attack type required for simulation run")?
-    {
+        .ok_or("attack type required for simulation run")?;
+
+    match attack_files.attack {
         AttackType::Sink => {
             let attacker_pubkeys: Vec<PublicKey> =
-                simulation.attackers.iter().map(|a| a.1).collect();
+                attack_files.attackers.iter().map(|a| a.1).collect();
             let attack = Arc::new(SinkAttack::new(
                 clock,
                 &sim_network,

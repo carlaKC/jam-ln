@@ -4,9 +4,7 @@ use clap::Parser;
 use ln_resource_mgr::{AllocationCheck, ProposedForward};
 use ln_simln_jamming::analysis::ForwardReporter;
 use ln_simln_jamming::clock::InstantClock;
-use ln_simln_jamming::parsing::{
-    parse_duration, NetworkParams, ReputationParams, SimulationFiles, TrafficType,
-};
+use ln_simln_jamming::parsing::{parse_duration, NetworkParams, ReputationParams, SimulationFiles};
 use ln_simln_jamming::reputation_interceptor::{BootstrapForward, ReputationInterceptor};
 use ln_simln_jamming::{BoxError, ACCOUNTABLE_TYPE, UPGRADABLE_TYPE};
 use log::LevelFilter;
@@ -35,10 +33,6 @@ struct Cli {
     #[arg(long, value_parser = parse_duration, default_value = DEFAULT_RUNTIME)]
     pub duration: Duration,
 
-    /// The network to generate forwarding traffic for.
-    #[arg(long, short)]
-    pub traffic_type: TrafficType,
-
     #[command(flatten)]
     pub reputation_params: ReputationParams,
 }
@@ -57,17 +51,11 @@ async fn main() -> Result<(), BoxError> {
 
     let cli = Cli::parse();
 
-    let network_dir = SimulationFiles::new(cli.network.network_dir.clone(), cli.traffic_type)?;
+    let network_dir = SimulationFiles::new(&cli.network)?;
+    let output_file = network_dir.traffic_file();
 
     let clock = Arc::new(SimulationClock::new(1000)?);
     let tasks = TaskTracker::new();
-
-    // Forwarding traffic can either be created for the peacetime or attacktime graphs. We'll
-    // choose our output file accordingly.
-    let output_file = match cli.traffic_type {
-        TrafficType::Peacetime => network_dir.peacetime_traffic(),
-        TrafficType::Attacktime => network_dir.attacktime_traffic(),
-    };
 
     // Create a reputation interceptor without any bootstrap (since here we're creating the
     // bootstrap itself, we just want to run with reputation active).
@@ -97,8 +85,10 @@ async fn main() -> Result<(), BoxError> {
     );
 
     let mut exclude_pubkeys = vec![network_dir.target.1];
-    for attacker in network_dir.attackers {
-        exclude_pubkeys.push(attacker.1);
+    if let Some(attack_files) = network_dir.attack_files {
+        for attacker in attack_files.attackers {
+            exclude_pubkeys.push(attacker.1);
+        }
     }
 
     let custom_records =

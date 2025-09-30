@@ -5,7 +5,7 @@ use ln_simln_jamming::analysis::BatchForwardWriter;
 use ln_simln_jamming::attack_interceptor::AttackInterceptor;
 use ln_simln_jamming::clock::InstantClock;
 use ln_simln_jamming::parsing::{
-    reputation_snapshot_from_file, setup_attack, Cli, SimulationFiles, TrafficType,
+    reputation_snapshot_from_file, setup_attack, Cli, SimulationFiles,
 };
 use ln_simln_jamming::reputation_interceptor::{ChannelJammer, ReputationInterceptor};
 use ln_simln_jamming::revenue_interceptor::{
@@ -48,8 +48,7 @@ async fn main() -> Result<(), BoxError> {
         .unwrap();
 
     // We always want to load the attack time graph when running the simulation.
-    let network_dir =
-        SimulationFiles::new(cli.network.network_dir.clone(), TrafficType::Attacktime)?;
+    let network_dir = SimulationFiles::new(&cli.network)?;
     let target_pubkey = network_dir.target.1;
 
     let tasks = TaskTracker::new();
@@ -120,16 +119,23 @@ async fn main() -> Result<(), BoxError> {
         }
     });
 
-    let (reputation_state, target_revenue) = network_dir.reputation_summary(cli.attacker_bootstrap);
+    let (reputation_state, target_revenue) = network_dir.reputation_summary();
     let reputation_snapshot = reputation_snapshot_from_file(&reputation_state).map_err(|e| {
         format!(
             "could not find reputation snapshot {:?}, try generating one with reputation-builder: {:?}",
             reputation_state, e
         )
     })?;
-    let bootstrap_revenue: u64 = std::fs::read_to_string(target_revenue)?.parse()?;
+    let bootstrap_revenue: u64 = match target_revenue {
+        Some(revenue_path) => std::fs::read_to_string(revenue_path)?.parse()?,
+        None => 0,
+    };
+    let attack_files = network_dir
+        .attack_files
+        .as_ref()
+        .ok_or("must specify attack for simulation run")?;
 
-    let attacker_pubkeys: Vec<PublicKey> = network_dir.attackers.iter().map(|a| a.1).collect();
+    let attacker_pubkeys: Vec<PublicKey> = attack_files.attackers.iter().map(|a| a.1).collect();
     let reputation_interceptor = Arc::new(
         ReputationInterceptor::new_from_snapshot(
             forward_params,
@@ -155,7 +161,7 @@ async fn main() -> Result<(), BoxError> {
             target_pubkey,
             bootstrap_revenue,
             cli.attacker_bootstrap,
-            network_dir.peacetime_traffic(),
+            network_dir.peacetime_file(),
             listener.clone(),
         )
         .await?,
@@ -180,7 +186,6 @@ async fn main() -> Result<(), BoxError> {
 
     // Next, setup the attack interceptor to use our custom attack.
     let attack = setup_attack(
-        &cli,
         &network_dir,
         Arc::clone(&clock),
         Arc::clone(&reputation_interceptor),
@@ -256,7 +261,7 @@ async fn main() -> Result<(), BoxError> {
     let attacker_nodes: HashMap<String, Arc<Mutex<SimNode<SimGraph, SimulationClock>>>> = sim_nodes
         .into_iter()
         .filter_map(|(pk, node)| {
-            network_dir
+            attack_files
                 .attackers
                 .iter()
                 .find(|attacker| attacker.1 == pk)
