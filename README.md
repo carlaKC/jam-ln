@@ -1,102 +1,150 @@
 # Jamming Simulator
 
-This simulator implements the following to mitigate channel jamming
-attacks:
-- Outgoing reputation:
-  When forwarding a HTLC, the reputation of the *outgoing* channel is
-  compared to the revenue that's been earned on the *incoming* channel.
-- HTLC accountability: if a HTLC has occupied scarce resources, it
-  will be forwarded as accountable to indicate to the receiving node
-  that their reputation will be held accountable for its resolution.
-- Resource bucketing: resources are divided into buckets
-  - General: available to all channels, with some restrictions on how many
-    resources a single peer can occupy.
-  - Congestion: used when general resources are saturated, with strict
-    control on access (because the node is likely under attack if general
-    is full).
-  - Protected: available to nodes with sufficient reputation.
+This simulator implements the reputation and accountability scheme
+proposed [here](https://github.com/lightning/bolts/pull/1280), which
+is the first part of a [hybrid proposal](https://gist.github.com/carlaKC/02251cd061260bbb149f361c65fc9f2f)
+to address channel jamming attacks.
 
-A draft writeup of this scheme is available [here](https://github.com/carlaKC/lightning-rfc/pull/5).
-The evolution of how we've been thinking about this problem is 
-summarized [here](https://gist.github.com/carlaKC/5139adf4fd12b4ecd53c660b5be11bf0).
+This simulator will run two networks in parallel:
+* Peacetime: propagate payments through the network without the attacker
+  present (no channels, no attack), representing peacetime operation of
+  the network.
+* Attacktime: propagate payments through the network with the attacker's
+  channels added and its attack running.
 
-The simulator will execute a channel jamming attack against a target
-node running the above proposed mitigation. It will exit when:
-- The target's revenue under attack (in the simulation) is less than
-  its projected revenue in times of peace.
-- The attack-specific shutdown condition has been met.
-- The simulator has run out of peacetime forward to replay to compare
-  revenue.
+Once the attack is completed, it will report on the target node's
+revenue in each network, along with reputation statistics from the
+attack time network.
+
+## Considerations
+
+There are two features of this proposal that have *not been 
+implemented* yet:
+- [ ] Scale `opportunity_cost` as a float, [rather than an integer](https://github.com/lightning/bolts/pull/1280#discussion_r2349880197).
+- [ ] [Do not allow overpayment](https://github.com/lightning/bolts/pull/1280#discussion_r2369501671) of advertised fees.
+
+Please also note that this solution is intended to be deployed with
+an unconditional fee (charged on failed payments) of 1% of the success
+case fees. This should be considered when assessing the cost of an
+attack.
+
+## Setting Up a Network
+
+The `networks` directory contains graphs that can be used to execute
+attacks against. Each sub-directory represents a graph, and should
+contain the following:
+* `peacetime_network.json`: the lightning network [graph](https://github.com/carlaKC/sim-ln?tab=readme-ov-file#advanced-usage---network-simulation)
+  for the attack, with no attacker channels added.
+* `peacetime_traffic.csv`: projected traffic for this network in times
+  of peace, used to execute peacetime operation of the network.
+* `reputation.csv`: the starting state reputation for nodes in the
+  network, which bootstraps network state with 6 months of reputation
+  history.
+* `target.txt`: a text file containing the alias of the node being
+  targeted for attack.
+
+To create an attack against a peacetime network, you will need to
+provide the following files in 
+
+`networks/{network name}/attacks/{attack name}`: 
+* `attacktime_network.json`: the `peacetime_network.json` with any
+  attacker channels required added to it. Note that these graphs
+  *must* be identical *except* for the attacker's channels.
+* `attacker.csv`: a csv file containing the alias of the attacking 
+  node(s).
+
+Note that `{attack name}` is derived from the name that you give your
+attack, see [writing an attack](#writing-an-attack).
+
+For more complex network setups see:
+- [Changing target node](#changing-target-node): to change the node
+  that is attacked in a graph.
+- [Bootstrapping attacker reputation](#bootstrapping-attacker-reputation):
+  for attacks where the attacker passively forwards payments in the
+  network to build reputation before starting an attack.
+- [Creating your own network](#creating-your-own-network): for
+  instructions on setting up your own peacetime network.
+
+## Writing an Attack
+
+To implement an attack in the simulator, you need to:
+* Implement the `JammingAttack` trait.
+* Add your attack to the `AttackType` enum, which should match the name
+  of the directory your attack files are in.
+
+See the docs on each for further instructions.
 
 ## Install
 
 To install and run the simulator:
 ```
 make install
-ln-simln-jamming --network-dir {path to network directory}
+ln-simln-jamming --network-dir {path to network directory} --attack {attack name}
 ```
 
-## Tooling
+Output produced by the simulator will be written to:
+`results/{attack name}/start_timestamp_seconds`
 
-To help set up custom networks for this simulator, the following tooling
-is available:
-* `forward-builder`: simulates payment traffic on a graph and records
-  each node's forwarded HTLCs. This output is used to generate starting
-  state reputation for all the nodes in the network, and to project
-  what the target's revenue would be in times of peace (when not under
-  attack).
-* `reputation-builder`: creates a summary of each node in the network's
-  starting reputation state, based on the output provided from
-  `forward-builder`. Used to speed up simulation start times.
+## Advanced Network Setup
 
-To install:
+To install tooling required for advanced network setup:
 ```
 make install-tools
 ```
 
-## Network Directory
+### Changing Target Node
 
-To run the simulation, the following files are required in the directory
-specified by the `--network` option:
-* `peacetime_network.json`: the lightning network [graph](https://github.com/carlaKC/sim-ln?tab=readme-ov-file#advanced-usage---network-simulation)
-  for the attack, with no attacker channels added.
-* `attacktime_network.json`: the lightning network [graph](https://github.com/carlaKC/sim-ln?tab=readme-ov-file#advanced-usage---network-simulation)
-  for the attack, with attacker channels added.
-* `peacetime_traffic.csv`: a projected set of forwards for the 
-  `peacetime_network.json` file, used to determine what the target's
-  revenue would be in times of peace.
-* `target.txt`: a text file containing the alias of the node being
-  targeted for attack.
-* `attacker.csv`: a csv file containing the alias of the attacking node.
+In our simulator, the target node is a routing node (it does not send
+or receive payments). This means that peacetime traffic must be updated
+if you want to change the target node.
 
-Note: At present the simulation only supports a single attacker and
-a single target node.
+* Update the alias in `target.txt` to the new target node.
+* Run the following to regenerate peacetime projections:
 
-### Starting Reputation State
+```
+forward-builder --network-dir {network name}
+reputation-builder --network-dir {network name}
+```
 
-There are two options for setting up the starting reputation state for
-the simulator:
-1. Regular: start the simulator with reputations for honest nodes
-   bootstrapped for 6 months, and attacking channels starting with
-   no reputation.
-2. Attacker bootstrap: start the simulator with reputation for honest
-  nodes bootstrapped for 6 months, and attacking channels starting with
-  reputation earned from passively forwarding payments in the network
-  for a specified timestamp using `--attacker-bootstrap` 
+This will recreate `peacetime_traffic.csv` and `reputation.csv` with
+your updated target node.
 
-For each mode of operation, the simulator requires that a reputation
-summary is generated using the `reputation-builder` utility.
-For each mode, the simulator requires the following files:
-* `reputation_summary.csv`: a summary of each node's starting reputation
-  state.
-* `target_revenue.csv`: the target node's total revenue earned during
-  this bootstrap period, expressed in msat.
+### Bootstrapping Attacker Reputation
 
-These summaries may be generated using the `reputation-builder` utility.
-If generating summaries for the case where an attacker is bootstrapping
-their reputation passively, a `attacktime_traffic.csv` file will also
-be required in the `network` directory (which can be generated using
-the `forward-builder` utility)
+If you would like to run an attack which requires the attacker passively
+forwarding payments for a long period of time, you can speed this process
+up by providing an attacker bootstrap file.
+
+Generate projected forwards for the network *including* the attacker's
+channels:
+```
+forward-builder --network-dir {path to network directory} --attack {attack name} 
+```
+
+Build reputation summaries for the "bootstrap duration" that you would
+like the attacker to passively forward payments in the network for.
+```
+reputation-builder --network-dir {path to network directory} --attack {attack name} --attacker-bootstrap {bootstrap duration}
+```
+
+When you run the simulator, include the `--attacker-bootstrap` option
+with the same value as used for `reputation-builder`. This will run
+the simulator with the attacker's reputation bootstrapped for the
+period provided.
+
+### Creating Your Own Network
+
+If you'd like to create your own `peacetime_graph.json`, you can
+manually create your own graph or use [this script](https://github.com/carlaKC/sim-ln/blob/script-lnd-to-simln/tools/lnd_to_simln.py)
+to convert the output of LND's `describegraph` call to the correct
+format.
+
+Once you have this graph, run the following in sequence to generate
+`peacetime_traffic.csv` and `reputation.csv` respectively:
+```
+forward-builder --network-dir {path to network directory}
+reputation-builder --network-dir {path to network directory}
+```
 
 ## Shortcomings
 
