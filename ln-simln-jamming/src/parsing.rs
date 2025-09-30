@@ -78,6 +78,10 @@ pub struct NetworkParams {
     /// The directory containing all files required for the simulation.
     #[arg(long)]
     pub network_dir: PathBuf,
+
+    /// The attack that will be run on the simulation.
+    #[arg(long, value_enum)]
+    pub attack: Option<AttackType>,
 }
 
 /// Describes a network of files used to run a simulation.
@@ -308,10 +312,6 @@ pub struct Cli {
     #[command(flatten)]
     pub reputation_params: ReputationParams,
 
-    /// The attack that will be run on the simulation.
-    #[arg(long, value_enum, default_value = "sink")]
-    pub attack: AttackType,
-
     #[clap(long, default_value = "debug")]
     pub log_level: LevelFilter,
 }
@@ -338,7 +338,12 @@ where
 
     // NOTE: If you are implementing your own attack and have added the variant to AttackType, you can
     // then do any setup specific to your attack here and return.
-    match cli.attack {
+    match cli
+        .network
+        .attack
+        .as_ref()
+        .ok_or("attack type required for simulation run")?
+    {
         AttackType::Sink => {
             let attacker_pubkeys: Vec<PublicKey> =
                 simulation.attackers.iter().map(|a| a.1).collect();
