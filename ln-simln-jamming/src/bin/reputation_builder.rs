@@ -3,7 +3,6 @@ use std::{
     fs::{File, OpenOptions},
     io::Write,
     sync::Arc,
-    time::Duration,
 };
 
 use bitcoin::secp256k1::PublicKey;
@@ -14,8 +13,7 @@ use ln_simln_jamming::{
     analysis::BatchForwardWriter,
     clock::InstantClock,
     parsing::{
-        get_history_for_bootstrap, history_from_file, parse_duration, NetworkParams,
-        ReputationParams, SimulationFiles, TrafficType,
+        get_history_for_bootstrap, history_from_file, NetworkParams, NetworkType, ReputationParams,
     },
     reputation_interceptor::{BootstrapRecords, ReputationInterceptor, ReputationMonitor},
     BoxError,
@@ -29,9 +27,6 @@ use simple_logger::SimpleLogger;
 struct Cli {
     #[command(flatten)]
     network: NetworkParams,
-
-    #[arg(long, value_parser = parse_duration)]
-    pub attacker_bootstrap: Option<Duration>,
 
     #[command(flatten)]
     pub reputation_params: ReputationParams,
@@ -48,38 +43,27 @@ async fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
     let forward_params: ForwardManagerParams = cli.reputation_params.into();
 
-    let network_type = match cli.attacker_bootstrap {
-        Some(_) => TrafficType::Attacktime,
-        None => TrafficType::Peacetime,
-    };
-    let network_dir = SimulationFiles::new(cli.network.network_dir, network_type)?;
-    let target_pubkey = network_dir.target.1;
+    let network = NetworkType::new(&cli.network)?;
+    if matches!(network, NetworkType::AttackTime(_, _)) {
+        return Err("reputation builder must be run with bootstrapped attack or no attack".into());
+    }
 
-    // If no attacker bootstrap period is specified, we can just use the traffic from peacetime
-    // projections to bootstrap peaceful nodes in the network. This may provide a quicker start
-    // for some attacks because you do not need to generate the second traffic file.
-    let traffic_file = if cli.attacker_bootstrap.is_some() {
-        &network_dir.attacktime_traffic()
-    } else {
-        &network_dir.peacetime_traffic()
-    };
+    let active_network = network.active_network();
+    let target_pubkey = network.target().1;
+    let traffic_file = network.traffic_file();
 
     let unfiltered_history = history_from_file(
-        traffic_file,
+        &traffic_file,
         Some(forward_params.reputation_params.reputation_window()),
     )
     .await?;
 
     // Filter bootstrap records if attacker alias and bootstrap provided.
     // Only add up revenue if attacker bootstrap is specified.
-    let (bootstrap, bootstrap_revenue) = if let Some(bootstrap_dur) = cli.attacker_bootstrap {
-        if bootstrap_dur.is_zero() {
-            return Err("zero attacker_bootstrap is invalid, do not specify option".into());
-        }
-
-        let attacker_pubkeys: Vec<PublicKey> = network_dir.attackers.iter().map(|a| a.1).collect();
-        let target_to_attacker_channels: HashSet<u64> = network_dir
-            .sim_network
+    let (bootstrap, bootstrap_revenue) = if let Some(bootstrap_dur) = cli.network.attacker_bootstrap
+    {
+        let attacker_pubkeys: Vec<PublicKey> = network.attackers().iter().map(|a| a.1).collect();
+        let target_to_attacker_channels: HashSet<u64> = active_network
             .iter()
             .filter(|&channel| {
                 (channel.node_1.pubkey == target_pubkey
@@ -125,7 +109,7 @@ async fn main() -> Result<(), BoxError> {
     let mut reputation_interceptor: ReputationInterceptor<BatchForwardWriter, ForwardManager> =
         ReputationInterceptor::new_for_network(
             forward_params,
-            &network_dir.sim_network,
+            active_network,
             reputation_clock,
             None,
         )?;
@@ -135,22 +119,24 @@ async fn main() -> Result<(), BoxError> {
         .await?;
 
     let mut node_pubkeys = HashSet::new();
-    for chan in network_dir.sim_network.iter() {
+    for chan in active_network.iter() {
         node_pubkeys.insert(chan.node_1.pubkey);
         node_pubkeys.insert(chan.node_2.pubkey);
     }
 
-    let (reputation_state, target_revenue_path) =
-        network_dir.reputation_summary(cli.attacker_bootstrap);
+    let reputation_file = network.reputation_file();
+    let revenue_file = network.revenue_file();
 
-    let mut target_revenue = File::create(target_revenue_path.clone())?;
-    write!(target_revenue, "{}", bootstrap_revenue)?;
+    if let Some(revenue_file_path) = &revenue_file {
+        let mut target_revenue = File::create(revenue_file_path)?;
+        write!(target_revenue, "{}", bootstrap_revenue)?;
+    }
 
     let snapshot_file = OpenOptions::new()
         .write(true)
         .truncate(true)
         .create(true)
-        .open(&reputation_state)?;
+        .open(&reputation_file)?;
 
     let mut csv_writer = Writer::from_writer(snapshot_file);
     csv_writer.write_record([
@@ -179,9 +165,13 @@ async fn main() -> Result<(), BoxError> {
     csv_writer.flush()?;
 
     log::info!(
-        "Finished writing reputation snapshot to {:?} and revenue to {:?}",
-        reputation_state,
-        target_revenue_path,
+        "Finished writing reputation snapshot to {:?}{}",
+        reputation_file.to_string_lossy(),
+        if let Some(p) = revenue_file {
+            format!(" and revenue to: {}", p.to_string_lossy())
+        } else {
+            "".to_string()
+        },
     );
 
     Ok(())

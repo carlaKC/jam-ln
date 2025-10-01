@@ -78,50 +78,224 @@ pub struct NetworkParams {
     /// The directory containing all files required for the simulation.
     #[arg(long)]
     pub network_dir: PathBuf,
+
+    /// The attack that we're interested in running.
+    #[arg(long, value_enum)]
+    pub attack_type: Option<AttackType>,
+
+    /// The duration of time that reputation of the attacking node's reputation will be bootstrapped
+    /// for, expressed as human readable values (eg: 1w, 3d). Requires that a reputation bootstrap
+    /// file has been created in advance for this duration.
+    #[arg(long, value_parser = parse_duration)]
+    pub attacker_bootstrap: Option<Duration>,
 }
 
-/// Describes a network of files used to run a simulation.
-pub struct SimulationFiles {
-    /// The network directory that contains all files required for the simulation.
-    dir: PathBuf,
-
-    /// The graph that the simulation will run on.
-    pub sim_network: Vec<NetworkParser>,
-
-    /// Attacker nodes that will be used in the simulation.
-    pub attackers: Vec<(String, PublicKey)>,
-
-    /// The details of the target node.
-    pub target: (String, PublicKey),
+pub enum NetworkType {
+    Peacetime(PeacetimeNetwork),
+    AttackTime(PeacetimeNetwork, AttacktimeNetwork),
+    BootstrapAttackTime(PeacetimeNetwork, AttacktimeNetwork, Duration),
 }
 
-impl SimulationFiles {
-    /// Reads simulation relevant files and creates and directories necessary for the simulation.
-    pub fn new(network_dir: PathBuf, graph_type: TrafficType) -> Result<Self, BoxError> {
-        // We'll always read both graphs to make sure that they're sanely set up, even though
-        // we only need one or the other depending on graph type.
-        let peacetime_network: SimNetwork = serde_json::from_str(
-            &fs::read_to_string(network_dir.join("peacetime_network.json"))
-                .map_err(|e| format!("could not find peacetime_network.json: {}", e))?,
-        )?;
+impl NetworkType {
+    pub fn new(params: &NetworkParams) -> Result<Self, BoxError> {
+        let peacetime_network = PeacetimeNetwork::new(params.network_dir.clone())?;
+        if let Some(attack) = &params.attack_type {
+            let attacktime_network = AttacktimeNetwork::new(
+                params
+                    .network_dir
+                    .join("attacks")
+                    .join(format!("{:?}", attack)),
+                attack.clone(),
+            )?;
 
-        let attacktime_network: SimNetwork = serde_json::from_str(
-            &fs::read_to_string(network_dir.join("attacktime_network.json"))
-                .map_err(|e| format!("could not find attacktime_network.json: {}", e))?,
-        )?;
+            diff_peacetime_attacktime(
+                &peacetime_network.graph,
+                &attacktime_network.graph,
+                HashSet::from_iter(attacktime_network.attackers.iter().map(|a| a.0.clone())),
+            )?;
 
-        let attacker_list = fs::read_to_string(network_dir.join("attacker.csv"))
-            .map_err(|e| format!("attacker.csv file containing attacker alias not found: {e}"))?;
+            if let Some(bootstrap) = params.attacker_bootstrap {
+                return Ok(Self::BootstrapAttackTime(
+                    peacetime_network,
+                    attacktime_network,
+                    bootstrap,
+                ));
+            }
+
+            Ok(Self::AttackTime(peacetime_network, attacktime_network))
+        } else {
+            Ok(Self::Peacetime(peacetime_network))
+        }
+    }
+
+    /// Returns the file that contains traffic projections for the peacetime network. May be
+    /// the same as reputation_file if running in NetworkType::PeacetimeNetwork.
+    pub fn peacetime_projections(&self) -> PathBuf {
+        match self {
+            NetworkType::Peacetime(p)
+            | NetworkType::AttackTime(p, _)
+            | NetworkType::BootstrapAttackTime(p, _, _) => {
+                p.network_dir.join(PeacetimeNetwork::TRAFFIC)
+            }
+        }
+    }
+
+    /// Returns the graph that we're actively simulating payments on.
+    pub fn active_network(&self) -> &Vec<NetworkParser> {
+        match self {
+            NetworkType::Peacetime(p) => &p.graph,
+            NetworkType::AttackTime(_, a) | NetworkType::BootstrapAttackTime(_, a, _) => &a.graph,
+        }
+    }
+
+    /// Returns the location of a file that holds projected payments for our active graph.
+    pub fn traffic_file(&self) -> PathBuf {
+        match self {
+            NetworkType::Peacetime(p) => p.network_dir.join(PeacetimeNetwork::TRAFFIC),
+            NetworkType::AttackTime(_, a) | NetworkType::BootstrapAttackTime(_, a, _) => {
+                a.attack_dir.join(AttacktimeNetwork::TRAFFIC)
+            }
+        }
+    }
+
+    /// Returns the location of a file that holds reputation summaries for our active graph.
+    pub fn reputation_file(&self) -> PathBuf {
+        match self {
+            // For both a peacetime network and an attack time one without bootstrap we use
+            // reputation build in our peacetime network.
+            NetworkType::Peacetime(p) | NetworkType::AttackTime(p, _) => {
+                p.network_dir.join(PeacetimeNetwork::REPUTATION)
+            }
+            NetworkType::BootstrapAttackTime(_, a, duration) => a
+                .attack_dir
+                .join(format!("reputation_{}.csv", duration.as_secs())),
+        }
+    }
+
+    /// Returns the location that revenue built by the target during setup should be written.
+    pub fn revenue_file(&self) -> Option<PathBuf> {
+        match self {
+            NetworkType::BootstrapAttackTime(_, a, duration) => Some(
+                a.attack_dir
+                    .join(format!("revenue_{}.csv", duration.as_secs())),
+            ),
+            _ => None,
+        }
+    }
+
+    pub fn results_dir(&self, now: SystemTime) -> Option<PathBuf> {
+        match self {
+            NetworkType::Peacetime(_) => None,
+            NetworkType::AttackTime(_, a) | NetworkType::BootstrapAttackTime(_, a, _) => {
+                let sec_since_epoch = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+
+                Some(
+                    PathBuf::from("results")
+                        .join(format!("{:?}", a.attack))
+                        .join(sec_since_epoch.to_string()),
+                )
+            }
+        }
+    }
+
+    /// Returns the target node in our network.
+    pub fn target(&self) -> (String, PublicKey) {
+        match self {
+            NetworkType::Peacetime(p)
+            | NetworkType::AttackTime(p, _)
+            | NetworkType::BootstrapAttackTime(p, _, _) => p.target.clone(),
+        }
+    }
+
+    /// Returns the public keys of attackers in our network, if any.
+    pub fn attackers(&self) -> &[(String, PublicKey)] {
+        match self {
+            NetworkType::Peacetime(_) => &[],
+            NetworkType::AttackTime(_, a) | NetworkType::BootstrapAttackTime(_, a, _) => {
+                &a.attackers
+            }
+        }
+    }
+}
+
+pub struct PeacetimeNetwork {
+    network_dir: PathBuf,
+    graph: Vec<NetworkParser>,
+    target: (String, PublicKey),
+}
+
+impl PeacetimeNetwork {
+    const PEACETIME_NETWORK: &'static str = "peacetime_network.json";
+    const TARGET: &'static str = "target.txt";
+    const REPUTATION: &'static str = "reputation.csv";
+    const TRAFFIC: &'static str = "peacetime_traffic.csv";
+
+    /// Creates a new peacetime network representation, failing if the files we expect to exist
+    /// are not present.
+    fn new(network_dir: PathBuf) -> Result<Self, BoxError> {
+        let peacetime_graph = network_dir.join(Self::PEACETIME_NETWORK);
+        if !peacetime_graph.exists() {
+            return Err(format!(
+                "expected peacetime graph: {} to exist",
+                peacetime_graph.to_string_lossy()
+            )
+            .into());
+        }
+
+        let peacetime_graph = network_dir.join(Self::PEACETIME_NETWORK);
+        let peacetime_network: SimNetwork =
+            serde_json::from_str(&fs::read_to_string(peacetime_graph.clone()).map_err(|e| {
+                format!(
+                    "could not find {}: {}",
+                    peacetime_graph.to_string_lossy(),
+                    e
+                )
+            })?)?;
+
+        // We only allow one target node, but if there are multiple aliases in this file we'll
+        // fail to find the pubkey by alias below.
+        let target_alias = fs::read_to_string(network_dir.join(Self::TARGET))
+            .map_err(|e| format!("target.txt file containing target alias not found: {}", e))?
+            .trim()
+            .to_owned();
+
+        let target_pubkey = find_pubkey_by_alias(&target_alias, &peacetime_network.sim_network)?;
+
+        Ok(Self {
+            network_dir,
+            graph: peacetime_network.sim_network,
+            target: (target_alias, target_pubkey),
+        })
+    }
+}
+
+pub struct AttacktimeNetwork {
+    attack_dir: PathBuf,
+    graph: Vec<NetworkParser>,
+    attackers: Vec<(String, PublicKey)>,
+    attack: AttackType,
+}
+
+impl AttacktimeNetwork {
+    const ATTACKTIME_NETWORK: &'static str = "attacktime_network.json";
+    const ATTACKERS: &'static str = "attacker.csv";
+    const TRAFFIC: &'static str = "attacktime_traffic.csv";
+
+    fn new(attack_dir: PathBuf, attack: AttackType) -> Result<Self, BoxError> {
+        let attack_graph = attack_dir.join(Self::ATTACKTIME_NETWORK);
+        let attacktime_network: SimNetwork =
+            serde_json::from_str(&fs::read_to_string(attack_graph.clone()).map_err(|e| {
+                format!("could not find {}: {}", attack_graph.to_string_lossy(), e)
+            })?)?;
+
+        let attackers = attack_dir.join(Self::ATTACKERS);
+        let attacker_list = fs::read_to_string(attackers.clone())
+            .map_err(|e| format!("could not find: {}: {}", attackers.to_string_lossy(), e))?;
         let attacker_aliases: Vec<&str> = attacker_list.trim().split(',').collect();
 
         if attacker_aliases.is_empty() {
             return Err("could not read attackers from attacker.csv".into());
         }
-        diff_peacetime_attacktime(
-            &peacetime_network.sim_network,
-            &attacktime_network.sim_network,
-            &attacker_aliases,
-        )?;
 
         let mut attackers = Vec::with_capacity(attacker_aliases.len());
         for alias in attacker_aliases {
@@ -129,67 +303,12 @@ impl SimulationFiles {
             attackers.push((alias.to_string(), attacker_pubkey));
         }
 
-        // We only allow one target node, but if there are multiple aliases in this file we'll
-        // fail to find the pubkey by alias below.
-        let target_alias = fs::read_to_string(network_dir.join("target.txt"))
-            .map_err(|e| format!("target.txt file containing target alias not found: {}", e))?
-            .trim()
-            .to_owned();
-
-        let target_pubkey = find_pubkey_by_alias(&target_alias, &attacktime_network.sim_network)?;
-
-        // Create reputation directory that is part of the expected structure for the network.
-        std::fs::create_dir_all(network_dir.join("reputation"))?;
-
-        Ok(SimulationFiles {
-            dir: network_dir,
-            sim_network: match graph_type {
-                TrafficType::Attacktime => attacktime_network.sim_network,
-                TrafficType::Peacetime => peacetime_network.sim_network,
-            },
+        Ok(Self {
+            attack_dir,
+            graph: attacktime_network.sim_network,
             attackers,
-            target: (target_alias, target_pubkey),
+            attack,
         })
-    }
-
-    /// Creates and returns a directory to write simulation results to.
-    pub fn results_dir(&self, start_time: SystemTime) -> Result<PathBuf, BoxError> {
-        let sec_since_epoch = start_time
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let results_dir = self.dir.join("results").join(sec_since_epoch.to_string());
-
-        std::fs::create_dir_all(results_dir.clone())?;
-        Ok(results_dir)
-    }
-
-    /// Returns the location of a reputation and target revenue summary for the period of time
-    /// that the attacker in the network is bootstrapped for, creating sub-directories to hold
-    /// these files is necessary.
-    pub fn reputation_summary(&self, duration: Option<Duration>) -> (PathBuf, PathBuf) {
-        let reputation_dir = self
-            .dir
-            .join("reputation")
-            .join(duration.unwrap_or(Duration::ZERO).as_secs().to_string());
-
-        // Create the specific duration directory
-        let _ = std::fs::create_dir_all(&reputation_dir);
-
-        (
-            reputation_dir.join("reputation_summary.csv"),
-            reputation_dir.join("target_revenue.txt"),
-        )
-    }
-
-    /// Returns the location of the file containing peacetime projections for the network.
-    pub fn peacetime_traffic(&self) -> PathBuf {
-        self.dir.join("peacetime_traffic.csv")
-    }
-
-    /// Returns the location of the file used to generate reputation snapshots from.
-    pub fn attacktime_traffic(&self) -> PathBuf {
-        self.dir.join("attacktime_traffic.csv")
     }
 }
 
@@ -198,7 +317,7 @@ impl SimulationFiles {
 fn diff_peacetime_attacktime(
     peacetime: &[NetworkParser],
     attacktime: &[NetworkParser],
-    attacker_aliases: &[&str],
+    attacker_aliases: HashSet<String>,
 ) -> Result<(), BoxError> {
     let peacetime_map: HashMap<u64, (String, String)> = peacetime
         .iter()
@@ -219,9 +338,6 @@ fn diff_peacetime_attacktime(
             )
         })
         .collect();
-
-    let attacker_aliases: HashSet<String> =
-        HashSet::from_iter(attacker_aliases.iter().map(|s| s.to_string()));
 
     for (scid, (peacetime_1, peacetime_2)) in peacetime_map.iter() {
         if attacker_aliases.contains(peacetime_1) || attacker_aliases.contains(peacetime_2) {
@@ -269,12 +385,6 @@ fn diff_peacetime_attacktime(
 pub struct Cli {
     #[command(flatten)]
     pub network: NetworkParams,
-
-    /// The duration of time that reputation of the attacking node's reputation will be bootstrapped
-    /// for, expressed as human readable values (eg: 1w, 3d). Requires that a reputation bootstrap
-    /// file has been created in advance for this duration.
-    #[arg(long, value_parser = parse_duration)]
-    pub attacker_bootstrap: Option<Duration>,
 
     /// The minimum percentage of channel pairs between the target and its honest peers that the target needs to have
     /// good reputation on for the simulation to run.
@@ -324,7 +434,7 @@ pub enum AttackType {
 
 pub fn setup_attack<R, M>(
     cli: &Cli,
-    simulation: &SimulationFiles,
+    network: &NetworkType,
     clock: Arc<SimulationClock>,
     reputation_monitor: Arc<R>,
     revenue_monitor: Arc<M>,
@@ -334,19 +444,17 @@ where
     R: ReputationMonitor + Send + Sync + 'static,
     M: PeacetimeRevenueMonitor + Send + Sync + 'static,
 {
-    let sim_network = simulation.sim_network.clone();
+    let sim_network = network.active_network();
 
     // NOTE: If you are implementing your own attack and have added the variant to AttackType, you can
     // then do any setup specific to your attack here and return.
     match cli.attack {
         AttackType::Sink => {
-            let attacker_pubkeys: Vec<PublicKey> =
-                simulation.attackers.iter().map(|a| a.1).collect();
             let attack = Arc::new(SinkAttack::new(
                 clock,
-                &sim_network,
-                simulation.target.1,
-                attacker_pubkeys,
+                sim_network,
+                network.target().1,
+                network.attackers().iter().map(|a| a.1).collect(),
                 risk_margin,
                 reputation_monitor,
                 revenue_monitor,
@@ -377,8 +485,16 @@ impl Cli {
             }
         }
 
+        if self.network.attacker_bootstrap.is_some() && self.network.attack_type.is_none() {
+            return Err("can only set attacker_bootstrap when oprating with an attack".into());
+        }
+
         let forward_params: ForwardManagerParams = self.reputation_params.clone().into();
-        if let Some(bootstrap) = self.attacker_bootstrap {
+        if let Some(bootstrap) = self.network.attacker_bootstrap {
+            if bootstrap.is_zero() {
+                return Err("zero attacker_bootstrap is invalid, do not specify option".into());
+            }
+
             if forward_params.reputation_params.reputation_window() < bootstrap {
                 return Err(format!(
                     "attacker_bootstrap {:?} > reputation window {:?} ({:?} * {})))",
