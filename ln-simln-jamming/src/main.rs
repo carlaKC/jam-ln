@@ -1,12 +1,10 @@
 use bitcoin::secp256k1::PublicKey;
 use clap::Parser;
-use core::panic;
 use ln_simln_jamming::analysis::BatchForwardWriter;
 use ln_simln_jamming::attack_interceptor::AttackInterceptor;
 use ln_simln_jamming::clock::InstantClock;
 use ln_simln_jamming::parsing::{
-    find_pubkey_by_alias, reputation_snapshot_from_file, setup_attack, AttackType, Cli,
-    SimulationFiles, TrafficType,
+    find_pubkey_by_alias, reputation_snapshot_from_file, setup_attack, AttackType, Cli, NetworkType,
 };
 use ln_simln_jamming::reputation_interceptor::{ChannelJammer, ReputationInterceptor};
 use ln_simln_jamming::revenue_interceptor::{
@@ -24,7 +22,7 @@ use simln_lib::sim_node::{CustomRecords, Interceptor, SimGraph, SimNode};
 use simln_lib::SimulationCfg;
 use simple_logger::SimpleLogger;
 use std::collections::{HashMap, HashSet};
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -48,16 +46,24 @@ async fn main() -> Result<(), BoxError> {
         .init()
         .unwrap();
 
-    // We always want to load the attack time graph when running the simulation.
-    let network_dir =
-        SimulationFiles::new(cli.network.network_dir.clone(), TrafficType::Attacktime)?;
-    let target_pubkey = network_dir.target.1;
+    let network = NetworkType::new(
+        &cli.network,
+        Some(cli.attack_type.clone()),
+        cli.attacker_bootstrap,
+    )?;
+    let (target_alias, target_pubkey) = network.target();
+    let attackers = network.attackers();
+    let attacker_pubkeys: Vec<PublicKey> = attackers.iter().map(|a| a.1).collect();
+    let sim_network = network.active_network();
+
+    if matches!(network, NetworkType::Peacetime(_)) {
+        return Err("must run simulation with attack set".into());
+    }
 
     let tasks = TaskTracker::new();
     let (shutdown, listener) = triggered::trigger();
 
-    let target_channels: HashMap<u64, (PublicKey, String)> = network_dir
-        .sim_network
+    let target_channels: HashMap<u64, (PublicKey, String)> = sim_network
         .iter()
         .filter_map(|channel| {
             if channel.node_1.pubkey == target_pubkey {
@@ -85,10 +91,16 @@ async fn main() -> Result<(), BoxError> {
     let now = InstantClock::now(&*clock);
 
     // Create a writer to store results for nodes that we care about.
-    let results_dir = network_dir.results_dir(Clock::now(&*clock))?;
+    let results_dir = network
+        .results_dir(Clock::now(&*clock))
+        .ok_or("results dir none for attack")?;
+    if !results_dir.exists() {
+        fs::create_dir_all(&results_dir)?;
+    }
+
     let mut monitor_channels: Vec<(PublicKey, String)> =
         target_channels.values().cloned().collect();
-    monitor_channels.push((target_pubkey, network_dir.target.0.clone()));
+    monitor_channels.push((target_pubkey, target_alias));
     let results_writer = Arc::new(Mutex::new(BatchForwardWriter::new(
         results_dir.clone(),
         &monitor_channels,
@@ -121,20 +133,23 @@ async fn main() -> Result<(), BoxError> {
         }
     });
 
-    let (reputation_state, target_revenue) = network_dir.reputation_summary(cli.attacker_bootstrap);
-    let reputation_snapshot = reputation_snapshot_from_file(&reputation_state).map_err(|e| {
+    let reputation_file = network.reputation_file();
+    let reputation_snapshot = reputation_snapshot_from_file(&reputation_file).map_err(|e| {
         format!(
             "could not find reputation snapshot {:?}, try generating one with reputation-builder: {:?}",
-            reputation_state, e
+            reputation_file.to_string_lossy(), e
         )
     })?;
-    let bootstrap_revenue: u64 = std::fs::read_to_string(target_revenue)?.parse()?;
+    let bootstrap_revenue: u64 = if let Some(target_revenue) = network.revenue_file() {
+        std::fs::read_to_string(target_revenue)?.parse()?
+    } else {
+        0
+    };
 
-    let attacker_pubkeys: Vec<PublicKey> = network_dir.attackers.iter().map(|a| a.1).collect();
     let reputation_interceptor = Arc::new(
         ReputationInterceptor::new_from_snapshot(
             forward_params,
-            &network_dir.sim_network,
+            sim_network,
             reputation_snapshot,
             // If bootstrapping the attacker's reputation, we expect them to be in our snapshot
             // of starting reputation values. Otherwise, they can be omitted.
@@ -156,7 +171,7 @@ async fn main() -> Result<(), BoxError> {
             target_pubkey,
             bootstrap_revenue,
             cli.attacker_bootstrap,
-            network_dir.peacetime_traffic(),
+            network.peacetime_projections(),
             listener.clone(),
         )
         .await?,
@@ -182,7 +197,7 @@ async fn main() -> Result<(), BoxError> {
     // Next, setup the attack interceptor to use our custom attack.
     let attack = setup_attack(
         &cli,
-        &network_dir,
+        &network,
         Arc::clone(&clock),
         Arc::clone(&reputation_interceptor),
         Arc::clone(&revenue_interceptor),
@@ -237,7 +252,8 @@ async fn main() -> Result<(), BoxError> {
     // Setup the simulated network with our fake graph.
     let sim_params = SimParams {
         nodes: vec![],
-        sim_network: network_dir.sim_network.clone(),
+
+        sim_network: sim_network.to_vec(),
         activity: vec![],
         exclude,
     };
@@ -257,15 +273,15 @@ async fn main() -> Result<(), BoxError> {
     // Ugly hack specific to SlowJam attack to include this node in the list of nodes passed to run_attack.
     // This node is used as an "honest" node to send a test payment through our target channel to
     // check that it is actually jammed.
-    let honest_sender_pubkey = find_pubkey_by_alias("69", &network_dir.sim_network)?;
+    let honest_sender_pubkey = find_pubkey_by_alias("69", sim_network)?;
     let attacker_nodes: HashMap<String, Arc<Mutex<SimNode<SimGraph, SimulationClock>>>> = sim_nodes
         .into_iter()
         .filter_map(|(pk, node)| {
-            if cli.attack == AttackType::SlowJam && pk == honest_sender_pubkey {
+            if cli.attack_type == AttackType::SlowJam && pk == honest_sender_pubkey {
                 Some(("69".to_string(), node))
             } else {
-                network_dir
-                    .attackers
+                network
+                    .attackers()
                     .iter()
                     .find(|attacker| attacker.1 == pk)
                     .map(|a| (a.0.clone(), node))
@@ -307,7 +323,7 @@ async fn main() -> Result<(), BoxError> {
     // Write start and end state to a summary file.
     let end_reputation = get_network_reputation(
         reputation_interceptor,
-        network_dir.target.1,
+        network.target().1,
         &attacker_pubkeys,
         &target_pubkey_map,
         risk_margin,
