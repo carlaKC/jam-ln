@@ -76,6 +76,14 @@ See the docs on each for further instructions.
 
 ## Install
 
+⚠️ We're currently hitting some issues with Github LFS, ping Carla for files!⚠️
+
+Note that this repo uses [git lfs](https://git-lfs.com/) to store large
+network files. To pull these files you will need to install it and run:
+```
+git lfs pull
+```
+
 To install and run the simulator:
 ```
 make install
