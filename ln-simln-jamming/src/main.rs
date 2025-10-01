@@ -398,7 +398,12 @@ fn write_simulation_summary(
 
     let mut writer = BufWriter::new(file);
 
-    writeln!(writer, "Runtime (seconds): {:?}", revenue.runtime.as_secs())?;
+    writeln!(
+        writer,
+        "{:?} ran for (seconds): {:?}",
+        cli.attack_type,
+        revenue.runtime.as_secs()
+    )?;
     writeln!(
         writer,
         "Peacetime revenue (msat): {}",
