@@ -105,3 +105,6 @@ the `forward-builder` utility)
   our best guess at how payments flow in the network.
 - Payments are generated with a fixed seed, but this is not perfectly
   deterministic in sim-ln.
+- Force closes are not implemented in this simulator, and the block
+  height is hard-set to 0.
+- Limits on dust exposure are not implemented.
