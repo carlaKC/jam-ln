@@ -5,7 +5,8 @@ use ln_simln_jamming::analysis::BatchForwardWriter;
 use ln_simln_jamming::attack_interceptor::AttackInterceptor;
 use ln_simln_jamming::clock::InstantClock;
 use ln_simln_jamming::parsing::{
-    reputation_snapshot_from_file, setup_attack, Cli, SimulationFiles, TrafficType,
+    find_pubkey_by_alias, reputation_snapshot_from_file, setup_attack, AttackType, Cli,
+    SimulationFiles, TrafficType,
 };
 use ln_simln_jamming::reputation_interceptor::{ChannelJammer, ReputationInterceptor};
 use ln_simln_jamming::revenue_interceptor::{
@@ -185,7 +186,7 @@ async fn main() -> Result<(), BoxError> {
         Arc::clone(&clock),
         Arc::clone(&reputation_interceptor),
         Arc::clone(&revenue_interceptor),
-        risk_margin,
+        Arc::clone(&reputation_interceptor),
     )?;
 
     let attack_setup = attack.setup_for_network()?;
@@ -236,7 +237,7 @@ async fn main() -> Result<(), BoxError> {
     // Setup the simulated network with our fake graph.
     let sim_params = SimParams {
         nodes: vec![],
-        sim_network: network_dir.sim_network,
+        sim_network: network_dir.sim_network.clone(),
         activity: vec![],
         exclude,
     };
@@ -253,14 +254,22 @@ async fn main() -> Result<(), BoxError> {
     .await?;
     let simulation = Arc::new(simulation);
 
+    // Ugly hack specific to SlowJam attack to include this node in the list of nodes passed to run_attack.
+    // This node is used as an "honest" node to send a test payment through our target channel to
+    // check that it is actually jammed.
+    let honest_sender_pubkey = find_pubkey_by_alias("69", &network_dir.sim_network)?;
     let attacker_nodes: HashMap<String, Arc<Mutex<SimNode<SimGraph, SimulationClock>>>> = sim_nodes
         .into_iter()
         .filter_map(|(pk, node)| {
-            network_dir
-                .attackers
-                .iter()
-                .find(|attacker| attacker.1 == pk)
-                .map(|a| (a.0.clone(), node))
+            if cli.attack == AttackType::SlowJam && pk == honest_sender_pubkey {
+                Some(("69".to_string(), node))
+            } else {
+                network_dir
+                    .attackers
+                    .iter()
+                    .find(|attacker| attacker.1 == pk)
+                    .map(|a| (a.0.clone(), node))
+            }
         })
         .collect();
 
