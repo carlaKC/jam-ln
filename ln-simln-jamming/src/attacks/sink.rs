@@ -90,31 +90,6 @@ impl<
         }
     }
 
-    /// Validates that there's only one channel between the target and the attacking node.
-    fn validate(&self) -> Result<(), BoxError> {
-        let target_to_attacker_len = self
-            .target_channels
-            .iter()
-            .filter_map(|(scid, (pk, _))| {
-                if *pk == self.attacker_pubkey {
-                    Some(*scid)
-                } else {
-                    None
-                }
-            })
-            .count();
-
-        if target_to_attacker_len != 1 {
-            return Err(format!(
-                "expected one target -> attacker channel, got: {}",
-                target_to_attacker_len,
-            )
-            .into());
-        }
-
-        Ok(())
-    }
-
     /// Intercepts payments flowing from target -> attacker, holding the htlc for the maximum allowable time to
     /// trash its reputation if the htlc is accountable. We do not use our underlying jamming mitigation interceptor
     /// at all because the attacker is not required to run the mitigation.
@@ -180,8 +155,29 @@ where
     M: PeacetimeRevenueMonitor + Send + Sync,
     J: ChannelJammer + Send + Sync,
 {
-    fn setup_for_network(&self) -> Result<(), BoxError> {
-        self.validate()
+    /// Validates that there's only one channel between the target and the attacking node.
+    fn validate(&self) -> Result<(), BoxError> {
+        let target_to_attacker_len = self
+            .target_channels
+            .iter()
+            .filter_map(|(scid, (pk, _))| {
+                if *pk == self.attacker_pubkey {
+                    Some(*scid)
+                } else {
+                    None
+                }
+            })
+            .count();
+
+        if target_to_attacker_len != 1 {
+            return Err(format!(
+                "expected one target -> attacker channel, got: {}",
+                target_to_attacker_len,
+            )
+            .into());
+        }
+
+        Ok(())
     }
 
     /// Intercepts attacker forwads from the target node to jam them, otherwise forwards unrelated
@@ -426,15 +422,15 @@ mod tests {
 
         // Two target <--> attacker channels should fail.
         let attack = setup_test_attack(target, attacker, &network);
-        assert!(attack.setup_for_network().is_err());
+        assert!(attack.validate().is_err());
 
         // No target <--> attacker should fail.
         let attack = setup_test_attack(target, attacker, &network[0..1]);
-        assert!(attack.setup_for_network().is_err());
+        assert!(attack.validate().is_err());
 
         // It's okay for the target to have multiple channels with other nodes.
         let attack = setup_test_attack(target, attacker, &network[0..3]);
-        attack.setup_for_network().unwrap();
+        attack.validate().unwrap();
     }
 
     /// Tests that bad requests to the attacking interceptor will fail.

@@ -204,7 +204,7 @@ async fn main() -> Result<(), BoxError> {
         Arc::clone(&reputation_interceptor),
     )?;
 
-    attack.setup_for_network()?;
+    attack.validate()?;
 
     // Do some preliminary checks on our reputation state - there isn't much point in running if we haven't built up
     // some reputation.

@@ -192,7 +192,7 @@ where
     R: ReputationMonitor + Send + Sync,
     J: ChannelJammer + Send + Sync,
 {
-    fn setup_for_network(&self) -> Result<(), BoxError> {
+    fn validate(&self) -> Result<(), BoxError> {
         // Validate that attacker receiver has channel with target.
         self.target_channels
             .iter()

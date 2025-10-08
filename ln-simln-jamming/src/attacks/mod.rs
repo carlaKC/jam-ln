@@ -16,7 +16,7 @@ pub mod utils;
 #[async_trait]
 pub trait JammingAttack {
     /// Responsible for validating that the network provided meets any topological expectations for the attack.
-    fn setup_for_network(&self) -> Result<(), BoxError> {
+    fn validate(&self) -> Result<(), BoxError> {
         Ok(())
     }
 
