@@ -6,7 +6,7 @@ use ln_simln_jamming::clock::InstantClock;
 use ln_simln_jamming::parsing::{
     find_pubkey_by_alias, reputation_snapshot_from_file, setup_attack, AttackType, Cli, NetworkType,
 };
-use ln_simln_jamming::reputation_interceptor::{ChannelJammer, ReputationInterceptor};
+use ln_simln_jamming::reputation_interceptor::ReputationInterceptor;
 use ln_simln_jamming::revenue_interceptor::{
     PeacetimeRevenueMonitor, RevenueInterceptor, RevenueSnapshot,
 };
@@ -204,12 +204,7 @@ async fn main() -> Result<(), BoxError> {
         Arc::clone(&reputation_interceptor),
     )?;
 
-    let attack_setup = attack.setup_for_network()?;
-    for (channel, pubkey) in attack_setup.general_jammed_nodes.iter() {
-        reputation_interceptor
-            .jam_general_resources(pubkey, *channel)
-            .await?;
-    }
+    attack.setup_for_network()?;
 
     // Do some preliminary checks on our reputation state - there isn't much point in running if we haven't built up
     // some reputation.
@@ -338,7 +333,7 @@ async fn main() -> Result<(), BoxError> {
         &snapshot,
         &start_reputation,
         &end_reputation,
-        attack_setup.general_jammed_nodes.len(),
+        0, // TODO: replace with attacker reported
     )?;
 
     Ok(())

@@ -104,7 +104,7 @@ mod tests {
         Attack{}
         #[async_trait]
         impl JammingAttack for Attack {
-            fn setup_for_network(&self) -> Result<crate::attacks::NetworkSetup, BoxError>;
+            fn setup_for_network(&self) -> Result<(), BoxError>;
             async fn intercept_attacker_htlc(&self, req: InterceptRequest) -> Result<Result<CustomRecords, ForwardingError>, BoxError>;
             async fn intercept_attacker_receive(&self,_req: InterceptRequest) -> Result<Result<CustomRecords, ForwardingError>, BoxError>;
             async fn run_attack(&self, _start_reputation: NetworkReputation, attacker_nodes: HashMap<String, Arc<tokio::sync::Mutex<SimNode<SimGraph, simln_lib::clock::SimulationClock>>>>, shutdown_listener: Listener) -> Result<(), BoxError>;

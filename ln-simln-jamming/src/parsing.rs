@@ -483,6 +483,7 @@ where
                 risk_margin,
                 reputation_monitor,
                 revenue_monitor,
+                channel_jammer,
             ));
 
             Ok(attack)

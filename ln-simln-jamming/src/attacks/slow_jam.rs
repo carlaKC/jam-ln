@@ -26,10 +26,7 @@ use std::{
 use tokio::{select, sync::Mutex};
 use triggered::{trigger, Listener, Trigger};
 
-use super::{
-    utils::{build_custom_route, build_reputation, BuildReputationParams},
-    NetworkSetup,
-};
+use super::utils::{build_custom_route, build_reputation, BuildReputationParams};
 
 // Idea: Have a graph with [attacker_sender (A1)] -> [target_peer] -> [target_node] -> [attacker_2 (A2)]
 // and jam channel between [target_peer] <-> [target_node].
@@ -195,7 +192,7 @@ where
     R: ReputationMonitor + Send + Sync,
     J: ChannelJammer + Send + Sync,
 {
-    fn setup_for_network(&self) -> Result<NetworkSetup, BoxError> {
+    fn setup_for_network(&self) -> Result<(), BoxError> {
         // Validate that attacker receiver has channel with target.
         self.target_channels
             .iter()
@@ -269,9 +266,7 @@ where
             return Err("Honest sender does not have channel with target peer".into());
         }
 
-        Ok(NetworkSetup {
-            general_jammed_nodes: vec![],
-        })
+        Ok(())
     }
 
     /// We generate two types of payments where we are the receivers:

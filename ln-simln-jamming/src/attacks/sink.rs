@@ -12,14 +12,14 @@ use tokio::sync::Mutex;
 use triggered::Listener;
 
 use crate::clock::InstantClock;
-use crate::reputation_interceptor::ReputationMonitor;
+use crate::reputation_interceptor::{ChannelJammer, ReputationMonitor};
 use crate::revenue_interceptor::PeacetimeRevenueMonitor;
 use crate::{
     accountable_from_records, get_network_reputation, print_request, records_from_signal, BoxError,
     NetworkReputation,
 };
 
-use super::{JammingAttack, NetworkSetup};
+use super::JammingAttack;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TargetChannelType {
@@ -28,10 +28,11 @@ pub enum TargetChannelType {
 }
 
 #[derive(Clone)]
-pub struct SinkAttack<R, M>
+pub struct SinkAttack<R, M, J>
 where
     R: ReputationMonitor + Send + Sync,
     M: PeacetimeRevenueMonitor + Send + Sync,
+    J: ChannelJammer + Send + Sync,
 {
     clock: Arc<SimulationClock>,
     target_pubkey: PublicKey,
@@ -40,10 +41,14 @@ where
     risk_margin: u64,
     reputation_monitor: Arc<R>,
     peacetime_revenue: Arc<M>,
+    channel_jammer: Arc<J>,
 }
 
-impl<R: ReputationMonitor + Send + Sync, M: PeacetimeRevenueMonitor + Send + Sync>
-    SinkAttack<R, M>
+impl<
+        R: ReputationMonitor + Send + Sync,
+        M: PeacetimeRevenueMonitor + Send + Sync,
+        J: ChannelJammer + Send + Sync,
+    > SinkAttack<R, M, J>
 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -54,6 +59,7 @@ impl<R: ReputationMonitor + Send + Sync, M: PeacetimeRevenueMonitor + Send + Syn
         risk_margin: u64,
         reputation_monitor: Arc<R>,
         peacetime_revenue: Arc<M>,
+        channel_jammer: Arc<J>,
     ) -> Self {
         // For sink attack we only use one attacker node.
         assert!(attacker_pubkeys.len() == 1);
@@ -80,6 +86,7 @@ impl<R: ReputationMonitor + Send + Sync, M: PeacetimeRevenueMonitor + Send + Syn
             risk_margin,
             reputation_monitor,
             peacetime_revenue,
+            channel_jammer,
         }
     }
 
@@ -167,29 +174,14 @@ fn inner_simulation_completed(
 }
 
 #[async_trait]
-impl<R, M> JammingAttack for SinkAttack<R, M>
+impl<R, M, J> JammingAttack for SinkAttack<R, M, J>
 where
     R: ReputationMonitor + Send + Sync,
     M: PeacetimeRevenueMonitor + Send + Sync,
+    J: ChannelJammer + Send + Sync,
 {
-    fn setup_for_network(&self) -> Result<NetworkSetup, BoxError> {
-        self.validate()?;
-
-        Ok(NetworkSetup {
-            // Jam all non-attacking channels with the target in both directions.
-            general_jammed_nodes: self
-                .target_channels
-                .iter()
-                .flat_map(|(scid, (pk, _))| {
-                    if *pk != self.attacker_pubkey {
-                        let scid = *scid;
-                        vec![(scid, *pk), (scid, self.target_pubkey)]
-                    } else {
-                        vec![]
-                    }
-                })
-                .collect(),
-        })
+    fn setup_for_network(&self) -> Result<(), BoxError> {
+        self.validate()
     }
 
     /// Intercepts attacker forwads from the target node to jam them, otherwise forwards unrelated
@@ -248,6 +240,18 @@ where
         _attacker_nodes: HashMap<String, Arc<Mutex<SimNode<SimGraph, SimulationClock>>>>,
         shutdown_listener: Listener,
     ) -> Result<(), BoxError> {
+        // Jam all non-attacking channels with the target in both directions.
+        for (scid, (pk, _)) in self
+            .target_channels
+            .iter()
+            .filter(|(_, (pk, _))| *pk != self.attacker_pubkey)
+        {
+            self.channel_jammer.jam_general_resources(pk, *scid).await?;
+            self.channel_jammer
+                .jam_general_resources(&self.target_pubkey, *scid)
+                .await?;
+        }
+
         // Poll every 5 minutes to check if the attack is done.
         let interval = Duration::from_secs(300);
         loop {
@@ -306,13 +310,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
     use std::sync::Arc;
 
     use crate::attacks::sink::inner_simulation_completed;
     use crate::attacks::JammingAttack;
     use crate::test_utils::{
-        get_random_keypair, get_test_policy, setup_test_request, MockPeacetimeMonitor,
+        get_random_keypair, get_test_policy, setup_test_request, MockJammer, MockPeacetimeMonitor,
         MockReputationInterceptor,
     };
     use crate::{accountable_from_records, NetworkReputation};
@@ -328,7 +331,7 @@ mod tests {
         target: PublicKey,
         attacker: PublicKey,
         network: &[NetworkParser],
-    ) -> SinkAttack<MockReputationInterceptor, MockPeacetimeMonitor> {
+    ) -> SinkAttack<MockReputationInterceptor, MockPeacetimeMonitor, MockJammer> {
         SinkAttack::new(
             Arc::new(SimulationClock::new(1).unwrap()),
             network,
@@ -337,6 +340,7 @@ mod tests {
             0,
             Arc::new(MockReputationInterceptor::new()),
             Arc::new(MockPeacetimeMonitor::new()),
+            Arc::new(MockJammer::new()),
         )
     }
 
@@ -348,7 +352,7 @@ mod tests {
     ///      |
     /// P2 --+
     fn setup_test_network() -> (
-        SinkAttack<MockReputationInterceptor, MockPeacetimeMonitor>,
+        SinkAttack<MockReputationInterceptor, MockPeacetimeMonitor, MockJammer>,
         u64,
     ) {
         let target = get_random_keypair().1;
@@ -430,18 +434,7 @@ mod tests {
 
         // It's okay for the target to have multiple channels with other nodes.
         let attack = setup_test_attack(target, attacker, &network[0..3]);
-        let setup = attack.setup_for_network().unwrap();
-
-        // Expect that all of the target's non-attacker channels are jammed, order doesn't matter.
-        let general_jammed_nodes: HashSet<(u64, PublicKey)> =
-            vec![(0, regular_1), (0, target), (1, regular_2), (1, target)]
-                .into_iter()
-                .collect();
-
-        assert_eq!(
-            general_jammed_nodes,
-            setup.general_jammed_nodes.iter().cloned().collect()
-        );
+        attack.setup_for_network().unwrap();
     }
 
     /// Tests that bad requests to the attacking interceptor will fail.
