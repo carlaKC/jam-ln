@@ -2,6 +2,7 @@ use bitcoin::secp256k1::PublicKey;
 use clap::Parser;
 use ln_simln_jamming::analysis::BatchForwardWriter;
 use ln_simln_jamming::attack_interceptor::AttackInterceptor;
+use ln_simln_jamming::attacks::AttackStatisitcs;
 use ln_simln_jamming::clock::InstantClock;
 use ln_simln_jamming::parsing::{
     find_pubkey_by_alias, reputation_snapshot_from_file, setup_attack, AttackType, Cli, NetworkType,
@@ -288,10 +289,11 @@ async fn main() -> Result<(), BoxError> {
     let attack_shutdown_trigger = shutdown.clone();
     let attack_start_reputation = start_reputation.clone();
     let attack_simulation_shutdown = Arc::clone(&simulation);
+    let attack_clone = Arc::clone(&attack);
     tokio::spawn(async move {
         // run_attack will block until the attack is done so trigger a simulation shutdown after
         // it returns and log any errors.
-        if let Err(e) = attack
+        if let Err(e) = attack_clone
             .run_attack(
                 attack_start_reputation,
                 attacker_nodes,
@@ -333,7 +335,7 @@ async fn main() -> Result<(), BoxError> {
         &snapshot,
         &start_reputation,
         &end_reputation,
-        0, // TODO: replace with attacker reported
+        attack.attack_statistics()?,
     )?;
 
     Ok(())
@@ -383,7 +385,7 @@ fn write_simulation_summary(
     revenue: &RevenueSnapshot,
     start_reputation: &NetworkReputation,
     end_reputation: &NetworkReputation,
-    general_jammed: usize,
+    attack_stats: AttackStatisitcs,
 ) -> Result<(), BoxError> {
     let file = OpenOptions::new()
         .write(true)
@@ -451,7 +453,13 @@ fn write_simulation_summary(
     )?;
     writeln!(
         writer,
-        "Attacker general jammed {general_jammed} edges (directional)",
+        "Attacker general jammed {} edges (directional)",
+        attack_stats.general_jammed_channels,
+    )?;
+    writeln!(
+        writer,
+        "Attacker congestion jammed {} edges (directional)",
+        attack_stats.congestion_jammed_channels,
     )?;
     writer.flush()?;
 

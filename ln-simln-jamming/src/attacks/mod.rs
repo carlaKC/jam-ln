@@ -12,6 +12,15 @@ pub mod sink;
 pub mod slow_jam;
 pub mod utils;
 
+/// Summarizes actions taken during the attack.
+pub struct AttackStatisitcs {
+    /// The number of channels general jammed using [`reputation_interceptor::ChannelJammer`].
+    pub general_jammed_channels: usize,
+
+    /// The number of channels congestion jammed using [`reputation_interceptor::ChannelJammer`].
+    pub congestion_jammed_channels: usize,
+}
+
 // Defines an attack that can be mounted against the simulation framework.
 #[async_trait]
 pub trait JammingAttack {
@@ -63,4 +72,7 @@ pub trait JammingAttack {
         _attacker_nodes: HashMap<String, Arc<Mutex<SimNode<SimGraph, SimulationClock>>>>,
         _shutdown_listener: Listener,
     ) -> Result<(), BoxError>;
+
+    /// Returns information about the attack.
+    fn attack_statistics(&self) -> Result<AttackStatisitcs, BoxError>;
 }

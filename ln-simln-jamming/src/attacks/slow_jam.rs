@@ -26,7 +26,10 @@ use std::{
 use tokio::{select, sync::Mutex};
 use triggered::{trigger, Listener, Trigger};
 
-use super::utils::{build_custom_route, build_reputation, BuildReputationParams};
+use super::{
+    utils::{build_custom_route, build_reputation, BuildReputationParams},
+    AttackStatisitcs,
+};
 
 // Idea: Have a graph with [attacker_sender (A1)] -> [target_peer] -> [target_node] -> [attacker_2 (A2)]
 // and jam channel between [target_peer] <-> [target_node].
@@ -415,5 +418,12 @@ where
         }
 
         Ok(())
+    }
+
+    fn attack_statistics(&self) -> Result<AttackStatisitcs, BoxError> {
+        Ok(AttackStatisitcs {
+            general_jammed_channels: 1,
+            congestion_jammed_channels: 1,
+        })
     }
 }

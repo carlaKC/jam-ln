@@ -19,7 +19,7 @@ use crate::{
     NetworkReputation,
 };
 
-use super::JammingAttack;
+use super::{AttackStatisitcs, JammingAttack};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TargetChannelType {
@@ -301,6 +301,14 @@ where
         }
 
         Ok(())
+    }
+
+    fn attack_statistics(&self) -> Result<AttackStatisitcs, BoxError> {
+        Ok(AttackStatisitcs {
+            // We jam the target's channels in both directions.
+            general_jammed_channels: self.target_channels.len() * 2,
+            congestion_jammed_channels: 0,
+        })
     }
 }
 
