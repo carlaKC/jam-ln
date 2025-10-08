@@ -5,7 +5,7 @@ use ln_resource_mgr::{AllocationCheck, ProposedForward};
 use ln_simln_jamming::analysis::ForwardReporter;
 use ln_simln_jamming::clock::InstantClock;
 use ln_simln_jamming::parsing::{
-    parse_duration, NetworkParams, ReputationParams, SimulationFiles, TrafficType,
+    parse_duration, AttackType, NetworkParams, NetworkType, ReputationParams,
 };
 use ln_simln_jamming::reputation_interceptor::{BootstrapForward, ReputationInterceptor};
 use ln_simln_jamming::{BoxError, ACCOUNTABLE_TYPE, UPGRADABLE_TYPE};
@@ -35,12 +35,12 @@ struct Cli {
     #[arg(long, value_parser = parse_duration, default_value = DEFAULT_RUNTIME)]
     pub duration: Duration,
 
-    /// The network to generate forwarding traffic for.
-    #[arg(long, short)]
-    pub traffic_type: TrafficType,
-
     #[command(flatten)]
     pub reputation_params: ReputationParams,
+
+    /// The attack that we're interested in running.
+    #[arg(long, value_enum)]
+    pub attack_type: Option<AttackType>,
 }
 
 #[tokio::main]
@@ -57,29 +57,30 @@ async fn main() -> Result<(), BoxError> {
 
     let cli = Cli::parse();
 
-    let network_dir = SimulationFiles::new(cli.network.network_dir.clone(), cli.traffic_type)?;
+    let network = NetworkType::new(&cli.network, cli.attack_type, None)?;
+    if matches!(network, NetworkType::BootstrapAttackTime(_, _, _)) {
+        return Err("cannot run forward builder in bootstrap mode".into());
+    }
 
+    let sim_network = network.active_network();
     let clock = Arc::new(SimulationClock::new(1000)?);
     let tasks = TaskTracker::new();
 
-    // Forwarding traffic can either be created for the peacetime or attacktime graphs. We'll
-    // choose our output file accordingly.
-    let output_file = match cli.traffic_type {
-        TrafficType::Peacetime => network_dir.peacetime_traffic(),
-        TrafficType::Attacktime => network_dir.attacktime_traffic(),
-    };
-
     // Create a reputation interceptor without any bootstrap (since here we're creating the
     // bootstrap itself, we just want to run with reputation active).
+    let traffic_file = network.traffic_file();
     let reputation_interceptor = Arc::new(ReputationInterceptor::new_for_network(
         cli.reputation_params.into(),
-        &network_dir.sim_network,
+        sim_network,
         clock.clone(),
         Some(Arc::new(Mutex::new(BootstrapWriter::new(
             clock.clone(),
             // TODO: change API in SimLN so that we can just pass a path in here.
-            cli.network.network_dir.clone(),
-            output_file
+            traffic_file
+                .parent()
+                .ok_or("could not get traffic file directory")?
+                .to_path_buf(),
+            traffic_file
                 .file_name()
                 .unwrap()
                 .to_string_lossy()
@@ -96,17 +97,17 @@ async fn main() -> Result<(), BoxError> {
         Some(13995354354227336701),
     );
 
-    let mut exclude_pubkeys = vec![network_dir.target.1];
-    for attacker in network_dir.attackers {
-        exclude_pubkeys.push(attacker.1);
-    }
+    let exclude_pubkeys = [network.target().1]
+        .into_iter()
+        .chain(network.attackers().iter().map(|a| a.1))
+        .collect();
 
     let custom_records =
         CustomRecords::from([(UPGRADABLE_TYPE, vec![1]), (ACCOUNTABLE_TYPE, vec![0])]);
 
     let sim_params = SimParams {
         nodes: vec![],
-        sim_network: network_dir.sim_network,
+        sim_network: sim_network.to_vec(),
         activity: vec![],
         exclude: exclude_pubkeys,
     };
