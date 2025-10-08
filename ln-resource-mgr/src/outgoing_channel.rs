@@ -137,12 +137,13 @@ mod tests {
         // Less than resolution_period has zero cost.
         assert_eq!(params.opportunity_cost(100, Duration::from_secs(10)), 0);
 
-        // Equal to resolution_period or within one period is equal to fee.
-        assert_eq!(params.opportunity_cost(100, Duration::from_secs(60)), 100);
-        assert_eq!(params.opportunity_cost(100, Duration::from_secs(65)), 100);
+        // Above resolution period it is gradually incremented.
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(61)), 2);
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(90)), 50);
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(120)), 100);
 
         // Multiple periods above resolution_period charges multiples of fee.
-        assert_eq!(params.opportunity_cost(100, Duration::from_secs(600)), 1000);
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(600)), 900);
     }
 
     #[test]
@@ -164,7 +165,14 @@ mod tests {
                 slow_resolve,
                 AccountableSignal::Accountable,
                 true,
-                Ok(-2000),
+                Ok(-1000),
+            ),
+            (
+                1000,
+                Duration::from_secs(90),
+                AccountableSignal::Accountable,
+                true,
+                Ok(500),
             ),
             (
                 1000,
@@ -178,7 +186,7 @@ mod tests {
                 slow_resolve,
                 AccountableSignal::Accountable,
                 false,
-                Ok(-3000),
+                Ok(-2000),
             ),
             (
                 1000,
