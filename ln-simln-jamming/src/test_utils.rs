@@ -1,7 +1,7 @@
 #![cfg(test)]
 use std::time::Instant;
 
-use crate::reputation_interceptor::{BootstrapForward, ReputationMonitor};
+use crate::reputation_interceptor::{BootstrapForward, ChannelJammer, ReputationMonitor};
 use crate::revenue_interceptor::PeacetimeRevenueMonitor;
 use crate::{records_from_signal, BoxError};
 use async_trait::async_trait;
@@ -43,6 +43,17 @@ mock! {
     #[async_trait]
     impl PeacetimeRevenueMonitor for PeacetimeMonitor {
         async fn get_revenue_difference(&self) -> crate::revenue_interceptor::RevenueSnapshot;
+    }
+}
+
+mock! {
+    pub Jammer{}
+
+    #[async_trait]
+    impl ChannelJammer for Jammer {
+        async fn jam_general_resources(&self, pubkey: &PublicKey, channel: u64) -> Result<(), BoxError>;
+
+        async fn jam_congestion_resources(&self, pubkey: &PublicKey, channel: u64) -> Result<(), BoxError>;
     }
 }
 

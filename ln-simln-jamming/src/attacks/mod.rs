@@ -1,7 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use bitcoin::secp256k1::PublicKey;
 use simln_lib::clock::SimulationClock;
 use simln_lib::sim_node::{CustomRecords, ForwardingError, InterceptRequest, SimGraph, SimNode};
 use tokio::sync::Mutex;
@@ -13,29 +12,21 @@ pub mod sink;
 pub mod slow_jam;
 pub mod utils;
 
-pub struct NetworkSetup {
-    /// The identifier for channel edges that should be general jammed during the simulation.
-    ///
-    /// For example: a channel with ID 999 between A -- B will have general resources exhausted as follows:
-    /// - (999, A): no general resources for A -> B
-    /// - (999, B): no general resources for B -> A
-    ///
-    /// This option is provided as a convenience for attacks that don't wish to implement general jamming the cost of
-    /// this general jamming will be accounted for at the end of the attack.
-    pub general_jammed_nodes: Vec<(u64, PublicKey)>,
+/// Summarizes actions taken during the attack.
+pub struct AttackStatisitcs {
+    /// The number of channels general jammed using [`reputation_interceptor::ChannelJammer`].
+    pub general_jammed_channels: usize,
+
+    /// The number of channels congestion jammed using [`reputation_interceptor::ChannelJammer`].
+    pub congestion_jammed_channels: usize,
 }
 
 // Defines an attack that can be mounted against the simulation framework.
 #[async_trait]
 pub trait JammingAttack {
-    /// Responsible for validating that the network provided meets any topological expectations for the attack, and
-    /// returning network-specific setup instructions for the attack.
-    ///
-    /// The default implementation has no network setup and passes validation.
-    fn setup_for_network(&self) -> Result<NetworkSetup, BoxError> {
-        Ok(NetworkSetup {
-            general_jammed_nodes: vec![],
-        })
+    /// Responsible for validating that the network provided meets any topological expectations for the attack.
+    fn validate(&self) -> Result<(), BoxError> {
+        Ok(())
     }
 
     /// Called for every HTLC that is forwarded through an attacking nodes, to allow the attacker to take custom
@@ -81,4 +72,7 @@ pub trait JammingAttack {
         _attacker_nodes: HashMap<String, Arc<Mutex<SimNode<SimGraph, SimulationClock>>>>,
         _shutdown_listener: Listener,
     ) -> Result<(), BoxError>;
+
+    /// Returns information about the attack.
+    fn attack_statistics(&self) -> Result<AttackStatisitcs, BoxError>;
 }

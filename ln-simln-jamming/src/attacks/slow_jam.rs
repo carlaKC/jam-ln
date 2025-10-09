@@ -28,7 +28,7 @@ use triggered::{trigger, Listener, Trigger};
 
 use super::{
     utils::{build_custom_route, build_reputation, BuildReputationParams},
-    NetworkSetup,
+    AttackStatisitcs,
 };
 
 // Idea: Have a graph with [attacker_sender (A1)] -> [target_peer] -> [target_node] -> [attacker_2 (A2)]
@@ -195,7 +195,7 @@ where
     R: ReputationMonitor + Send + Sync,
     J: ChannelJammer + Send + Sync,
 {
-    fn setup_for_network(&self) -> Result<NetworkSetup, BoxError> {
+    fn validate(&self) -> Result<(), BoxError> {
         // Validate that attacker receiver has channel with target.
         self.target_channels
             .iter()
@@ -269,9 +269,7 @@ where
             return Err("Honest sender does not have channel with target peer".into());
         }
 
-        Ok(NetworkSetup {
-            general_jammed_nodes: vec![],
-        })
+        Ok(())
     }
 
     /// We generate two types of payments where we are the receivers:
@@ -420,5 +418,12 @@ where
         }
 
         Ok(())
+    }
+
+    fn attack_statistics(&self) -> Result<AttackStatisitcs, BoxError> {
+        Ok(AttackStatisitcs {
+            general_jammed_channels: 1,
+            congestion_jammed_channels: 1,
+        })
     }
 }
