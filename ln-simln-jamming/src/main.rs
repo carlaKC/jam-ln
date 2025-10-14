@@ -266,22 +266,34 @@ async fn main() -> Result<(), BoxError> {
     .await?;
     let simulation = Arc::new(simulation);
 
+    // Collect all attacker nodes from the network
+    let attacker_pubkeys_map: HashMap<PublicKey, String> = network
+        .attackers()
+        .iter()
+        .map(|(alias, pk)| (*pk, alias.clone()))
+        .collect();
+
     // Ugly hack specific to SlowJam attack to include this node in the list of nodes passed to run_attack.
     // This node is used as an "honest" node to send a test payment through our target channel to
     // check that it is actually jammed.
-    let honest_sender_pubkey = find_pubkey_by_alias("69", sim_network)?;
+    let honest_sender_pubkey = if cli.attack_type == AttackType::SlowJam {
+        Some(find_pubkey_by_alias("69", sim_network)?)
+    } else {
+        None
+    };
+
     let attacker_nodes: HashMap<String, Arc<Mutex<SimNode<SimGraph, SimulationClock>>>> = sim_nodes
         .into_iter()
         .filter_map(|(pk, node)| {
-            if cli.attack_type == AttackType::SlowJam && pk == honest_sender_pubkey {
-                Some(("69".to_string(), node))
-            } else {
-                network
-                    .attackers()
-                    .iter()
-                    .find(|attacker| attacker.1 == pk)
-                    .map(|a| (a.0.clone(), node))
+            if let Some(honest_pk) = honest_sender_pubkey {
+                if honest_pk == pk {
+                    return Some(("69".to_string(), node));
+                }
             }
+
+            attacker_pubkeys_map
+                .get(&pk)
+                .map(|alias| (alias.clone(), node))
         })
         .collect();
 
