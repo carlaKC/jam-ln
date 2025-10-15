@@ -157,7 +157,7 @@ where
         // Jam the protected resources of our target channel by sending a payment for the entire
         // amount of the protected bucket. This will be accepted over the incoming channel because
         // we have set a channel such that the general slots will accomodate this value.
-        let hops_1 = vec![
+        let hops = vec![
             self.channel_to_jam.0,
             self.target_pubkey,
             self.attacker_receiver.1,
@@ -165,7 +165,7 @@ where
         let route = build_custom_route(
             &self.attacker_sender.1,
             798_799_000,
-            &hops_1,
+            &hops,
             &self.network_graph,
         )
         .map_err(|e| e.err)?;
@@ -290,7 +290,7 @@ where
         {
             Ok(Ok(req.incoming_custom_records))
         } else {
-            let hold_time = Duration::from_secs((req.incoming_expiry_height * 10 * 60).into());
+            let hold_time = Duration::from_secs((2016 * 10 * 60) as u64);
 
             log::info!(
                 "Jamming HTLC from target -> attacker accountable, holding for {:?}: {}",

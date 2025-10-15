@@ -341,6 +341,7 @@ async fn main() -> Result<(), BoxError> {
     .await?;
 
     let snapshot = revenue_interceptor.get_revenue_difference().await;
+    log::info!("Writing results to directory {:?}", results_dir);
     write_simulation_summary(
         &cli,
         results_dir,
