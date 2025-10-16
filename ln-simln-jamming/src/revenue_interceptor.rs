@@ -163,7 +163,14 @@ impl RevenueInterceptor {
     /// Replays projected forwards for the simulated network in a time of peace (ie, without the attacker). These events
     /// are replayed "live" so that they can be compared to the current simulation's revenue.
     pub async fn process_peacetime_fwds(&self) -> Result<(), BoxError> {
-        let mut last_event_ts = None;
+        let mut last_event_ts = self
+            .peacetime_revenue
+            .lock()
+            .await
+            .revenue_events
+            .peek()
+            .ok_or("peacetime activity is empty")?
+            .timestamp_ns;
 
         loop {
             // Grab our lock to get the next event, we don't want to hold it because we have to sleep later.
@@ -174,11 +181,8 @@ impl RevenueInterceptor {
                 .ok_or("out of peacetime events".to_string())?;
             drop(peacetime_lock);
 
-            let last_event_ts = last_event_ts.unwrap_or_else(|| {
-                last_event_ts = Some(next_event.timestamp_ns);
-                next_event.timestamp_ns
-            });
             let wait = next_event.timestamp_ns.sub(last_event_ts);
+            last_event_ts = next_event.timestamp_ns;
 
             select! {
                 _ = self.listener.clone() => return Ok(()),
