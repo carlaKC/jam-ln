@@ -30,6 +30,6 @@ clap = { version = "4.0", features = ["derive"] }
 humantime = "2.1.0"
 rand = "0.9.1"
 mockall = "0.13.1"
-lightning = { version = "0.0.123" }
+lightning = { git = "https://github.com/elnosh/rust-lightning", rev = "61118de55878a230ad21cb4026df09f7862696fb", features = ["std"] }
 tokio-util = { version = "0.7.15", features = ["rt"] }
 ctrlc = "3.4.7"
