@@ -8,9 +8,12 @@ use triggered::Listener;
 
 use crate::{accountable_from_records, records_from_signal, BoxError, NetworkReputation};
 
+pub mod cost;
 pub mod sink;
 pub mod slow_jam;
 pub mod utils;
+
+pub use cost::{channel_open_cost_msat, AttackCost};
 
 /// Summarizes actions taken during the attack.
 pub struct AttackStatisitcs {

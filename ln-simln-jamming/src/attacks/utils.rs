@@ -11,12 +11,14 @@ use lightning::{
 use ln_resource_mgr::forward_manager::ForwardManagerParams;
 use simln_lib::{
     clock::SimulationClock,
-    sim_node::{SimGraph, SimNode, WrappedLog},
-    LightningNode, PaymentOutcome,
+    sim_node::{CustomRecords, SimGraph, SimNode, WrappedLog},
+    LightningNode, PaymentOutcome, PaymentResult,
 };
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use triggered::Listener;
 
+use crate::attacks::AttackCost;
 use crate::{clock::InstantClock, reputation_interceptor::ReputationMonitor, BoxError};
 
 // When calculating the fee we should pay to build_reputation, we'll add this offset to account
@@ -59,6 +61,8 @@ pub struct BuildReputationParams<'a, R: ReputationMonitor> {
     pub reputation_params: ForwardManagerParams,
     pub clock: Arc<SimulationClock>,
     pub shutdown_listener: Listener,
+    /// Accumulator that the reputation-building payment's cost is recorded into.
+    pub attack_cost: Arc<AttackCost>,
 }
 
 /// Helper to build outgoing reputation towards the attacker with a specific target_channel.
@@ -88,8 +92,7 @@ pub async fn build_reputation<R: ReputationMonitor>(
     let target_channel = params.target_channel;
     let clock = params.clock;
 
-    let mut attacker = params.attacker_node.lock().await;
-    let attacker_pubkey = attacker.get_info().pubkey;
+    let attacker_pubkey = params.attacker_node.lock().await.get_info().pubkey;
     let mut route = build_custom_route(&attacker_pubkey, 1_000, params.hops, params.network_graph)
         .map_err(|e| e.err)?;
 
@@ -144,16 +147,18 @@ pub async fn build_reputation<R: ReputationMonitor>(
         target_hop.fee_msat += total_fee;
     }
 
-    if let Err(e) = attacker
-        .send_to_route(route, params.payment_hash, None)
-        .await
-    {
-        return Err(e.to_string().into());
-    }
-
-    let payment_result = attacker
-        .track_payment(&params.payment_hash, params.shutdown_listener)
-        .await?;
+    // build_reputation needs the payment to succeed before it can continue, so it awaits the
+    // returned handle even though the dispatch itself is non-blocking.
+    let payment_result = dispatch_attacker_payment(
+        &params.attacker_node,
+        route,
+        params.payment_hash,
+        None,
+        params.attack_cost,
+        params.shutdown_listener,
+    )
+    .await?
+    .await??;
 
     match payment_result.payment_outcome {
         PaymentOutcome::Success => {}
@@ -181,6 +186,66 @@ pub async fn build_reputation<R: ReputationMonitor>(
     } else {
         Err("could not build reputation".into())
     }
+}
+
+/// Central helper for dispatching a payment from an attacker node, recording its cost into
+/// `cost`. This is the single chokepoint for attacker payments: every payment the attacker
+/// sends should go through here so that its fees are accounted for.
+///
+/// The routing fees of `route` ([`Route::get_total_fees`]) are read before the payment is sent.
+/// Once `send_to_route` succeeds the payment is in flight, so it incurs the unconditional fee
+/// regardless of outcome; if it then resolves successfully it additionally incurs its
+/// success-case routing fees. A payment that fails before entering the network (a `send_to_route`
+/// error) incurs no cost.
+///
+/// This call does not block until the payment resolves: it returns as soon as the payment is in
+/// flight. Resolution is tracked on a background task spawned onto `cost`'s tracker, which
+/// records the success-case fees. Attacks can therefore fire off a payment and continue without
+/// managing the tracking themselves. The returned [`JoinHandle`] resolves to the payment outcome
+/// for callers that need it; others can drop it. [`AttackCost::wait_for_pending_payments`] waits
+/// for every such task to finish so that the recorded cost is final.
+pub async fn dispatch_attacker_payment(
+    attacker_node: &Arc<Mutex<SimNode<SimGraph, SimulationClock>>>,
+    route: Route,
+    payment_hash: PaymentHash,
+    custom_records: Option<CustomRecords>,
+    cost: Arc<AttackCost>,
+    shutdown_listener: Listener,
+) -> Result<JoinHandle<Result<PaymentResult, BoxError>>, BoxError> {
+    let fees_msat = route.get_total_fees();
+
+    if let Err(e) = attacker_node
+        .lock()
+        .await
+        .send_to_route(route, payment_hash, custom_records)
+        .await
+    {
+        return Err(e.to_string().into());
+    }
+
+    // The payment is now in flight, so it incurs the unconditional fee whatever its outcome.
+    cost.record_dispatch(fees_msat);
+
+    // Track resolution on a background task so the caller is not blocked while the payment is in
+    // flight. The task is registered on the cost accumulator's tracker so the simulation can
+    // wait for every payment's cost to be recorded before results are written.
+    let node = Arc::clone(attacker_node);
+    let task_cost = Arc::clone(&cost);
+    let handle = cost.tracker().spawn(async move {
+        let result = node
+            .lock()
+            .await
+            .track_payment(&payment_hash, shutdown_listener)
+            .await?;
+
+        if let PaymentOutcome::Success = result.payment_outcome {
+            task_cost.record_success(fees_msat);
+        }
+
+        Ok(result)
+    });
+
+    Ok(handle)
 }
 
 // Calculates the fee amount that will need to be paid to build sufficient reputation.
@@ -266,8 +331,12 @@ mod tests {
     use super::fee_to_build_reputation;
     use crate::{
         analysis::BatchForwardWriter,
-        attacks::utils::{
-            build_custom_route, build_reputation, BuildReputationParams, CLTV_OFFSET_LDK,
+        attacks::{
+            utils::{
+                build_custom_route, build_reputation, dispatch_attacker_payment,
+                BuildReputationParams, CLTV_OFFSET_LDK,
+            },
+            AttackCost,
         },
         records_from_signal,
         reputation_interceptor::{ChannelJammer, ReputationInterceptor},
@@ -525,6 +594,7 @@ mod tests {
             reputation_params: ForwardManagerParams::default(),
             clock: Arc::clone(&clock),
             shutdown_listener: shutdown.1.clone(),
+            attack_cost: Arc::new(AttackCost::new()),
         };
 
         let _ = build_reputation(build_rep_params).await.unwrap();
@@ -569,6 +639,137 @@ mod tests {
                 panic!("Expected payment with sufficient reputation to succeed")
             }
         };
+
+        simulation_shutdown.shutdown();
+    }
+
+    /// Dispatching a payment through `dispatch_attacker_payment` records its cost: a succeeding
+    /// payment is charged its success-case fees plus the unconditional fee, while a payment that
+    /// fails in flight is charged only the unconditional fee.
+    #[tokio::test]
+    async fn test_dispatch_attacker_payment() {
+        // Alice - Bob - Carol - Dave
+        let (params, edges) = setup_four_hop_network_edges();
+
+        let attacker_sender_pubkey = edges[0].node_1.pubkey;
+        let target_peer_pubkey = edges[0].node_2.pubkey;
+        let target_pubkey = edges[1].node_2.pubkey;
+        let attacker_receiver_pubkey = edges[3].node_2.pubkey;
+
+        let clock = Arc::new(SimulationClock::new(std::time::SystemTime::now()));
+        let reputation_interceptor: ReputationInterceptor<BatchForwardWriter, ForwardManager> =
+            ReputationInterceptor::new_for_network(params, &edges, Arc::clone(&clock), None)
+                .unwrap();
+
+        let network_graph = {
+            let channels = edges
+                .clone()
+                .into_iter()
+                .map(|c| SimulatedChannel::new(c.capacity_msat, c.scid, c.node_1, c.node_2, false))
+                .collect::<Vec<SimulatedChannel>>();
+
+            Arc::new(populate_network_graph(channels, Arc::clone(&clock)).unwrap())
+        };
+
+        let sim_params = SimParams {
+            nodes: vec![],
+            sim_network: edges.clone(),
+            activity: vec![],
+            exclude: vec![],
+        };
+
+        let interceptors: Vec<Arc<dyn Interceptor>> = vec![Arc::new(reputation_interceptor)];
+        let sim_cfg = SimulationCfg::new(None, 3_800_000, 2.0, None, Some(13995354354227336701));
+        let (simulation, validated_activities, sim_nodes) = create_simulation_with_network(
+            sim_cfg,
+            &sim_params,
+            Arc::clone(&clock),
+            TaskTracker::new(),
+            interceptors,
+            HashMap::default(),
+        )
+        .await
+        .unwrap();
+
+        let simulation_shutdown = simulation.clone();
+        tokio::spawn(async move {
+            simulation.run(&validated_activities).await.unwrap();
+        });
+
+        let shutdown = trigger();
+        let attacker_node = sim_nodes.get(&attacker_sender_pubkey).unwrap();
+        let cost = Arc::new(AttackCost::new());
+
+        // A small unaccountable payment over Alice -> Carol -> Dave succeeds.
+        let success_route = build_custom_route(
+            &attacker_sender_pubkey,
+            50_000,
+            &[target_pubkey, attacker_receiver_pubkey],
+            &network_graph,
+        )
+        .unwrap();
+        let success_fees = success_route.get_total_fees();
+
+        let success_handle = dispatch_attacker_payment(
+            attacker_node,
+            success_route,
+            PaymentHash(rand::random()),
+            None,
+            Arc::clone(&cost),
+            shutdown.1.clone(),
+        )
+        .await
+        .unwrap();
+
+        // The dispatch is non-blocking: it returns with the unconditional fee already recorded,
+        // before the payment has resolved.
+        assert_eq!(cost.payments_dispatched(), 1);
+
+        // A large accountable payment that needs reputation fails in flight: it is dispatched
+        // (incurs the unconditional fee) but is not counted as a success.
+        let fail_route = build_custom_route(
+            &attacker_sender_pubkey,
+            1_000_000,
+            &[target_peer_pubkey, target_pubkey, attacker_receiver_pubkey],
+            &network_graph,
+        )
+        .unwrap();
+        let fail_fees = fail_route.get_total_fees();
+
+        let fail_handle = dispatch_attacker_payment(
+            attacker_node,
+            fail_route,
+            PaymentHash(rand::random()),
+            Some(records_from_signal(AccountableSignal::Accountable)),
+            Arc::clone(&cost),
+            shutdown.1.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(cost.payments_dispatched(), 2);
+
+        // Waiting for pending payments settles the success-case fees recorded by the background
+        // tracking tasks.
+        cost.wait_for_pending_payments().await;
+
+        let success_result = success_handle.await.unwrap().unwrap();
+        let fail_result = fail_handle.await.unwrap().unwrap();
+        assert!(matches!(
+            success_result.payment_outcome,
+            PaymentOutcome::Success
+        ));
+        assert!(!matches!(
+            fail_result.payment_outcome,
+            PaymentOutcome::Success
+        ));
+
+        assert_eq!(cost.payments_succeeded(), 1);
+        assert_eq!(cost.success_case_fees_msat(), success_fees);
+        assert_eq!(
+            cost.unconditional_fees_msat(),
+            success_fees / 100 + fail_fees / 100
+        );
 
         simulation_shutdown.shutdown();
     }
