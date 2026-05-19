@@ -1,6 +1,6 @@
 use crate::attacks::sink::SinkAttack;
 use crate::attacks::slow_jam::SlowJam;
-use crate::attacks::JammingAttack;
+use crate::attacks::{AttackCost, JammingAttack};
 use crate::reputation_interceptor::{
     BootstrapForward, BootstrapRecords, ChannelJammer, ReputationMonitor,
 };
@@ -385,6 +385,17 @@ fn diff_peacetime_attacktime(
     Ok(())
 }
 
+/// Counts the channels in the network that have an attacker node as one of their endpoints,
+/// i.e. the channels the attacker had to open in the graph to mount the attack.
+pub fn count_attacker_channels(network: &[NetworkParser], attackers: &HashSet<PublicKey>) -> usize {
+    network
+        .iter()
+        .filter(|channel| {
+            attackers.contains(&channel.node_1.pubkey) || attackers.contains(&channel.node_2.pubkey)
+        })
+        .count()
+}
+
 #[derive(Parser)]
 #[command(version, about)]
 pub struct Cli {
@@ -444,6 +455,7 @@ pub enum AttackType {
     // NOTE: add your attack that you want to run here.
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn setup_attack<R, M, J>(
     cli: &Cli,
     network: &NetworkType,
@@ -451,6 +463,7 @@ pub fn setup_attack<R, M, J>(
     reputation_monitor: Arc<R>,
     revenue_monitor: Arc<M>,
     channel_jammer: Arc<J>,
+    attack_cost: Arc<AttackCost>,
 ) -> Result<Arc<dyn JammingAttack + Send + Sync>, BoxError>
 where
     R: ReputationMonitor + Send + Sync + 'static,
@@ -524,6 +537,7 @@ where
                 Arc::clone(&reputation_monitor),
                 Arc::clone(&channel_jammer),
                 network_graph,
+                attack_cost,
             ));
 
             Ok(attack)
@@ -894,6 +908,30 @@ mod tests {
 
     use crate::parsing::get_history_for_bootstrap;
     use crate::test_utils::test_bootstrap_forward;
+
+    /// Counts only channels that touch an attacker node, regardless of which endpoint it is.
+    #[test]
+    fn test_count_attacker_channels() {
+        use crate::parsing::count_attacker_channels;
+        use crate::test_utils::{get_random_keypair, setup_test_edge};
+        use bitcoin::secp256k1::PublicKey;
+
+        let attacker = get_random_keypair().1;
+        let honest_1 = get_random_keypair().1;
+        let honest_2 = get_random_keypair().1;
+
+        let network = vec![
+            setup_test_edge(0.into(), honest_1, honest_2),
+            setup_test_edge(1.into(), attacker, honest_1),
+            setup_test_edge(2.into(), honest_2, attacker),
+        ];
+
+        let attackers = HashSet::from([attacker]);
+        assert_eq!(count_attacker_channels(&network, &attackers), 2);
+
+        let no_attackers: HashSet<PublicKey> = HashSet::new();
+        assert_eq!(count_attacker_channels(&network, &no_attackers), 0);
+    }
 
     /// Tests the cases where filtering bootstrap data fails.
     #[test]
