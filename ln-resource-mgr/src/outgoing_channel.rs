@@ -133,22 +133,27 @@ mod tests {
 
     #[test]
     fn test_opportunity_cost() {
-        let params = get_test_params();
-        // Less than resolution_period has zero cost.
+        let params = get_test_params(); // resolution_period = 60s
+
+        // Held within the resolution_period grace has zero cost.
         assert_eq!(params.opportunity_cost(100, Duration::from_secs(10)), 0);
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(60)), 0);
 
-        // Equal to resolution_period or within one period is equal to fee.
-        assert_eq!(params.opportunity_cost(100, Duration::from_secs(60)), 100);
-        assert_eq!(params.opportunity_cost(100, Duration::from_secs(65)), 100);
+        // Cost scales continuously (not stepwise) with time held beyond the grace period: a
+        // hold partway into a period is charged a fraction of the fee.
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(90)), 50);
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(120)), 100);
 
-        // Multiple periods above resolution_period charges multiples of fee.
-        assert_eq!(params.opportunity_cost(100, Duration::from_secs(600)), 1000);
+        // Multiple periods beyond the grace charge multiples of the fee.
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(600)), 900);
     }
 
     #[test]
     fn test_effective_fees() {
         let params = get_test_params();
         let fast_resolve = params.resolution_period / 2;
+        // Held for 3x resolution_period: 2x the grace period beyond it, so opportunity_cost is
+        // 2 * fee under the BOLT-1280 float formula.
         let slow_resolve = params.resolution_period * 3;
 
         let cases = vec![
@@ -164,7 +169,7 @@ mod tests {
                 slow_resolve,
                 AccountableSignal::Accountable,
                 true,
-                Ok(-2000),
+                Ok(-1000),
             ),
             (
                 1000,
@@ -178,7 +183,7 @@ mod tests {
                 slow_resolve,
                 AccountableSignal::Accountable,
                 false,
-                Ok(-3000),
+                Ok(-2000),
             ),
             (
                 1000,

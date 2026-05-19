@@ -18,9 +18,8 @@ attack time network.
 
 ## Considerations
 
-There are two features of this proposal that have *not been 
+There is one feature of this proposal that has *not been 
 implemented* yet:
-- [ ] Scale `opportunity_cost` as a float, [rather than an integer](https://github.com/lightning/bolts/pull/1280#discussion_r2349880197).
 - [ ] [Do not allow overpayment](https://github.com/lightning/bolts/pull/1280#discussion_r2369501671) of advertised fees.
 
 Please also note that this solution is intended to be deployed with

@@ -29,10 +29,15 @@ pub struct ReputationParams {
 }
 
 impl ReputationParams {
-    /// Calculates the opportunity_cost of a htlc being held on our channel - allowing one [`reputation_period`]'s
-    /// grace period, then charging for every subsequent period.
+    /// Calculates the opportunity_cost of a htlc being held on our channel, allowing one
+    /// `resolution_period`'s grace, then charging continuously for the time held beyond it.
+    ///
+    /// Per BOLT-1280 the cost scales as a float rather than in discrete steps:
+    /// `max(0, (resolution_time - resolution_period) / resolution_period) * fees`.
     pub(super) fn opportunity_cost(&self, fee_msat: u64, hold_time: Duration) -> u64 {
-        (hold_time.as_secs() / self.resolution_period.as_secs()).saturating_mul(fee_msat)
+        let resolution_period = self.resolution_period.as_secs_f64();
+        let periods = ((hold_time.as_secs_f64() - resolution_period) / resolution_period).max(0.0);
+        (periods * fee_msat as f64).round() as u64
     }
 
     /// Calculates the worst case reputation damage of a htlc, assuming it'll be held for its full expiry_delta.
