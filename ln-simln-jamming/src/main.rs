@@ -2,10 +2,11 @@ use bitcoin::secp256k1::PublicKey;
 use clap::Parser;
 use ln_simln_jamming::analysis::BatchForwardWriter;
 use ln_simln_jamming::attack_interceptor::AttackInterceptor;
-use ln_simln_jamming::attacks::AttackStatisitcs;
+use ln_simln_jamming::attacks::{channel_open_cost_msat, AttackCost, AttackStatisitcs};
 use ln_simln_jamming::clock::InstantClock;
 use ln_simln_jamming::parsing::{
-    find_pubkey_by_alias, reputation_snapshot_from_file, setup_attack, AttackType, Cli, NetworkType,
+    count_attacker_channels, find_pubkey_by_alias, reputation_snapshot_from_file, setup_attack,
+    AttackType, Cli, NetworkType,
 };
 use ln_simln_jamming::reputation_interceptor::ReputationInterceptor;
 use ln_simln_jamming::revenue_interceptor::{
@@ -195,6 +196,9 @@ async fn main() -> Result<(), BoxError> {
         cli.reputation_margin_expiry_blocks,
     );
 
+    // Accumulates the gross cost of every payment the attack dispatches.
+    let attack_cost = Arc::new(AttackCost::new());
+
     // Next, setup the attack interceptor to use our custom attack.
     let attack = setup_attack(
         &cli,
@@ -203,6 +207,7 @@ async fn main() -> Result<(), BoxError> {
         Arc::clone(&reputation_interceptor),
         Arc::clone(&revenue_interceptor),
         Arc::clone(&reputation_interceptor),
+        Arc::clone(&attack_cost),
     )?;
 
     attack.validate()?;
@@ -329,6 +334,9 @@ async fn main() -> Result<(), BoxError> {
     // Run simulation until it shuts down, then wait for the graph to exit.
     simulation.run(&validated_activities).await?;
 
+    // Wait for every attacker payment to resolve so the recorded cost is final before it is read.
+    attack_cost.wait_for_pending_payments().await;
+
     // Write start and end state to a summary file.
     let end_reputation = get_network_reputation(
         reputation_interceptor,
@@ -341,6 +349,11 @@ async fn main() -> Result<(), BoxError> {
     .await?;
 
     let snapshot = revenue_interceptor.get_revenue_difference().await;
+
+    // Count the channels the attacker had to open in the graph to mount the attack.
+    let attacker_pubkey_set: HashSet<PublicKey> = attacker_pubkeys.iter().copied().collect();
+    let graph_channels = count_attacker_channels(network.active_network(), &attacker_pubkey_set);
+
     log::info!("Writing results to directory {:?}", results_dir);
     write_simulation_summary(
         &cli,
@@ -349,6 +362,8 @@ async fn main() -> Result<(), BoxError> {
         &start_reputation,
         &end_reputation,
         attack.attack_statistics()?,
+        graph_channels,
+        &attack_cost,
     )?;
 
     Ok(())
@@ -399,6 +414,8 @@ fn write_simulation_summary(
     start_reputation: &NetworkReputation,
     end_reputation: &NetworkReputation,
     attack_stats: AttackStatisitcs,
+    graph_channels: usize,
+    attack_cost: &AttackCost,
 ) -> Result<(), BoxError> {
     let file = OpenOptions::new()
         .write(true)
@@ -473,6 +490,49 @@ fn write_simulation_summary(
         writer,
         "Attacker congestion jammed {} edges (directional)",
         attack_stats.congestion_jammed_channels,
+    )?;
+
+    // The attacker cost covers only the channels it actually opened in the graph and the fees
+    // it paid on payments. Jammed channels are reported separately above: converting jamming
+    // into a channel-opening cost is left out deliberately, since the number of channels needed
+    // to jam one channel is uncertain (in expectation roughly 20, but not fixed).
+    let channel_open_cost = channel_open_cost_msat(graph_channels);
+    writeln!(writer, "--- Attacker cost ---")?;
+    writeln!(writer, "Channels opened in graph: {}", graph_channels)?;
+    writeln!(
+        writer,
+        "Channel open cost (msat): {} (approx 200 sat per channel)",
+        channel_open_cost,
+    )?;
+    writeln!(
+        writer,
+        "Payments dispatched: {}",
+        attack_cost.payments_dispatched(),
+    )?;
+    writeln!(
+        writer,
+        "Payments succeeded: {}",
+        attack_cost.payments_succeeded(),
+    )?;
+    writeln!(
+        writer,
+        "Success-case fees (msat): {}",
+        attack_cost.success_case_fees_msat(),
+    )?;
+    writeln!(
+        writer,
+        "Unconditional fees (msat): {}",
+        attack_cost.unconditional_fees_msat(),
+    )?;
+    writeln!(
+        writer,
+        "Total payment fees (msat): {}",
+        attack_cost.total_payment_fees_msat(),
+    )?;
+    writeln!(
+        writer,
+        "Total attacker cost (msat): {}",
+        channel_open_cost + attack_cost.total_payment_fees_msat(),
     )?;
     writer.flush()?;
 

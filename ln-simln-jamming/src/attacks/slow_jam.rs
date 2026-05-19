@@ -27,8 +27,10 @@ use tokio::{select, sync::Mutex};
 use triggered::{trigger, Listener, Trigger};
 
 use super::{
-    utils::{build_custom_route, build_reputation, BuildReputationParams},
-    AttackStatisitcs,
+    utils::{
+        build_custom_route, build_reputation, dispatch_attacker_payment, BuildReputationParams,
+    },
+    AttackCost, AttackStatisitcs,
 };
 
 // Idea: Have a graph with [attacker_sender (A1)] -> [target_peer] -> [target_node] -> [attacker_2 (A2)]
@@ -60,6 +62,8 @@ where
     jamming_payments: Arc<Mutex<HashSet<PaymentHash>>>,
     reputation_params: ForwardManagerParams,
     payment_trigger: (Trigger, Listener),
+    /// Accumulates the cost of all payments this attack dispatches.
+    attack_cost: Arc<AttackCost>,
 }
 
 impl<R, J> SlowJam<R, J>
@@ -80,6 +84,7 @@ where
         reputation_monitor: Arc<R>,
         channel_jammer: Arc<J>,
         network_graph: Arc<LdkNetworkGraph>,
+        attack_cost: Arc<AttackCost>,
     ) -> Self {
         Self {
             clock,
@@ -104,6 +109,7 @@ where
             jamming_payments: Arc::new(Mutex::new(HashSet::new())),
             reputation_params: ForwardManagerParams::default(),
             payment_trigger: trigger(),
+            attack_cost,
         }
     }
 
@@ -137,6 +143,7 @@ where
             reputation_params: self.reputation_params,
             clock: Arc::clone(&self.clock),
             shutdown_listener: trigger().1,
+            attack_cost: Arc::clone(&self.attack_cost),
         };
         let fees_paid = build_reputation(build_rep_params).await?;
         Ok(fees_paid)
@@ -145,6 +152,7 @@ where
     async fn slow_jam_channel(
         &self,
         attacker_nodes: &HashMap<String, Arc<Mutex<SimNode<SimGraph, SimulationClock>>>>,
+        shutdown_listener: Listener,
     ) -> Result<(), BoxError> {
         // At this point we should:
         // - Have general and congestion resources jammed.
@@ -175,14 +183,22 @@ where
         // even if it has reputation because all protected resources are taken.
         let payment_hash = PaymentHash(rand::random());
         self.jamming_payments.lock().await.insert(payment_hash);
-        if let Err(e) = attacker_node_sender
-            .lock()
-            .await
-            .send_to_route(route, payment_hash, None)
-            .await
+
+        // The dispatch helper does not block while this payment is held: it tracks resolution on
+        // a background task registered with the attack cost accumulator. We drop the returned
+        // handle since the attack learns this payment failed through `intercept_attacker_receive`.
+        if let Err(e) = dispatch_attacker_payment(
+            attacker_node_sender,
+            route,
+            payment_hash,
+            None,
+            Arc::clone(&self.attack_cost),
+            shutdown_listener,
+        )
+        .await
         {
             self.jamming_payments.lock().await.remove(&payment_hash);
-            return Err(e.to_string().into());
+            return Err(e);
         }
 
         Ok(())
@@ -398,7 +414,8 @@ where
             .await?;
 
         // After building reputation and jamming general resources, jam protected resources.
-        self.slow_jam_channel(&attacker_nodes).await?;
+        self.slow_jam_channel(&attacker_nodes, shutdown_listener.clone())
+            .await?;
 
         // Wait for signal that our jamming payment is being held to then send our test payment to
         // check it fails.
