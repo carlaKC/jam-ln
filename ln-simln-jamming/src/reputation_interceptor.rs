@@ -72,6 +72,14 @@ pub struct BootstrapForward {
     pub forwarding_node: PublicKey,
     pub channel_in_id: u64,
     pub channel_out_id: u64,
+    /// Whether the forward settled successfully (true) or failed (false). Defaults to true so that
+    /// traffic files generated before this field existed parse as all-settled.
+    #[serde(default = "default_settled")]
+    pub settled: bool,
+}
+
+fn default_settled() -> bool {
+    true
 }
 
 /// Functionality to monitor reputation values in a network.
@@ -319,7 +327,7 @@ where
                             ))?,
                     )),
                 ),
-                forward_resolution: ForwardResolution::Settled,
+                forward_resolution: ForwardResolution::from(h.settled),
             }));
         }
 
@@ -1029,6 +1037,7 @@ mod tests {
             forwarding_node: bob_pk,
             channel_in_id: alice_to_bob,
             channel_out_id: bob_to_carol,
+            settled: true,
         }];
 
         // Create an interceptor that is intended to general jam payments on Bob -> Carol in the three hop network
