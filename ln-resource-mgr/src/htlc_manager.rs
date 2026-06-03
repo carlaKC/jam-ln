@@ -23,6 +23,10 @@ pub enum ReputationAlgo {
     /// resolution period, then one fee per full period. This is the default.
     #[default]
     Original,
+    /// Gradual opportunity cost (lightning/bolts#1280 / jam-ln#119): `max(0, (hold − period) /
+    /// period) × fee` — linear above the resolution period (no stair-steps / discontinuity), still
+    /// zero below it.
+    Gradual,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,10 +48,16 @@ impl ReputationParams {
     /// Calculates the opportunity_cost of a htlc being held on our channel, per the selected
     /// [`ReputationAlgo`]:
     /// - `Original`: stepwise `floor(hold/period) × fee` — zero below one period, one fee per period.
+    /// - `Gradual`:  `max(0, (hold − period)/period) × fee` — linear above the period, zero below.
     pub(super) fn opportunity_cost(&self, fee_msat: u64, hold_time: Duration) -> u64 {
         match self.algo {
             ReputationAlgo::Original => {
                 (hold_time.as_secs() / self.resolution_period.as_secs()).saturating_mul(fee_msat)
+            }
+            ReputationAlgo::Gradual => {
+                let period = self.resolution_period.as_secs_f64();
+                let periods_over = ((hold_time.as_secs_f64() - period) / period).max(0.0);
+                (periods_over * fee_msat as f64).round() as u64
             }
         }
     }

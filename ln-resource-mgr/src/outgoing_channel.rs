@@ -147,6 +147,20 @@ mod tests {
     }
 
     #[test]
+    fn test_gradual_opportunity_cost() {
+        // Gradual (#119): max(0, (hold − period)/period) × fee — linear above the period, 0 below.
+        let params = ReputationParams {
+            algo: ReputationAlgo::Gradual,
+            ..get_test_params() // resolution_period = 60s
+        };
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(30)), 0); // below period
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(60)), 0); // at the boundary
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(90)), 50); // (90-60)/60 = 0.5
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(120)), 100); // 1 period over
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(600)), 900);
+    }
+
+    #[test]
     fn test_effective_fees() {
         let params = get_test_params();
         let fast_resolve = params.resolution_period / 2;

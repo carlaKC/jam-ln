@@ -55,6 +55,9 @@ pub const DEFAULT_RESULT_BATCH_SIZE: &str = "500";
 pub enum ReputationAlgoArg {
     /// Pre-existing stepwise opportunity cost.
     Original,
+    /// Gradual opportunity cost (bolts#1280 / jam-ln#119): linear above the resolution period, zero
+    /// below, no stair-steps.
+    Gradual,
 }
 
 impl ReputationAlgoArg {
@@ -62,6 +65,7 @@ impl ReputationAlgoArg {
     pub fn name(&self) -> &'static str {
         match self {
             ReputationAlgoArg::Original => "original",
+            ReputationAlgoArg::Gradual => "gradual",
         }
     }
 }
@@ -70,6 +74,7 @@ impl From<ReputationAlgoArg> for ReputationAlgo {
     fn from(arg: ReputationAlgoArg) -> Self {
         match arg {
             ReputationAlgoArg::Original => ReputationAlgo::Original,
+            ReputationAlgoArg::Gradual => ReputationAlgo::Gradual,
         }
     }
 }
