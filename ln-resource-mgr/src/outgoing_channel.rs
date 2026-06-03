@@ -101,7 +101,7 @@ impl OutgoingChannel {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use crate::htlc_manager::ReputationParams;
+    use crate::htlc_manager::{ReputationAlgo, ReputationParams};
     use crate::{AccountableSignal, ForwardResolution, ResourceBucketType};
 
     use super::{InFlightHtlc, OutgoingChannel};
@@ -112,6 +112,7 @@ mod tests {
             reputation_multiplier: 10,
             resolution_period: Duration::from_secs(60),
             expected_block_speed: Some(Duration::from_secs(60 * 10)),
+            algo: ReputationAlgo::Original,
         }
     }
 

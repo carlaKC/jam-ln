@@ -1,6 +1,6 @@
 mod decaying_average;
 pub mod forward_manager;
-pub use htlc_manager::ReputationParams;
+pub use htlc_manager::{ReputationAlgo, ReputationParams};
 mod htlc_manager;
 mod incoming_channel;
 mod outgoing_channel;

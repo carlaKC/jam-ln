@@ -12,7 +12,7 @@ use csv::{ReaderBuilder, StringRecord};
 use humantime::Duration as HumanDuration;
 use lightning::routing::gossip::NetworkGraph;
 use ln_resource_mgr::forward_manager::ForwardManagerParams;
-use ln_resource_mgr::ChannelSnapshot;
+use ln_resource_mgr::{ChannelSnapshot, ReputationAlgo};
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use sim_cli::parsing::NetworkParser;
@@ -49,6 +49,31 @@ pub const DEFAULT_REPUTATION_MARGIN_EXIPRY: &str = "200";
 /// The default batch size for writing results to disk.
 pub const DEFAULT_RESULT_BATCH_SIZE: &str = "500";
 
+/// CLI selector for the reputation scoring algorithm. Maps to [`ReputationAlgo`]; add a variant here
+/// (and the match arm) when a new named algorithm is added in ln-resource-mgr.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ReputationAlgoArg {
+    /// Pre-existing stepwise opportunity cost.
+    Original,
+}
+
+impl ReputationAlgoArg {
+    /// Canonical name (used as the default experiment label).
+    pub fn name(&self) -> &'static str {
+        match self {
+            ReputationAlgoArg::Original => "original",
+        }
+    }
+}
+
+impl From<ReputationAlgoArg> for ReputationAlgo {
+    fn from(arg: ReputationAlgoArg) -> Self {
+        match arg {
+            ReputationAlgoArg::Original => ReputationAlgo::Original,
+        }
+    }
+}
+
 #[derive(Clone, Parser)]
 pub struct ReputationParams {
     /// The window over which the value of a link's revenue to our node is calculated.
@@ -58,6 +83,10 @@ pub struct ReputationParams {
     /// The multiplier applied to revenue_window_seconds to get the duration over which reputation is bootstrapped.
     #[arg(long)]
     pub reputation_multiplier: Option<u8>,
+
+    /// The reputation scoring algorithm to use. Defaults to the pre-existing `original`.
+    #[arg(long, value_enum, default_value_t = ReputationAlgoArg::Original)]
+    pub reputation_algo: ReputationAlgoArg,
 }
 
 impl From<ReputationParams> for ForwardManagerParams {
@@ -69,6 +98,7 @@ impl From<ReputationParams> for ForwardManagerParams {
         if let Some(multiplier) = cli.reputation_multiplier {
             forward_params.reputation_params.reputation_multiplier = multiplier;
         }
+        forward_params.reputation_params.algo = cli.reputation_algo.into();
         forward_params
     }
 }
@@ -177,9 +207,10 @@ impl NetworkType {
         }
     }
 
-    /// Returns a directory to write simulation results to, if appropriate for network type,
-    /// namespacing by the runtime provided.
-    pub fn results_dir(&self, now: SystemTime) -> Option<PathBuf> {
+    /// Returns a directory to write simulation results to, if appropriate for network type:
+    /// `results/{Attack}/{label}/{seconds_since_epoch}`. The label groups runs of the same
+    /// experiment (e.g. by reputation algorithm) for easier comparison.
+    pub fn results_dir(&self, now: SystemTime, label: &str) -> Option<PathBuf> {
         match self {
             NetworkType::Peacetime(_) => None,
             NetworkType::AttackTime(_, a) | NetworkType::BootstrapAttackTime(_, a, _) => {
@@ -188,6 +219,7 @@ impl NetworkType {
                 Some(
                     PathBuf::from("results")
                         .join(format!("{:?}", a.attack))
+                        .join(label)
                         .join(sec_since_epoch.to_string()),
                 )
             }
@@ -432,6 +464,11 @@ pub struct Cli {
 
     #[command(flatten)]
     pub reputation_params: ReputationParams,
+
+    /// Optional label for this experiment. Results are written to
+    /// `results/{Attack}/{label}/{timestamp}`. Defaults to the reputation algorithm name.
+    #[arg(long)]
+    pub label: Option<String>,
 
     #[clap(long, default_value = "debug")]
     pub log_level: LevelFilter,

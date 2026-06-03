@@ -3,7 +3,7 @@ use crate::incoming_channel::{BucketParameters, IncomingChannel};
 use crate::outgoing_channel::OutgoingChannel;
 use crate::{
     AllocationCheck, BucketResources, ChannelSnapshot, ForwardResolution, ForwardingOutcome,
-    HtlcRef, ProposedForward, ReputationCheck, ReputationError, ReputationManager,
+    HtlcRef, ProposedForward, ReputationAlgo, ReputationCheck, ReputationError, ReputationManager,
     ReputationParams, ResourceBucketType, ResourceCheck,
 };
 use std::collections::hash_map::Entry;
@@ -36,6 +36,7 @@ impl Default for ForwardManagerParams {
                 reputation_multiplier: 12,
                 resolution_period: Duration::from_secs(90),
                 expected_block_speed: Some(Duration::from_secs(10 * 60)),
+                algo: ReputationAlgo::default(),
             },
             general_slot_portion: 40,
             general_liquidity_portion: 40,
@@ -489,7 +490,7 @@ mod tests {
     use crate::{
         forward_manager::{ForwardManager, SimulationDebugManager},
         AccountableSignal, ChannelSnapshot, FailureReason, ForwardingOutcome, HtlcRef,
-        ProposedForward, ReputationError, ReputationManager, ReputationParams,
+        ProposedForward, ReputationAlgo, ReputationError, ReputationManager, ReputationParams,
     };
 
     #[test]
@@ -534,6 +535,7 @@ mod tests {
                 reputation_multiplier: 10,
                 resolution_period: Duration::from_secs(90),
                 expected_block_speed: None,
+                algo: ReputationAlgo::Original,
             },
             general_slot_portion: 30,
             general_liquidity_portion: 30,

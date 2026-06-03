@@ -15,6 +15,16 @@ pub(super) struct InFlightHtlc {
     pub(super) bucket: ResourceBucketType,
 }
 
+/// Selects the reputation scoring algorithm. New algorithms can be added as a variant here plus a
+/// match arm in [`ReputationParams::opportunity_cost`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ReputationAlgo {
+    /// Pre-existing behaviour: stepwise opportunity cost `floor(hold/period) × fee` — zero below one
+    /// resolution period, then one fee per full period. This is the default.
+    #[default]
+    Original,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReputationParams {
     /// The period of time that revenue should be tracked to determine the threshold for reputation decisions.
@@ -26,13 +36,20 @@ pub struct ReputationParams {
     /// Expected block speed, surfaced to allow test networks to set different durations, defaults to 10 minutes
     /// otherwise.
     pub expected_block_speed: Option<Duration>,
+    /// The opportunity-cost algorithm in use.
+    pub algo: ReputationAlgo,
 }
 
 impl ReputationParams {
-    /// Calculates the opportunity_cost of a htlc being held on our channel - allowing one [`reputation_period`]'s
-    /// grace period, then charging for every subsequent period.
+    /// Calculates the opportunity_cost of a htlc being held on our channel, per the selected
+    /// [`ReputationAlgo`]:
+    /// - `Original`: stepwise `floor(hold/period) × fee` — zero below one period, one fee per period.
     pub(super) fn opportunity_cost(&self, fee_msat: u64, hold_time: Duration) -> u64 {
-        (hold_time.as_secs() / self.resolution_period.as_secs()).saturating_mul(fee_msat)
+        match self.algo {
+            ReputationAlgo::Original => {
+                (hold_time.as_secs() / self.resolution_period.as_secs()).saturating_mul(fee_msat)
+            }
+        }
     }
 
     /// Calculates the worst case reputation damage of a htlc, assuming it'll be held for its full expiry_delta.
@@ -197,7 +214,8 @@ mod tests {
 
     use crate::htlc_manager::{ChannelFilter, InFlightManager};
     use crate::{
-        AccountableSignal, HtlcRef, ReputationError, ReputationParams, ResourceBucketType,
+        AccountableSignal, HtlcRef, ReputationAlgo, ReputationError, ReputationParams,
+        ResourceBucketType,
     };
 
     use super::InFlightHtlc;
@@ -208,6 +226,7 @@ mod tests {
             reputation_multiplier: 10,
             resolution_period: Duration::from_secs(60),
             expected_block_speed: Some(Duration::from_secs(60 * 10)),
+            algo: ReputationAlgo::Original,
         })
     }
 

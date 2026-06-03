@@ -448,6 +448,7 @@ impl GeneralBucket {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ReputationAlgo;
     use std::collections::HashSet;
 
     const TEST_BUCKET_PARAMS: BucketParameters = BucketParameters {
@@ -623,6 +624,7 @@ mod tests {
             reputation_multiplier: 10,
             resolution_period: Duration::from_secs(90),
             expected_block_speed: None,
+            algo: ReputationAlgo::Original,
         };
 
         let now = Instant::now();
