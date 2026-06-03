@@ -5,7 +5,7 @@ use ln_resource_mgr::{AllocationCheck, ProposedForward};
 use ln_simln_jamming::analysis::ForwardReporter;
 use ln_simln_jamming::clock::InstantClock;
 use ln_simln_jamming::parsing::{
-    parse_duration, AttackType, NetworkParams, NetworkType, ReputationParams,
+    parse_window, AttackType, NetworkParams, NetworkType, ReputationParams,
 };
 use ln_simln_jamming::reputation_interceptor::{BootstrapForward, ReputationInterceptor};
 use ln_simln_jamming::{BoxError, ACCOUNTABLE_TYPE, UPGRADABLE_TYPE};
@@ -33,8 +33,10 @@ struct Cli {
     #[command(flatten)]
     network: NetworkParams,
 
-    /// The amount of time to generate forwarding history for.
-    #[arg(long, value_parser = parse_duration, default_value = DEFAULT_RUNTIME)]
+    /// The amount of time to generate forwarding history for. Accepts `Xd` (days) and `Xm`
+    /// (months); generate a short window (eg `7d`) and loop it at import with the reputation
+    /// builder's `--allow-boost` to cover the full reputation window without a large file.
+    #[arg(long, value_parser = parse_window, default_value = DEFAULT_RUNTIME)]
     pub duration: Duration,
 
     #[command(flatten)]
