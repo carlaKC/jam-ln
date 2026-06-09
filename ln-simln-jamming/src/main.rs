@@ -47,11 +47,14 @@ async fn main() -> Result<(), BoxError> {
         .init()
         .unwrap();
 
-    let network = NetworkType::new(
+    let mut network = NetworkType::new(
         &cli.network,
         Some(cli.attack_type.clone()),
         cli.attacker_bootstrap,
     )?;
+    if let Some(alias) = &cli.target_alias {
+        network.override_target(alias)?;
+    }
     let (target_alias, target_pubkey) = network.target();
     let attackers = network.attackers();
     let attacker_pubkeys: Vec<PublicKey> = attackers.iter().map(|a| a.1).collect();

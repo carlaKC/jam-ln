@@ -621,7 +621,8 @@ mod tests {
     };
     use ln_resource_mgr::{
         AccountableSignal, AllocationCheck, ChannelSnapshot, ForwardResolution, ForwardingOutcome,
-        HtlcRef, ProposedForward, ReputationError, ReputationManager, ReputationParams,
+        HtlcRef, ProposedForward, ReputationAlgo, ReputationError, ReputationManager,
+        ReputationParams,
     };
     use mockall::mock;
     use sim_cli::parsing::NetworkParser;
@@ -928,6 +929,7 @@ mod tests {
                 reputation_multiplier: 60,
                 resolution_period: Duration::from_secs(90),
                 expected_block_speed: None,
+                algo: ReputationAlgo::Original,
             },
             general_slot_portion: 30,
             general_liquidity_portion: 30,

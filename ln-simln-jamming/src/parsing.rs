@@ -247,6 +247,18 @@ impl NetworkType {
         }
     }
 
+    /// Overrides the target node (chosen from `target.txt`) by alias, resolved against the peacetime
+    /// graph. Lets a run pick its target at runtime without editing shared network files.
+    pub fn override_target(&mut self, alias: &str) -> Result<(), BoxError> {
+        let peacetime = match self {
+            NetworkType::Peacetime(p)
+            | NetworkType::AttackTime(p, _)
+            | NetworkType::BootstrapAttackTime(p, _, _) => p,
+        };
+        let pubkey = find_pubkey_by_alias(alias, &peacetime.graph)?;
+        peacetime.target = (alias.to_owned(), pubkey);
+        Ok(())
+    }
 
     /// Returns the public keys of attackers in our network, if any.
     pub fn attackers(&self) -> &[(String, PublicKey)] {
@@ -475,6 +487,10 @@ pub struct Cli {
     #[arg(long, default_value = DEFAULT_RESULT_BATCH_SIZE)]
     pub result_batch_size: u16,
 
+    /// Alias of the node to attack, overriding `target.txt`. Lets experiments pick a target at
+    /// runtime without mutating shared network data (and makes switching targets a flag).
+    #[arg(long)]
+    pub target_alias: Option<String>,
 
     /// scid of the target channel to jam (the slot/liquidity attacks). The peer is derived from the
     /// graph as the channel's endpoint that isn't the target. Defaults to the original slow-jam
@@ -908,6 +924,44 @@ pub async fn history_from_file(
     Ok(forwards)
 }
 
+/// Tiles a short window of bootstrap forwards (the "loopback"/boost) so it spans at least `target`
+/// of wall time, without writing the duplicated data to disk. Lets a short traffic file bootstrap a
+/// full-length reputation window — the protocol's revenue/reputation windows are unchanged; only the
+/// *input data* is repeated to cover them.
+///
+/// Each repetition is shifted forward by the source's full span so timestamps stay strictly
+/// increasing across tile seams (the decaying-average reputation update rejects out-of-order
+/// timestamps). Returns the input unchanged if it already covers `target` (or is empty).
+pub fn boost_history(forwards: Vec<BootstrapForward>, target: Duration) -> Vec<BootstrapForward> {
+    let target_ns = target.as_nanos() as u64;
+    let min_added = match forwards.iter().map(|f| f.added_ns).min() {
+        Some(v) => v,
+        None => return forwards,
+    };
+    let max_settled = forwards
+        .iter()
+        .map(|f| f.settled_ns)
+        .max()
+        .unwrap_or(min_added);
+    let span = max_settled.saturating_sub(min_added);
+    if span == 0 || span >= target_ns {
+        return forwards;
+    }
+
+    let tiles = target_ns.div_ceil(span);
+    let mut boosted = Vec::with_capacity(forwards.len() * tiles as usize);
+    for tile in 0..tiles {
+        // +tile keeps seams strictly monotonic when a forward sits exactly on the boundary.
+        let shift = tile.saturating_mul(span).saturating_add(tile);
+        for f in &forwards {
+            let mut copy = f.clone();
+            copy.added_ns += shift;
+            copy.settled_ns += shift;
+            boosted.push(copy);
+        }
+    }
+    boosted
+}
 
 pub fn reputation_snapshot_from_file(
     file_path: &PathBuf,

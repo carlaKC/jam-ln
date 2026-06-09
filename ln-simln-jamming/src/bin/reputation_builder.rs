@@ -14,8 +14,8 @@ use ln_simln_jamming::{
     analysis::BatchForwardWriter,
     clock::InstantClock,
     parsing::{
-        get_history_for_bootstrap, history_from_file, parse_duration, AttackType, NetworkParams,
-        NetworkType, ReputationParams,
+        boost_history, get_history_for_bootstrap, history_from_file, parse_duration, AttackType,
+        NetworkParams, NetworkType, ReputationParams,
     },
     reputation_interceptor::{BootstrapRecords, ReputationInterceptor, ReputationMonitor},
     BoxError,
@@ -41,6 +41,12 @@ struct Cli {
     /// for, expressed as human readable values (eg: 1w, 3d).
     #[arg(long, value_parser = parse_duration, requires = "attack_type")]
     pub attacker_bootstrap: Option<Duration>,
+
+    /// Loop ("boost") a short traffic file to fill the reputation window instead of requiring a
+    /// full-length file on disk. Reads the whole file and tiles it (with forward-shifted, monotonic
+    /// timestamps) up to the reputation window — the window itself is unchanged. Off by default.
+    #[arg(long)]
+    pub allow_boost: bool,
 }
 
 #[tokio::main]
@@ -63,11 +69,21 @@ async fn main() -> Result<(), BoxError> {
     let target_pubkey = network.target().1;
     let traffic_file = network.traffic_file();
 
-    let unfiltered_history = history_from_file(
-        &traffic_file,
-        Some(forward_params.reputation_params.reputation_window()),
-    )
-    .await?;
+    let reputation_window = forward_params.reputation_params.reputation_window();
+    let unfiltered_history = if cli.allow_boost {
+        // Read the whole (short) file and tile it to fill the reputation window.
+        let history = history_from_file(&traffic_file, None).await?;
+        let boosted = boost_history(history, reputation_window);
+        log::info!(
+            "Boosted {:?} to fill the {:?} reputation window: {} forwards",
+            traffic_file,
+            reputation_window,
+            boosted.len(),
+        );
+        boosted
+    } else {
+        history_from_file(&traffic_file, Some(reputation_window)).await?
+    };
 
     // Filter bootstrap records if attacker alias and bootstrap provided.
     // Only add up revenue if attacker bootstrap is specified.
