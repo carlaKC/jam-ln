@@ -137,6 +137,7 @@ where
             reputation_params: self.reputation_params,
             clock: Arc::clone(&self.clock),
             shutdown_listener: trigger().1,
+            fee_buffer: 5000,
         };
         let fees_paid = build_reputation(build_rep_params).await?;
         Ok(fees_paid)
@@ -424,6 +425,11 @@ where
         Ok(AttackStatisitcs {
             general_jammed_channels: 1,
             congestion_jammed_channels: 1,
+            // Slow-jam builds reputation once up front and does not track that spend here.
+            entry_fees_paid_msat: 0,
+            sustaining_fees_paid_msat: 0,
+            total_fees_paid_msat: 0,
+            refill_count: 0,
         })
     }
 }

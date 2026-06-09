@@ -9,6 +9,7 @@ use triggered::Listener;
 use crate::{accountable_from_records, records_from_signal, BoxError, NetworkReputation};
 
 pub mod sink;
+pub mod slot_liq_jam;
 pub mod slow_jam;
 pub mod utils;
 
@@ -19,6 +20,23 @@ pub struct AttackStatisitcs {
 
     /// The number of channels congestion jammed using [`reputation_interceptor::ChannelJammer`].
     pub congestion_jammed_channels: usize,
+
+    /// One-time fees (msat) the attacker paid to build the reputation needed to gain protected
+    /// access (the entry cost; scales with the target channel's revenue threshold).
+    pub entry_fees_paid_msat: u64,
+
+    /// Recurring fees (msat) the attacker paid to keep reputation above the (decaying) threshold
+    /// over the hold — the sustaining cost. Splitting this from the entry shows the "pay once, hold
+    /// cheaply" economics.
+    pub sustaining_fees_paid_msat: u64,
+
+    /// Total fees (msat) the attacker paid = entry + sustaining. Note these fees are paid *to the
+    /// target* (the attacker builds reputation by routing through it), so they partially offset the
+    /// target's revenue loss — see the summary's honest-revenue-denied figure.
+    pub total_fees_paid_msat: u64,
+
+    /// The number of reputation maintenance cycles (refills) performed during the hold.
+    pub refill_count: u64,
 }
 
 // Defines an attack that can be mounted against the simulation framework.

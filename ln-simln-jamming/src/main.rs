@@ -474,6 +474,47 @@ fn write_simulation_summary(
         "Attacker congestion jammed {} edges (directional)",
         attack_stats.congestion_jammed_channels,
     )?;
+    // The attacker builds reputation by routing *through* the target, so its fees are paid to the
+    // target and inflate `Simulation revenue`. Adding them back recovers the honest revenue denied.
+    let honest_revenue_denied = (revenue.peacetime_revenue_msat as i128
+        - revenue.simulation_revenue_msat as i128
+        + attack_stats.total_fees_paid_msat as i128)
+        .max(0) as u128;
+    let secs = revenue.runtime.as_secs();
+    // Absolute figures only (no ratios): how long the jam ran, what the target would have earned
+    // honestly over that window, how much of that the jam denied, and what the attacker paid —
+    // split into the one-time entry (gain protected access) and the ongoing maintenance.
+    writeln!(
+        writer,
+        "Attack total duration (seconds): {} ({:.2} days)",
+        secs,
+        secs as f64 / 86_400.0,
+    )?;
+    writeln!(
+        writer,
+        "Honest revenue the target earns over this duration (msat): {}",
+        revenue.peacetime_revenue_msat,
+    )?;
+    writeln!(
+        writer,
+        "Honest revenue denied over this duration (msat): {}",
+        honest_revenue_denied,
+    )?;
+    writeln!(
+        writer,
+        "Attacker total cost (msat): {}",
+        attack_stats.total_fees_paid_msat,
+    )?;
+    writeln!(
+        writer,
+        "  one-time entry cost (gain protected access) (msat): {}",
+        attack_stats.entry_fees_paid_msat,
+    )?;
+    writeln!(
+        writer,
+        "  sustaining cost (maintain the jam, {} refill(s)) (msat): {}",
+        attack_stats.refill_count, attack_stats.sustaining_fees_paid_msat,
+    )?;
     writer.flush()?;
 
     Ok(())

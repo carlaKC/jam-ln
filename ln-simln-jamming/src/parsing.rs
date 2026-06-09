@@ -1,4 +1,5 @@
 use crate::attacks::sink::SinkAttack;
+use crate::attacks::slot_liq_jam::{FillMode, JamConfig, SlotLiqJam};
 use crate::attacks::slow_jam::SlowJam;
 use crate::attacks::JammingAttack;
 use crate::reputation_interceptor::{
@@ -49,6 +50,9 @@ pub const DEFAULT_REPUTATION_MARGIN_EXIPRY: &str = "200";
 /// The default batch size for writing results to disk.
 pub const DEFAULT_RESULT_BATCH_SIZE: &str = "500";
 
+
+
+
 #[derive(Clone, Parser)]
 pub struct ReputationParams {
     /// The window over which the value of a link's revenue to our node is calculated.
@@ -58,6 +62,7 @@ pub struct ReputationParams {
     /// The multiplier applied to revenue_window_seconds to get the duration over which reputation is bootstrapped.
     #[arg(long)]
     pub reputation_multiplier: Option<u8>,
+
 }
 
 impl From<ReputationParams> for ForwardManagerParams {
@@ -177,8 +182,9 @@ impl NetworkType {
         }
     }
 
-    /// Returns a directory to write simulation results to, if appropriate for network type,
-    /// namespacing by the runtime provided.
+    /// Returns a directory to write simulation results to, if appropriate for network type:
+    /// `results/{Attack}/{label}/{seconds_since_epoch}`. The label groups runs of the same
+    /// experiment (e.g. by reputation algorithm) for easier comparison.
     pub fn results_dir(&self, now: SystemTime) -> Option<PathBuf> {
         match self {
             NetworkType::Peacetime(_) => None,
@@ -202,6 +208,7 @@ impl NetworkType {
             | NetworkType::BootstrapAttackTime(p, _, _) => p.target.clone(),
         }
     }
+
 
     /// Returns the public keys of attackers in our network, if any.
     pub fn attackers(&self) -> &[(String, PublicKey)] {
@@ -430,8 +437,23 @@ pub struct Cli {
     #[arg(long, default_value = DEFAULT_RESULT_BATCH_SIZE)]
     pub result_batch_size: u16,
 
+
+    /// scid of the target channel to jam (the slot/liquidity attacks). The peer is derived from the
+    /// graph as the channel's endpoint that isn't the target. Defaults to the original slow-jam
+    /// channel; set it to re-point the attack at a different (e.g. higher-revenue) target channel.
+    #[arg(long)]
+    pub channel_to_jam_scid: Option<u64>,
+
+    /// How long to sustain the slot/liquidity jam (eg `4w`, `6months`). For the slow variants this
+    /// is the single hold; for the fast variants it's the total window over which short holds are
+    /// repeated. Holding for several revenue windows is how the one-time entry cost amortizes
+    /// below the (accumulating) revenue denied. Defaults to 2 weeks.
+    #[arg(long, value_parser = parse_duration)]
+    pub jam_duration: Option<Duration>,
+
     #[command(flatten)]
     pub reputation_params: ReputationParams,
+
 
     #[clap(long, default_value = "debug")]
     pub log_level: LevelFilter,
@@ -441,6 +463,12 @@ pub struct Cli {
 pub enum AttackType {
     Sink,
     SlowJam,
+    /// Slow slot jamming: fill the protected bucket with many tiny HTLCs (exhaust slots), hold ~2w.
+    SlowSlotJam,
+    /// Fast slot jamming: same slot fill, held ~85s and repeated for up to 2w.
+    FastSlotJam,
+    /// Fast liquidity jamming: a few large HTLCs exhausting protected liquidity, held ~85s, repeated.
+    FastLiqJam,
     // NOTE: add your attack that you want to run here.
 }
 
@@ -524,6 +552,88 @@ where
                 Arc::clone(&reputation_monitor),
                 Arc::clone(&channel_jammer),
                 network_graph,
+            ));
+
+            Ok(attack)
+        }
+        AttackType::SlowSlotJam | AttackType::FastSlotJam | AttackType::FastLiqJam => {
+            // All three reuse the slow-jam topology: attacker receiver alias 70, sender alias 25.
+            let attackers = network.attackers();
+            let attacker_receiver = attackers
+                .iter()
+                .find(|a| a.0 == "70")
+                .ok_or("Required attacker receiver with alias 70 not found")?;
+            let attacker_sender = attackers
+                .iter()
+                .find(|a| a.0 == "25")
+                .ok_or("Required attacker sender with alias 25 not found")?;
+
+            // Channel to jam: default to the original slow-jam channel, or take --channel-to-jam-scid.
+            // Derive the peer as the endpoint of that channel that isn't the target.
+            let channel_to_jam_scid = cli.channel_to_jam_scid.unwrap_or(348545186070528);
+            let target_pubkey = network.target().1;
+            let target_peer_pubkey = sim_network
+                .iter()
+                .find(|c| u64::from(c.scid) == channel_to_jam_scid)
+                .and_then(|c| {
+                    if c.node_1.pubkey == target_pubkey {
+                        Some(c.node_2.pubkey)
+                    } else if c.node_2.pubkey == target_pubkey {
+                        Some(c.node_1.pubkey)
+                    } else {
+                        None
+                    }
+                })
+                .ok_or(format!(
+                    "channel-to-jam scid {channel_to_jam_scid} is not a channel of the target"
+                ))?;
+            let channel_to_jam = (target_peer_pubkey, channel_to_jam_scid);
+            let network_graph = network_graph(sim_network.clone())?;
+
+            // Two weeks as 2016 blocks * 10 minutes (matches slow_jam's hold); overridable via
+            // --jam-duration so the jam can be sustained across several revenue windows.
+            let two_weeks = Duration::from_secs(2016 * 10 * 60);
+            let jam_duration = cli.jam_duration.unwrap_or(two_weeks);
+            // Fast variants hold just under the 90s resolution period so opportunity-cost penalties
+            // don't accrue, then repeat.
+            let fast_hold = Duration::from_secs(85);
+
+            let config = match network
+                .attack_type()
+                .ok_or("attack type must be set for simulation")?
+            {
+                AttackType::SlowSlotJam => JamConfig {
+                    fill: FillMode::Slots { htlc_msat: 1_000 },
+                    hold_time: jam_duration,
+                    repeat: false,
+                    total_duration: jam_duration,
+                },
+                AttackType::FastSlotJam => JamConfig {
+                    fill: FillMode::Slots { htlc_msat: 1_000 },
+                    hold_time: fast_hold,
+                    repeat: true,
+                    total_duration: jam_duration,
+                },
+                AttackType::FastLiqJam => JamConfig {
+                    fill: FillMode::Liquidity,
+                    hold_time: fast_hold,
+                    repeat: true,
+                    total_duration: jam_duration,
+                },
+                _ => unreachable!("outer match guarantees a slot/liquidity variant"),
+            };
+
+            let attack = Arc::new(SlotLiqJam::new(
+                Arc::clone(&clock),
+                sim_network,
+                network.target().1,
+                attacker_sender.clone(),
+                attacker_receiver.clone(),
+                channel_to_jam,
+                Arc::clone(&reputation_monitor),
+                Arc::clone(&channel_jammer),
+                network_graph,
+                config,
             ));
 
             Ok(attack)
@@ -755,6 +865,7 @@ pub async fn history_from_file(
 
     Ok(forwards)
 }
+
 
 pub fn reputation_snapshot_from_file(
     file_path: &PathBuf,

@@ -11,6 +11,10 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+/// The maximum number of in-flight HTLC slots a channel exposes (BOLT `max_accepted_htlcs`), split
+/// across the general/congestion/protected buckets by the configured portions.
+pub const MAX_HTLC_SLOTS: u16 = 483;
+
 /// Tracks reputation and revenue for a channel.
 #[derive(Debug)]
 struct TrackedChannel {
@@ -241,11 +245,13 @@ impl ReputationManager for ForwardManager {
         {
             Entry::Occupied(_) => Err(ReputationError::ErrChannelExists(channel_id)),
             Entry::Vacant(v) => {
-                let general_slot_count = 483 * self.params.general_slot_portion as u16 / 100;
+                let general_slot_count =
+                    MAX_HTLC_SLOTS * self.params.general_slot_portion as u16 / 100;
                 let general_liquidity_amount =
                     capacity_msat * self.params.general_liquidity_portion as u64 / 100;
 
-                let congestion_slot_count = 483 * self.params.congestion_slot_portion as u16 / 100;
+                let congestion_slot_count =
+                    MAX_HTLC_SLOTS * self.params.congestion_slot_portion as u16 / 100;
                 let congestion_liquidity_amount =
                     capacity_msat * self.params.congestion_liquidity_portion as u64 / 100;
 
@@ -256,7 +262,7 @@ impl ReputationManager for ForwardManager {
                     - self.params.general_liquidity_portion
                     - self.params.congestion_liquidity_portion;
 
-                let protected_slot_count = 483 * protected_slot_portion as u16 / 100;
+                let protected_slot_count = MAX_HTLC_SLOTS * protected_slot_portion as u16 / 100;
                 let protected_liquidity_amount =
                     capacity_msat * protected_liquidity_portion as u64 / 100;
 

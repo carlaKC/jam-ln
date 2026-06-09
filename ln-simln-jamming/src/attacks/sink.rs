@@ -308,6 +308,11 @@ where
             // We jam the target's channels in both directions.
             general_jammed_channels: self.target_channels.len() * 2,
             congestion_jammed_channels: 0,
+            // Sink does not build reputation, so no attacker spend to report.
+            entry_fees_paid_msat: 0,
+            sustaining_fees_paid_msat: 0,
+            total_fees_paid_msat: 0,
+            refill_count: 0,
         })
     }
 }
