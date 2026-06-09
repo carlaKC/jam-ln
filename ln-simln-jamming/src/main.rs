@@ -92,8 +92,13 @@ async fn main() -> Result<(), BoxError> {
     let now = InstantClock::now(&*clock);
 
     // Create a writer to store results for nodes that we care about.
+    // Label groups this experiment's results; defaults to the reputation algorithm name.
+    let label = cli
+        .label
+        .clone()
+        .unwrap_or_else(|| cli.reputation_params.reputation_algo.name().to_string());
     let results_dir = network
-        .results_dir(Clock::now(&*clock))
+        .results_dir(Clock::now(&*clock), &label)
         .ok_or("results dir none for attack")?;
     if !results_dir.exists() {
         fs::create_dir_all(&results_dir)?;

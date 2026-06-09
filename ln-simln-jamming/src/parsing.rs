@@ -13,7 +13,7 @@ use csv::{ReaderBuilder, StringRecord};
 use humantime::Duration as HumanDuration;
 use lightning::routing::gossip::NetworkGraph;
 use ln_resource_mgr::forward_manager::ForwardManagerParams;
-use ln_resource_mgr::ChannelSnapshot;
+use ln_resource_mgr::{ChannelSnapshot, ReputationAlgo};
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use sim_cli::parsing::NetworkParser;
@@ -50,8 +50,40 @@ pub const DEFAULT_REPUTATION_MARGIN_EXIPRY: &str = "200";
 /// The default batch size for writing results to disk.
 pub const DEFAULT_RESULT_BATCH_SIZE: &str = "500";
 
+/// CLI selector for the reputation scoring algorithm. Maps to [`ReputationAlgo`]; add a variant here
+/// (and the match arm) when a new named algorithm is added in ln-resource-mgr.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ReputationAlgoArg {
+    /// Pre-existing stepwise opportunity cost.
+    Original,
+    /// Gradual opportunity cost (bolts#1280 / jam-ln#119): linear above the resolution period, zero
+    /// below, no stair-steps.
+    Gradual,
+    /// Ramp opportunity cost: free below a 5s grace, linear up to one fee at the resolution period,
+    /// then `fee × hold/period` above it. Charges sub-period holds, closing the fast-jam window.
+    Ramp,
+}
 
+impl ReputationAlgoArg {
+    /// Canonical name (used as the default experiment label).
+    pub fn name(&self) -> &'static str {
+        match self {
+            ReputationAlgoArg::Original => "original",
+            ReputationAlgoArg::Gradual => "gradual",
+            ReputationAlgoArg::Ramp => "ramp",
+        }
+    }
+}
 
+impl From<ReputationAlgoArg> for ReputationAlgo {
+    fn from(arg: ReputationAlgoArg) -> Self {
+        match arg {
+            ReputationAlgoArg::Original => ReputationAlgo::Original,
+            ReputationAlgoArg::Gradual => ReputationAlgo::Gradual,
+            ReputationAlgoArg::Ramp => ReputationAlgo::Ramp,
+        }
+    }
+}
 
 #[derive(Clone, Parser)]
 pub struct ReputationParams {
@@ -63,6 +95,10 @@ pub struct ReputationParams {
     #[arg(long)]
     pub reputation_multiplier: Option<u8>,
 
+    /// The reputation scoring algorithm to use. Defaults to `gradual` (the behaviour on `master`);
+    /// pass `original` to compare against the pre-existing stepwise opportunity cost.
+    #[arg(long, value_enum, default_value_t = ReputationAlgoArg::Gradual)]
+    pub reputation_algo: ReputationAlgoArg,
 }
 
 impl From<ReputationParams> for ForwardManagerParams {
@@ -74,6 +110,7 @@ impl From<ReputationParams> for ForwardManagerParams {
         if let Some(multiplier) = cli.reputation_multiplier {
             forward_params.reputation_params.reputation_multiplier = multiplier;
         }
+        forward_params.reputation_params.algo = cli.reputation_algo.into();
         forward_params
     }
 }
@@ -185,7 +222,7 @@ impl NetworkType {
     /// Returns a directory to write simulation results to, if appropriate for network type:
     /// `results/{Attack}/{label}/{seconds_since_epoch}`. The label groups runs of the same
     /// experiment (e.g. by reputation algorithm) for easier comparison.
-    pub fn results_dir(&self, now: SystemTime) -> Option<PathBuf> {
+    pub fn results_dir(&self, now: SystemTime, label: &str) -> Option<PathBuf> {
         match self {
             NetworkType::Peacetime(_) => None,
             NetworkType::AttackTime(_, a) | NetworkType::BootstrapAttackTime(_, a, _) => {
@@ -194,6 +231,7 @@ impl NetworkType {
                 Some(
                     PathBuf::from("results")
                         .join(format!("{:?}", a.attack))
+                        .join(label)
                         .join(sec_since_epoch.to_string()),
                 )
             }
@@ -454,6 +492,10 @@ pub struct Cli {
     #[command(flatten)]
     pub reputation_params: ReputationParams,
 
+    /// Optional label for this experiment. Results are written to
+    /// `results/{Attack}/{label}/{timestamp}`. Defaults to the reputation algorithm name.
+    #[arg(long)]
+    pub label: Option<String>,
 
     #[clap(long, default_value = "debug")]
     pub log_level: LevelFilter,
