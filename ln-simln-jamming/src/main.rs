@@ -20,6 +20,7 @@ use sim_cli::parsing::{create_simulation_with_network, SimParams};
 use simln_lib::clock::Clock;
 use simln_lib::clock::SimulationClock;
 use simln_lib::latency_interceptor::LatencyIntercepor;
+use simln_lib::runtime::block_on_virtual_time;
 use simln_lib::sim_node::{CustomRecords, Interceptor, SimGraph, SimNode};
 use simln_lib::SimulationCfg;
 use simple_logger::SimpleLogger;
@@ -33,8 +34,7 @@ use tokio::select;
 use tokio::sync::Mutex;
 use tokio_util::task::TaskTracker;
 
-#[tokio::main]
-async fn main() -> Result<(), BoxError> {
+fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
     let forward_params = cli.validate()?;
 
@@ -48,8 +48,10 @@ async fn main() -> Result<(), BoxError> {
         .init()
         .unwrap();
 
-    let clock = Arc::new(SimulationClock::new(SystemTime::now()));
-    run(clock, cli, forward_params).await
+    let start_time = SystemTime::now();
+    block_on_virtual_time(start_time, |clock| run(clock, cli, forward_params))??;
+
+    Ok(())
 }
 
 async fn run(

@@ -22,6 +22,7 @@ use ln_simln_jamming::{
 };
 use log::LevelFilter;
 use simln_lib::clock::SimulationClock;
+use simln_lib::runtime::block_on_virtual_time;
 use simple_logger::SimpleLogger;
 
 #[derive(Parser)]
@@ -43,8 +44,7 @@ struct Cli {
     pub attacker_bootstrap: Option<Duration>,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), BoxError> {
+fn main() -> Result<(), BoxError> {
     SimpleLogger::new()
         .with_level(LevelFilter::Debug)
         .with_module_level("simln_lib::sim_node", LevelFilter::Debug)
@@ -52,8 +52,11 @@ async fn main() -> Result<(), BoxError> {
         .unwrap();
 
     let cli = Cli::parse();
-    let clock = Arc::new(SimulationClock::new(SystemTime::now()));
-    run(clock, cli).await
+
+    let start_time = SystemTime::now();
+    block_on_virtual_time(start_time, |clock| run(clock, cli))??;
+
+    Ok(())
 }
 
 async fn run(clock: Arc<SimulationClock>, cli: Cli) -> Result<(), BoxError> {
