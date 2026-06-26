@@ -548,7 +548,7 @@ fn network_graph(
         })
         .collect::<Vec<SimulatedChannel>>();
 
-    let clock = Arc::new(SimulationClock::new(1)?);
+    let clock = Arc::new(SimulationClock::new(std::time::SystemTime::now()));
 
     Ok(Arc::new(
         populate_network_graph(channels, clock.clone())

@@ -3,7 +3,7 @@ use std::{
     fs::{File, OpenOptions},
     io::Write,
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use bitcoin::secp256k1::PublicKey;
@@ -52,7 +52,7 @@ async fn main() -> Result<(), BoxError> {
         .unwrap();
 
     let cli = Cli::parse();
-    let clock = Arc::new(SimulationClock::new(1)?);
+    let clock = Arc::new(SimulationClock::new(SystemTime::now()));
     run(clock, cli).await
 }
 

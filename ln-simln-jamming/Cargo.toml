@@ -12,8 +12,9 @@ name = "forward-builder"
 path = "src/bin/forward_builder.rs"
 
 [dependencies]
-simln-lib = { git = "https://github.com/bitcoin-dev-project/sim-ln", rev = "66daf6918c4d2774bf700c430a4bf4417a1377ee" }
-sim-cli = { git = "https://github.com/bitcoin-dev-project/sim-ln", rev = "66daf6918c4d2774bf700c430a4bf4417a1377ee" }
+# TODO: update once merged
+simln-lib = { git = "https://github.com/carlaKC/sim-ln", rev = "2b7c4d5f2bed38df256f4895938cb13dfac399a1", features = ["virtual-time"] }
+sim-cli = { git = "https://github.com/carlaKC/sim-ln", rev = "2b7c4d5f2bed38df256f4895938cb13dfac399a1" }
 ln-resource-mgr = { path = "../ln-resource-mgr" }
 bitcoin = { version = "0.30.1" }
 async-trait = "0.1.73"

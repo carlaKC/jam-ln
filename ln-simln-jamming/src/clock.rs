@@ -1,5 +1,4 @@
 use simln_lib::clock::SimulationClock;
-use std::ops::Add;
 use std::time::Instant;
 
 pub trait InstantClock {
@@ -7,10 +6,10 @@ pub trait InstantClock {
 }
 
 impl InstantClock for SimulationClock {
+    /// Reads the current instant from tokio's clock, which tracks virtual time when the runtime is paused. The
+    /// returned instant is only meaningful for relative duration arithmetic, never compare it to a wall-clock
+    /// `Instant::now()`.
     fn now(&self) -> Instant {
-        let start_instant_std = self.get_start_instant().into();
-        let elapsed = Instant::now().duration_since(start_instant_std);
-
-        start_instant_std.add(elapsed * self.get_speedup_multiplier().into())
+        tokio::time::Instant::now().into_std()
     }
 }

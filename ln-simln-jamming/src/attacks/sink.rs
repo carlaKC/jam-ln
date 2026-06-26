@@ -337,7 +337,7 @@ mod tests {
         network: &[NetworkParser],
     ) -> SinkAttack<MockReputationInterceptor, MockPeacetimeMonitor, MockJammer> {
         SinkAttack::new(
-            Arc::new(SimulationClock::new(1).unwrap()),
+            Arc::new(SimulationClock::new(std::time::SystemTime::now())),
             network,
             target,
             vec![attacker],

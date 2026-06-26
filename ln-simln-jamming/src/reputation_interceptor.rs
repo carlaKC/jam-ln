@@ -725,7 +725,7 @@ mod tests {
         (
             ReputationInterceptor {
                 network_nodes: Arc::new(Mutex::new(nodes)),
-                clock: Arc::new(SimulationClock::new(1).unwrap()),
+                clock: Arc::new(SimulationClock::new(std::time::SystemTime::now())),
                 results: None,
             },
             pubkeys,
@@ -975,7 +975,7 @@ mod tests {
             ReputationInterceptor::new_for_network(
                 params,
                 &edges,
-                Arc::new(SimulationClock::new(1).unwrap()),
+                Arc::new(SimulationClock::new(std::time::SystemTime::now())),
                 None,
             )
             .unwrap();
@@ -1037,7 +1037,7 @@ mod tests {
             ReputationInterceptor::new_for_network(
                 params,
                 &edges,
-                Arc::new(SimulationClock::new(1).unwrap()),
+                Arc::new(SimulationClock::new(std::time::SystemTime::now())),
                 None,
             )
             .unwrap();
@@ -1133,7 +1133,7 @@ mod tests {
     async fn test_new_from_snapshot() {
         let (params, edges, reputation_snapshot) = setup_three_hop_network_edges();
 
-        let clock = Arc::new(SimulationClock::new(1).unwrap());
+        let clock = Arc::new(SimulationClock::new(std::time::SystemTime::now()));
         let interceptor: Result<
             ReputationInterceptor<BatchForwardWriter, ForwardManager>,
             BoxError,
@@ -1206,7 +1206,7 @@ mod tests {
             &edges,
             reputation_snapshot,
             HashSet::new(),
-            Arc::new(SimulationClock::new(1).unwrap()),
+            Arc::new(SimulationClock::new(std::time::SystemTime::now())),
             None,
         )
         .await;
@@ -1234,7 +1234,7 @@ mod tests {
             &edges,
             reputation_snapshot,
             HashSet::new(),
-            Arc::new(SimulationClock::new(1).unwrap()),
+            Arc::new(SimulationClock::new(std::time::SystemTime::now())),
             None,
         )
         .await;
@@ -1263,7 +1263,7 @@ mod tests {
             &edges,
             reputation_snapshot,
             HashSet::new(),
-            Arc::new(SimulationClock::new(1).unwrap()),
+            Arc::new(SimulationClock::new(std::time::SystemTime::now())),
             None,
         )
         .await;
@@ -1290,7 +1290,7 @@ mod tests {
             &edges,
             reputation_snapshot,
             HashSet::new(),
-            Arc::new(SimulationClock::new(1).unwrap()),
+            Arc::new(SimulationClock::new(std::time::SystemTime::now())),
             None,
         )
         .await;

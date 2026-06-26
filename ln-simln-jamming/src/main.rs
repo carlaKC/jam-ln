@@ -28,7 +28,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::select;
 use tokio::sync::Mutex;
 use tokio_util::task::TaskTracker;
@@ -48,7 +48,7 @@ async fn main() -> Result<(), BoxError> {
         .init()
         .unwrap();
 
-    let clock = Arc::new(SimulationClock::new(cli.clock_speedup)?);
+    let clock = Arc::new(SimulationClock::new(SystemTime::now()));
     run(clock, cli, forward_params).await
 }
 
@@ -95,7 +95,7 @@ async fn run(
 
     // Use the channel jamming interceptor and latency for simulated payments.
     let latency_interceptor: Arc<dyn Interceptor> =
-        Arc::new(LatencyIntercepor::new_poisson(150.0)?);
+        Arc::new(LatencyIntercepor::new_poisson(150.0, None)?);
 
     let now = InstantClock::now(&*clock);
 
