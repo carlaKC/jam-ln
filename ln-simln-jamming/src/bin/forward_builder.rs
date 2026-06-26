@@ -14,6 +14,7 @@ use sim_cli::parsing::{create_simulation_with_network, SimParams};
 use simln_lib::batched_writer::BatchedWriter;
 use simln_lib::clock::{Clock, SimulationClock};
 use simln_lib::latency_interceptor::LatencyIntercepor;
+use simln_lib::runtime::block_on_virtual_time;
 use simln_lib::sim_node::CustomRecords;
 use simln_lib::SimulationCfg;
 use simple_logger::SimpleLogger;
@@ -43,8 +44,7 @@ struct Cli {
     pub attack_type: Option<AttackType>,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), BoxError> {
+fn main() -> Result<(), BoxError> {
     SimpleLogger::new()
         .with_level(LevelFilter::Debug)
         // Lower logging from sim-ln so that we can focus on our own logs.
@@ -56,8 +56,14 @@ async fn main() -> Result<(), BoxError> {
         .unwrap();
 
     let cli = Cli::parse();
-    let clock = Arc::new(SimulationClock::new(SystemTime::now()));
-    run(clock, cli).await
+
+    // Run on sim-ln's paused, single-threaded virtual-time runtime so the (potentially months-long) bootstrap
+    // generates instantly. Anchor virtual time at the real wall clock because the routing graph rejects channel
+    // updates whose timestamps are far from real time.
+    let start_time = SystemTime::now();
+    block_on_virtual_time(start_time, |clock| run(clock, cli))??;
+
+    Ok(())
 }
 
 async fn run(clock: Arc<SimulationClock>, cli: Cli) -> Result<(), BoxError> {
