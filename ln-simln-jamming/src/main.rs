@@ -38,6 +38,11 @@ use tokio_util::task::TaskTracker;
 /// run is reproducible.
 const SIM_SEED: u64 = 13995354354227336701;
 
+/// Upper bound on virtual simulation time (one year, in seconds), used as a safeguard so that the virtual-time
+/// runtime cannot advance virtual time forever if an attack fails to trigger shutdown. Attacks are expected to
+/// terminate the simulation well before this.
+const MAX_SIM_TIME_SECS: u32 = 365 * 24 * 60 * 60;
+
 fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
     let forward_params = cli.validate()?;
@@ -271,7 +276,15 @@ async fn run(
         exclude,
     };
 
-    let sim_cfg = SimulationCfg::new(None, 3_800_000, 2.0, None, Some(SIM_SEED));
+    // Bound the simulation at one virtual year as a safeguard. Normally the attack triggers shutdown well before
+    // this; the ceiling just prevents virtual time from advancing forever if an attack never terminates.
+    let sim_cfg = SimulationCfg::new(
+        Some(MAX_SIM_TIME_SECS),
+        3_800_000,
+        2.0,
+        None,
+        Some(SIM_SEED),
+    );
     let (simulation, validated_activities, sim_nodes) = create_simulation_with_network(
         sim_cfg,
         &sim_params,
