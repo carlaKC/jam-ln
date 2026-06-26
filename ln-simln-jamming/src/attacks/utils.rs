@@ -431,7 +431,7 @@ mod tests {
 
         let target_channel_id: u64 = edges[2].scid.into();
 
-        let clock = Arc::new(SimulationClock::new(1).unwrap());
+        let clock = Arc::new(SimulationClock::new(std::time::SystemTime::now()));
         let reputation_interceptor: ReputationInterceptor<BatchForwardWriter, ForwardManager> =
             ReputationInterceptor::new_for_network(params, &edges, Arc::clone(&clock), None)
                 .unwrap();

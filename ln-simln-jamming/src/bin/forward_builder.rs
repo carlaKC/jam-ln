@@ -19,7 +19,7 @@ use simln_lib::SimulationCfg;
 use simple_logger::SimpleLogger;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio_util::task::TaskTracker;
 
@@ -56,7 +56,7 @@ async fn main() -> Result<(), BoxError> {
         .unwrap();
 
     let cli = Cli::parse();
-    let clock = Arc::new(SimulationClock::new(1000)?);
+    let clock = Arc::new(SimulationClock::new(SystemTime::now()));
     run(clock, cli).await
 }
 
@@ -90,7 +90,7 @@ async fn run(clock: Arc<SimulationClock>, cli: Cli) -> Result<(), BoxError> {
                 .to_string(),
         )?))),
     )?);
-    let latency_interceptor = Arc::new(LatencyIntercepor::new_poisson(300.0)?);
+    let latency_interceptor = Arc::new(LatencyIntercepor::new_poisson(300.0, None)?);
 
     let sim_cfg = SimulationCfg::new(
         Some(cli.duration.as_secs() as u32),
