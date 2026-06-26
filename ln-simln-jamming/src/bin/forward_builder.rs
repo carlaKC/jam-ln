@@ -8,7 +8,7 @@ use ln_simln_jamming::parsing::{
     parse_duration, AttackType, NetworkParams, NetworkType, ReputationParams,
 };
 use ln_simln_jamming::reputation_interceptor::{BootstrapForward, ReputationInterceptor};
-use ln_simln_jamming::{BoxError, ACCOUNTABLE_TYPE, UPGRADABLE_TYPE};
+use ln_simln_jamming::{BoxError, ACCOUNTABLE_TYPE, SIM_SEED, UPGRADABLE_TYPE};
 use log::LevelFilter;
 use sim_cli::parsing::{create_simulation_with_network, SimParams};
 use simln_lib::batched_writer::BatchedWriter;
@@ -93,14 +93,14 @@ async fn run(clock: Arc<SimulationClock>, cli: Cli) -> Result<(), BoxError> {
                 .to_string(),
         )?))),
     )?);
-    let latency_interceptor = Arc::new(LatencyIntercepor::new_poisson(300.0, None)?);
+    let latency_interceptor = Arc::new(LatencyIntercepor::new_poisson(300.0, Some(SIM_SEED))?);
 
     let sim_cfg = SimulationCfg::new(
         Some(cli.duration.as_secs() as u32),
         3_800_000,
         2.0,
         None,
-        Some(13995354354227336701),
+        Some(SIM_SEED),
     );
 
     let exclude_pubkeys = [network.target().1]

@@ -20,6 +20,9 @@ pub(crate) mod test_utils;
 /// Error type for errors that can be erased, includes 'static so that down-casting is possible.
 pub type BoxError = Box<dyn Error + Send + Sync + 'static>;
 
+/// Fixes randomness used in the simulation so that runs are reproducible.
+pub const SIM_SEED: u64 = 13995354354227336701;
+
 /// The TLV type used to represent experimental accountable signals.
 pub const ACCOUNTABLE_TYPE: u64 = 106823;
 
