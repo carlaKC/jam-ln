@@ -263,6 +263,21 @@ where
         })
     }
 
+    /// Snapshots the current reputation of every channel in the network, in the form consumed by
+    /// [`Self::new_from_snapshot`]. Lets reputation state be handed from one simulation to the next in memory,
+    /// rather than via a file on disk.
+    pub async fn snapshot(
+        &self,
+        access_ins: Instant,
+    ) -> Result<HashMap<PublicKey, HashMap<u64, ChannelSnapshot>>, BoxError> {
+        let pubkeys: Vec<PublicKey> = self.network_nodes.lock().await.keys().copied().collect();
+        let mut snapshot = HashMap::with_capacity(pubkeys.len());
+        for pubkey in pubkeys {
+            snapshot.insert(pubkey, self.list_channels(pubkey, access_ins).await?);
+        }
+        Ok(snapshot)
+    }
+
     /// Bootstraps the reputation of nodes in the interceptor network using the historical forwards provided.
     pub async fn bootstrap_network_history(
         &mut self,
