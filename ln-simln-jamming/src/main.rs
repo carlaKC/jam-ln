@@ -34,6 +34,10 @@ use tokio::select;
 use tokio::sync::Mutex;
 use tokio_util::task::TaskTracker;
 
+/// Seed shared by the simulation config (payment generation, preimages) and the latency interceptor so that an entire
+/// run is reproducible.
+const SIM_SEED: u64 = 13995354354227336701;
+
 fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
     let forward_params = cli.validate()?;
@@ -100,7 +104,7 @@ async fn run(
 
     // Use the channel jamming interceptor and latency for simulated payments.
     let latency_interceptor: Arc<dyn Interceptor> =
-        Arc::new(LatencyIntercepor::new_poisson(150.0, None)?);
+        Arc::new(LatencyIntercepor::new_poisson(150.0, Some(SIM_SEED))?);
 
     let now = InstantClock::now(&*clock);
 
@@ -267,7 +271,7 @@ async fn run(
         exclude,
     };
 
-    let sim_cfg = SimulationCfg::new(None, 3_800_000, 2.0, None, Some(13995354354227336701));
+    let sim_cfg = SimulationCfg::new(None, 3_800_000, 2.0, None, Some(SIM_SEED));
     let (simulation, validated_activities, sim_nodes) = create_simulation_with_network(
         sim_cfg,
         &sim_params,

@@ -27,6 +27,9 @@ use tokio_util::task::TaskTracker;
 // The default amount of time data will be generated for.
 pub const DEFAULT_RUNTIME: &str = "6months";
 
+/// Seed shared by the simulation config and the latency interceptor so that generated bootstrap data is reproducible.
+const SIM_SEED: u64 = 13995354354227336701;
+
 #[derive(Parser)]
 struct Cli {
     #[command(flatten)]
@@ -96,14 +99,14 @@ async fn run(clock: Arc<SimulationClock>, cli: Cli) -> Result<(), BoxError> {
                 .to_string(),
         )?))),
     )?);
-    let latency_interceptor = Arc::new(LatencyIntercepor::new_poisson(300.0, None)?);
+    let latency_interceptor = Arc::new(LatencyIntercepor::new_poisson(300.0, Some(SIM_SEED))?);
 
     let sim_cfg = SimulationCfg::new(
         Some(cli.duration.as_secs() as u32),
         3_800_000,
         2.0,
         None,
-        Some(13995354354227336701),
+        Some(SIM_SEED),
     );
 
     let exclude_pubkeys = [network.target().1]
