@@ -56,14 +56,17 @@ async fn main() -> Result<(), BoxError> {
         .unwrap();
 
     let cli = Cli::parse();
+    let clock = Arc::new(SimulationClock::new(1000)?);
+    run(clock, cli).await
+}
 
+async fn run(clock: Arc<SimulationClock>, cli: Cli) -> Result<(), BoxError> {
     let network = NetworkType::new(&cli.network, cli.attack_type, None)?;
     if matches!(network, NetworkType::BootstrapAttackTime(_, _, _)) {
         return Err("cannot run forward builder in bootstrap mode".into());
     }
 
     let sim_network = network.active_network();
-    let clock = Arc::new(SimulationClock::new(1000)?);
     let tasks = TaskTracker::new();
 
     // Create a reputation interceptor without any bootstrap (since here we're creating the

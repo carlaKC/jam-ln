@@ -52,6 +52,11 @@ async fn main() -> Result<(), BoxError> {
         .unwrap();
 
     let cli = Cli::parse();
+    let clock = Arc::new(SimulationClock::new(1)?);
+    run(clock, cli).await
+}
+
+async fn run(clock: Arc<SimulationClock>, cli: Cli) -> Result<(), BoxError> {
     let forward_params: ForwardManagerParams = cli.reputation_params.into();
 
     let network = NetworkType::new(&cli.network, cli.attack_type, cli.attacker_bootstrap)?;
@@ -114,7 +119,6 @@ async fn main() -> Result<(), BoxError> {
         (bootstrap_records, 0)
     };
 
-    let clock = Arc::new(SimulationClock::new(1)?);
     let reputation_clock = Arc::clone(&clock);
     let mut reputation_interceptor: ReputationInterceptor<BatchForwardWriter, ForwardManager> =
         ReputationInterceptor::new_for_network(

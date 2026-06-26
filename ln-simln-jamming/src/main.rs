@@ -1,5 +1,6 @@
 use bitcoin::secp256k1::PublicKey;
 use clap::Parser;
+use ln_resource_mgr::forward_manager::ForwardManagerParams;
 use ln_simln_jamming::analysis::BatchForwardWriter;
 use ln_simln_jamming::attack_interceptor::AttackInterceptor;
 use ln_simln_jamming::attacks::AttackStatisitcs;
@@ -47,6 +48,15 @@ async fn main() -> Result<(), BoxError> {
         .init()
         .unwrap();
 
+    let clock = Arc::new(SimulationClock::new(cli.clock_speedup)?);
+    run(clock, cli, forward_params).await
+}
+
+async fn run(
+    clock: Arc<SimulationClock>,
+    cli: Cli,
+    forward_params: ForwardManagerParams,
+) -> Result<(), BoxError> {
     let network = NetworkType::new(
         &cli.network,
         Some(cli.attack_type.clone()),
@@ -82,8 +92,6 @@ async fn main() -> Result<(), BoxError> {
             }
         })
         .collect();
-
-    let clock = Arc::new(SimulationClock::new(cli.clock_speedup)?);
 
     // Use the channel jamming interceptor and latency for simulated payments.
     let latency_interceptor: Arc<dyn Interceptor> =
