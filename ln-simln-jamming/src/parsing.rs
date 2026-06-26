@@ -36,9 +36,6 @@ pub const DEFAULT_TARGET_REP_PERCENT: &str = "50";
 /// Default percent of good reputation pairs with the target that the attacker requires.
 pub const DEFAULT_ATTACKER_REP_PERCENT: &str = "50";
 
-/// Default clock speedup to run with regular wall time.
-pub const DEFAULT_CLOCK_SPEEDUP: &str = "1";
-
 /// Default htlc size that a peer must be able to get accountable to be considered as having good reputation, $10 at the
 /// time of writing.
 pub const DEFAULT_REPUTATION_MARGIN_MSAT: &str = "10000000";
@@ -400,10 +397,6 @@ pub struct Cli {
     /// reputation on for the simulation to run.
     #[arg(long)]
     pub attacker_reputation_percent: Option<u8>,
-
-    /// Speed up multiplier to add to the wall clock to run the simulation faster.
-    #[arg(long, default_value = DEFAULT_CLOCK_SPEEDUP)]
-    pub clock_speedup: u16,
 
     /// The htlc amount that a peer must be able to get accountable to be considered as having a good reputation, expressed
     /// in msat. This will be converted to a fee using a base fee of 1000 msat and a proportional charge of 0.01% of the
