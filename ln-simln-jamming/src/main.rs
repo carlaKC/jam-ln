@@ -16,13 +16,13 @@ use ln_simln_jamming::{
     get_network_reputation, BoxError, NetworkReputation, ACCOUNTABLE_TYPE, UPGRADABLE_TYPE,
 };
 use log::LevelFilter;
-use sim_cli::parsing::{create_simulation_with_network, SimParams};
+use sim_cli::parsing::{create_simulation_with_network, NetworkParser, SimParams};
 use simln_lib::clock::Clock;
 use simln_lib::clock::SimulationClock;
 use simln_lib::latency_interceptor::LatencyIntercepor;
 use simln_lib::runtime::block_on_virtual_time;
 use simln_lib::sim_node::{CustomRecords, Interceptor, SimGraph, SimNode};
-use simln_lib::SimulationCfg;
+use simln_lib::{ActivityDefinition, Simulation, SimulationCfg};
 use simple_logger::SimpleLogger;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
@@ -261,37 +261,18 @@ async fn run(
         revenue_interceptor.clone(),
     ];
 
-    let custom_records =
-        CustomRecords::from([(UPGRADABLE_TYPE, vec![1]), (ACCOUNTABLE_TYPE, vec![0])]);
-
     let mut exclude = attacker_pubkeys.clone();
     exclude.push(target_pubkey);
 
-    // Setup the simulated network with our fake graph.
-    let sim_params = SimParams {
-        nodes: vec![],
-
-        sim_network: sim_network.to_vec(),
-        activity: vec![],
-        exclude,
-    };
-
-    // Bound the simulation at one virtual year as a safeguard. Normally the attack triggers shutdown well before
+    // Bound the attack run at one virtual year as a safeguard. Normally the attack triggers shutdown well before
     // this; the ceiling just prevents virtual time from advancing forever if an attack never terminates.
-    let sim_cfg = SimulationCfg::new(
-        Some(MAX_SIM_TIME_SECS),
-        3_800_000,
-        2.0,
-        None,
-        Some(SIM_SEED),
-    );
-    let (simulation, validated_activities, sim_nodes) = create_simulation_with_network(
-        sim_cfg,
-        &sim_params,
+    let (simulation, validated_activities, sim_nodes) = build_simulation(
+        sim_network,
+        exclude,
+        interceptors,
+        MAX_SIM_TIME_SECS,
         clock.clone(),
         tasks.clone(),
-        interceptors,
-        custom_records,
     )
     .await?;
     let simulation = Arc::new(simulation);
@@ -382,6 +363,48 @@ async fn run(
     )?;
 
     Ok(())
+}
+
+/// Builds a simulated network on the shared virtual-time clock with the given interceptors, bounding the run at
+/// `duration_secs`. `exclude` lists nodes that should not originate random activity (they still forward). Returns
+/// the simulation, its validated activities and the simulated nodes. Both the reputation warm-up and the attack run
+/// build their network through here so they share one clock and configuration.
+async fn build_simulation(
+    sim_network: &[NetworkParser],
+    exclude: Vec<PublicKey>,
+    interceptors: Vec<Arc<dyn Interceptor>>,
+    duration_secs: u32,
+    clock: Arc<SimulationClock>,
+    tasks: TaskTracker,
+) -> Result<
+    (
+        Simulation<SimulationClock>,
+        Vec<ActivityDefinition>,
+        HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph, SimulationClock>>>>,
+    ),
+    BoxError,
+> {
+    let custom_records =
+        CustomRecords::from([(UPGRADABLE_TYPE, vec![1]), (ACCOUNTABLE_TYPE, vec![0])]);
+
+    let sim_params = SimParams {
+        nodes: vec![],
+        sim_network: sim_network.to_vec(),
+        activity: vec![],
+        exclude,
+    };
+
+    let sim_cfg = SimulationCfg::new(Some(duration_secs), 3_800_000, 2.0, None, Some(SIM_SEED));
+
+    Ok(create_simulation_with_network(
+        sim_cfg,
+        &sim_params,
+        clock,
+        tasks,
+        interceptors,
+        custom_records,
+    )
+    .await?)
 }
 
 /// Checks whether the attacker and target meet the required portion of high reputation pairs to required.
