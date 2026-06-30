@@ -488,25 +488,37 @@ async fn run_warmup(
     clock: Arc<SimulationClock>,
     tasks: TaskTracker,
 ) -> Result<(), BoxError> {
-    let latency_interceptor: Arc<dyn Interceptor> =
-        Arc::new(LatencyIntercepor::new_poisson(150.0, Some(SIM_SEED))?);
+    // Per-forward logging is high-volume noise during a warm-up (millions of lines over months of virtual time) and
+    // bloats the logs. Drop the log level to warnings for the duration of the warm-up and restore it afterwards so
+    // the attack run still logs normally.
+    let prev_level = log::max_level();
+    log::set_max_level(LevelFilter::Warn);
 
-    let mut warmup_interceptors = vec![latency_interceptor];
-    warmup_interceptors.extend(interceptors);
+    let result = async {
+        let latency_interceptor: Arc<dyn Interceptor> =
+            Arc::new(LatencyIntercepor::new_poisson(150.0, Some(SIM_SEED))?);
 
-    let (simulation, validated_activities, _sim_nodes) = build_simulation(
-        sim_network,
-        exclude,
-        warmup_interceptors,
-        duration_secs,
-        clock,
-        tasks,
-    )
-    .await?;
+        let mut warmup_interceptors = vec![latency_interceptor];
+        warmup_interceptors.extend(interceptors);
 
-    simulation.run(&validated_activities).await?;
+        let (simulation, validated_activities, _sim_nodes) = build_simulation(
+            sim_network,
+            exclude,
+            warmup_interceptors,
+            duration_secs,
+            clock,
+            tasks,
+        )
+        .await?;
 
-    Ok(())
+        simulation.run(&validated_activities).await?;
+
+        Ok::<(), BoxError>(())
+    }
+    .await;
+
+    log::set_max_level(prev_level);
+    result
 }
 
 /// Checks whether the attacker and target meet the required portion of high reputation pairs to required.
