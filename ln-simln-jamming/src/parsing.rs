@@ -139,6 +139,14 @@ impl NetworkType {
         }
     }
 
+    /// Returns the active graph with the attacker and all of its channels removed - the network as it was before the
+    /// attacker opened any channels. Reputation is bootstrapped on this graph so that honest nodes build reputation
+    /// without the attacker present.
+    pub fn honest_network(&self) -> Vec<NetworkParser> {
+        let attackers: HashSet<PublicKey> = self.attackers().iter().map(|(_, pk)| *pk).collect();
+        remove_attacker_channels(self.active_network(), &attackers)
+    }
+
     /// Returns the location of a file that holds projected payments for our active graph.
     pub fn traffic_file(&self) -> PathBuf {
         match self {
@@ -219,6 +227,21 @@ impl NetworkType {
             }
         }
     }
+}
+
+/// Returns `network` with every channel that touches one of `attackers` removed.
+fn remove_attacker_channels(
+    network: &[NetworkParser],
+    attackers: &HashSet<PublicKey>,
+) -> Vec<NetworkParser> {
+    network
+        .iter()
+        .filter(|channel| {
+            !attackers.contains(&channel.node_1.pubkey)
+                && !attackers.contains(&channel.node_2.pubkey)
+        })
+        .cloned()
+        .collect()
 }
 
 pub struct PeacetimeNetwork {
@@ -885,8 +908,29 @@ mod tests {
     use std::ops::Add;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    use crate::parsing::get_history_for_bootstrap;
-    use crate::test_utils::test_bootstrap_forward;
+    use simln_lib::ShortChannelID;
+
+    use crate::parsing::{get_history_for_bootstrap, remove_attacker_channels};
+    use crate::test_utils::{get_random_keypair, setup_test_edge, test_bootstrap_forward};
+
+    /// Only channels that touch neither attacker endpoint survive the honest-network filter.
+    #[test]
+    fn test_remove_attacker_channels() {
+        let (_, honest_1) = get_random_keypair();
+        let (_, honest_2) = get_random_keypair();
+        let (_, attacker) = get_random_keypair();
+
+        let network = vec![
+            setup_test_edge(ShortChannelID::from(1), honest_1, honest_2),
+            setup_test_edge(ShortChannelID::from(2), honest_1, attacker),
+            setup_test_edge(ShortChannelID::from(3), attacker, honest_2),
+        ];
+
+        let honest = remove_attacker_channels(&network, &HashSet::from([attacker]));
+
+        assert_eq!(honest.len(), 1);
+        assert_eq!(u64::from(honest[0].scid), 1);
+    }
 
     /// Tests the cases where filtering bootstrap data fails.
     #[test]
