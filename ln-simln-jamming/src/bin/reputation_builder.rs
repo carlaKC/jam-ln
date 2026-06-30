@@ -17,7 +17,7 @@ use ln_simln_jamming::{
         get_history_for_bootstrap, history_from_file, parse_duration, AttackType, NetworkParams,
         NetworkType, ReputationParams,
     },
-    reputation_interceptor::{BootstrapRecords, ReputationInterceptor, ReputationMonitor},
+    reputation_interceptor::{BootstrapRecords, ReputationInterceptor},
     BoxError,
 };
 use log::LevelFilter;
@@ -138,11 +138,9 @@ async fn run(clock: Arc<SimulationClock>, cli: Cli) -> Result<(), BoxError> {
         .bootstrap_network_history(&bootstrap)
         .await?;
 
-    let mut node_pubkeys = HashSet::new();
-    for chan in active_network.iter() {
-        node_pubkeys.insert(chan.node_1.pubkey);
-        node_pubkeys.insert(chan.node_2.pubkey);
-    }
+    let snapshot = reputation_interceptor
+        .snapshot(InstantClock::now(&*clock))
+        .await?;
 
     let reputation_file = network.reputation_file();
     let revenue_file = network.revenue_file();
@@ -167,18 +165,14 @@ async fn run(clock: Arc<SimulationClock>, cli: Cli) -> Result<(), BoxError> {
         "incoming_revenue",
     ])?;
 
-    for pubkey in node_pubkeys {
-        let channels = reputation_interceptor
-            .list_channels(pubkey, InstantClock::now(&*clock))
-            .await?;
-
-        for channel in channels {
+    for (pubkey, channels) in snapshot {
+        for (scid, channel) in channels {
             csv_writer.serialize((
                 pubkey,
-                channel.0,
-                channel.1.capacity_msat,
-                channel.1.outgoing_reputation,
-                channel.1.incoming_revenue,
+                scid,
+                channel.capacity_msat,
+                channel.outgoing_reputation,
+                channel.incoming_revenue,
             ))?;
         }
     }
