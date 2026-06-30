@@ -169,31 +169,6 @@ impl NetworkType {
         }
     }
 
-    /// Returns the location of a file that holds reputation summaries for our active graph.
-    pub fn reputation_file(&self) -> PathBuf {
-        match self {
-            // For both a peacetime network and an attack time one without bootstrap we use
-            // reputation build in our peacetime network.
-            NetworkType::Peacetime(p) | NetworkType::AttackTime(p, _) => {
-                p.network_dir.join(PeacetimeNetwork::REPUTATION)
-            }
-            NetworkType::BootstrapAttackTime(_, a, duration) => a
-                .attack_dir
-                .join(format!("reputation_{}.csv", duration.as_secs())),
-        }
-    }
-
-    /// Returns the location that revenue built by the target during setup should be written.
-    pub fn revenue_file(&self) -> Option<PathBuf> {
-        match self {
-            NetworkType::BootstrapAttackTime(_, a, duration) => Some(
-                a.attack_dir
-                    .join(format!("revenue_{}.csv", duration.as_secs())),
-            ),
-            _ => None,
-        }
-    }
-
     /// Returns a directory to write simulation results to, if appropriate for network type,
     /// namespacing by the runtime provided.
     pub fn results_dir(&self, now: SystemTime) -> Option<PathBuf> {
@@ -265,7 +240,6 @@ pub struct PeacetimeNetwork {
 impl PeacetimeNetwork {
     const PEACETIME_NETWORK: &'static str = "peacetime_network.json";
     const TARGET: &'static str = "target.txt";
-    const REPUTATION: &'static str = "reputation.csv";
     const TRAFFIC: &'static str = "peacetime_traffic.csv";
 
     /// Creates a new peacetime network representation, failing if the files we expect to exist
@@ -786,36 +760,6 @@ pub async fn history_from_file(
     }
 
     Ok(forwards)
-}
-
-pub fn reputation_snapshot_from_file(
-    file_path: &PathBuf,
-) -> Result<HashMap<PublicKey, HashMap<u64, ChannelSnapshot>>, BoxError> {
-    let mut reputation_snapshot: HashMap<PublicKey, HashMap<u64, ChannelSnapshot>> = HashMap::new();
-
-    let file = File::open(file_path)?;
-    let reader = BufReader::new(file);
-    let mut csv_reader = csv::Reader::from_reader(reader);
-    for result in csv_reader.records() {
-        let record: StringRecord = result?;
-
-        let pubkey = PublicKey::from_slice(&hex::decode(&record[0])?)?;
-        let scid: u64 = record[1].parse()?;
-        let capacity_msat: u64 = record[2].parse()?;
-        let outgoing_reputation: i64 = record[3].parse()?;
-        let incoming_revenue: i64 = record[4].parse()?;
-
-        reputation_snapshot.entry(pubkey).or_default().insert(
-            scid,
-            ChannelSnapshot {
-                capacity_msat,
-                outgoing_reputation,
-                incoming_revenue,
-            },
-        );
-    }
-
-    Ok(reputation_snapshot)
 }
 
 /// Per-node, per-channel reputation and revenue values - the result of bootstrapping a network's reputation.
