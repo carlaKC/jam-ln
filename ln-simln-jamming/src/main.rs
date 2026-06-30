@@ -220,12 +220,6 @@ async fn run(
         }
     };
 
-    let bootstrap_revenue: u64 = if let Some(target_revenue) = network.revenue_file() {
-        std::fs::read_to_string(target_revenue)?.parse()?
-    } else {
-        0
-    };
-
     // Start the attack-time interceptor from the bootstrapped reputation. The attacker's channels are not present in
     // the honest snapshot, so they start with no reputation.
     let reputation_interceptor = Arc::new(
@@ -240,12 +234,14 @@ async fn run(
         .await?,
     );
 
-    // While we run the simulation, replay projected peacetime revenue to serve as a comparison.
+    // The revenue interceptor tallies the target's forwarding revenue. Start it at zero; if we're bootstrapping the
+    // attacker, the warm-up below runs it forward so that the revenue earned there becomes the bootstrap revenue
+    // (replacing the value that used to be read from a file).
     let revenue_interceptor = Arc::new(
         RevenueInterceptor::new_with_bootstrap(
             clock.clone(),
             target_pubkey,
-            bootstrap_revenue,
+            0,
             cli.attacker_bootstrap,
             network.peacetime_projections(),
             listener.clone(),
@@ -253,6 +249,27 @@ async fn run(
         .await?,
     );
 
+    // Phase 1: with the attacker's channels now present, run more generated activity (still no attack) so the
+    // attacker builds reputation and the target accrues its bootstrap revenue.
+    if let Some(attacker_bootstrap) = cli.attacker_bootstrap {
+        let mut warmup_exclude = attacker_pubkeys.clone();
+        warmup_exclude.push(target_pubkey);
+        let warmup_interceptors: Vec<Arc<dyn Interceptor>> =
+            vec![reputation_interceptor.clone(), revenue_interceptor.clone()];
+        log::info!("Bootstrapping attacker reputation over {attacker_bootstrap:?}...");
+        run_warmup(
+            warmup_interceptors,
+            sim_network,
+            warmup_exclude,
+            attacker_bootstrap.as_secs() as u32,
+            clock.clone(),
+            tasks.clone(),
+        )
+        .await?;
+    }
+
+    // Now replay projected peacetime revenue alongside the attack as a comparison. Spawned after the warm-up, so it
+    // only covers the attack window.
     let revenue_interceptor_1 = revenue_interceptor.clone();
     let revenue_shutdown = shutdown.clone();
     tasks.spawn(async move {
