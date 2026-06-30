@@ -1,12 +1,13 @@
 use bitcoin::secp256k1::PublicKey;
 use clap::Parser;
-use ln_resource_mgr::forward_manager::ForwardManagerParams;
+use ln_resource_mgr::forward_manager::{ForwardManager, ForwardManagerParams};
 use ln_simln_jamming::analysis::BatchForwardWriter;
 use ln_simln_jamming::attack_interceptor::AttackInterceptor;
 use ln_simln_jamming::attacks::AttackStatisitcs;
 use ln_simln_jamming::clock::InstantClock;
 use ln_simln_jamming::parsing::{
-    find_pubkey_by_alias, reputation_snapshot_from_file, setup_attack, AttackType, Cli, NetworkType,
+    bootstrap_cache_key, find_pubkey_by_alias, read_reputation_cache, setup_attack,
+    write_reputation_cache, AttackType, Cli, NetworkType,
 };
 use ln_simln_jamming::reputation_interceptor::ReputationInterceptor;
 use ln_simln_jamming::revenue_interceptor::{
@@ -42,6 +43,10 @@ const SIM_SEED: u64 = 13995354354227336701;
 /// runtime cannot advance virtual time forever if an attack fails to trigger shutdown. Attacks are expected to
 /// terminate the simulation well before this.
 const MAX_SIM_TIME_SECS: u32 = 365 * 24 * 60 * 60;
+
+/// Virtual time that the honest network builds reputation for before the attacker is introduced (six months). The
+/// attacker and its channels are absent for this whole period, so honest nodes establish reputation from scratch.
+const NETWORK_BOOTSTRAP_SECS: u32 = 180 * 24 * 60 * 60;
 
 fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
@@ -156,31 +161,79 @@ async fn run(
         }
     });
 
-    let reputation_file = network.reputation_file();
-    let reputation_snapshot = reputation_snapshot_from_file(&reputation_file).map_err(|e| {
-        format!(
-            "could not find reputation snapshot {:?}, try generating one with reputation-builder: {:?}",
-            reputation_file.to_string_lossy(), e
-        )
-    })?;
+    // Bootstrap the honest network's reputation from scratch over the attacker-free graph - or load it from a cache
+    // keyed on the inputs that determine it, since the live bootstrap is expensive. This replaces loading a
+    // pre-built reputation file from disk.
+    let honest_network = network.honest_network();
+    let cache_key = bootstrap_cache_key(
+        &honest_network,
+        &forward_params,
+        SIM_SEED,
+        NETWORK_BOOTSTRAP_SECS,
+    )?;
+    let cache_file = network.bootstrap_cache_file();
+
+    let cached = match (&cache_file, cli.rebuild_bootstrap) {
+        (Some(file), false) => read_reputation_cache(file, &cache_key)?,
+        _ => None,
+    };
+
+    let reputation_snapshot = match cached {
+        Some(snapshot) => {
+            log::info!(
+                "Loaded cached honest network reputation, skipping the {}-day bootstrap",
+                NETWORK_BOOTSTRAP_SECS / (24 * 60 * 60),
+            );
+            snapshot
+        }
+        None => {
+            let bootstrap_interceptor: Arc<
+                ReputationInterceptor<BatchForwardWriter, ForwardManager>,
+            > = Arc::new(ReputationInterceptor::new_for_network(
+                forward_params,
+                &honest_network,
+                clock.clone(),
+                None,
+            )?);
+            log::info!(
+                "Bootstrapping honest network reputation over {} virtual days (no attacker)...",
+                NETWORK_BOOTSTRAP_SECS / (24 * 60 * 60),
+            );
+            run_warmup(
+                vec![bootstrap_interceptor.clone()],
+                &honest_network,
+                vec![target_pubkey],
+                NETWORK_BOOTSTRAP_SECS,
+                clock.clone(),
+                tasks.clone(),
+            )
+            .await?;
+            let snapshot = bootstrap_interceptor
+                .snapshot(InstantClock::now(&*clock))
+                .await?;
+
+            if let Some(file) = &cache_file {
+                write_reputation_cache(file, &cache_key, &snapshot)?;
+                log::info!("Cached honest network reputation to {file:?}");
+            }
+            snapshot
+        }
+    };
+
     let bootstrap_revenue: u64 = if let Some(target_revenue) = network.revenue_file() {
         std::fs::read_to_string(target_revenue)?.parse()?
     } else {
         0
     };
 
+    // Start the attack-time interceptor from the bootstrapped reputation. The attacker's channels are not present in
+    // the honest snapshot, so they start with no reputation.
     let reputation_interceptor = Arc::new(
         ReputationInterceptor::new_from_snapshot(
             forward_params,
             sim_network,
             reputation_snapshot,
-            // If bootstrapping the attacker's reputation, we expect them to be in our snapshot
-            // of starting reputation values. Otherwise, they can be omitted.
-            if cli.attacker_bootstrap.is_some() {
-                HashSet::new()
-            } else {
-                HashSet::from_iter(attacker_pubkeys.clone())
-            },
+            HashSet::from_iter(attacker_pubkeys.clone()),
             clock.clone(),
             Some(results_writer),
         )
@@ -405,6 +458,38 @@ async fn build_simulation(
         custom_records,
     )
     .await?)
+}
+
+/// Runs generated activity on `sim_network` for `duration_secs` of virtual time with `interceptors` and latency
+/// active, but no attack. Used to build up reputation (and tally revenue) before the attack begins - the state
+/// accumulates in the shared interceptors, which the caller reads once this returns.
+async fn run_warmup(
+    interceptors: Vec<Arc<dyn Interceptor>>,
+    sim_network: &[NetworkParser],
+    exclude: Vec<PublicKey>,
+    duration_secs: u32,
+    clock: Arc<SimulationClock>,
+    tasks: TaskTracker,
+) -> Result<(), BoxError> {
+    let latency_interceptor: Arc<dyn Interceptor> =
+        Arc::new(LatencyIntercepor::new_poisson(150.0, Some(SIM_SEED))?);
+
+    let mut warmup_interceptors = vec![latency_interceptor];
+    warmup_interceptors.extend(interceptors);
+
+    let (simulation, validated_activities, _sim_nodes) = build_simulation(
+        sim_network,
+        exclude,
+        warmup_interceptors,
+        duration_secs,
+        clock,
+        tasks,
+    )
+    .await?;
+
+    simulation.run(&validated_activities).await?;
+
+    Ok(())
 }
 
 /// Checks whether the attacker and target meet the required portion of high reputation pairs to required.

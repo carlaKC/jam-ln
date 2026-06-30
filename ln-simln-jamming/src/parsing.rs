@@ -461,6 +461,10 @@ pub struct Cli {
     #[command(flatten)]
     pub reputation_params: ReputationParams,
 
+    /// Rebuild the honest-network reputation bootstrap from scratch even if a matching cache exists.
+    #[arg(long)]
+    pub rebuild_bootstrap: bool,
+
     #[clap(long, default_value = "debug")]
     pub log_level: LevelFilter,
 }
