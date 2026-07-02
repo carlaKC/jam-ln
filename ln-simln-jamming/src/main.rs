@@ -11,7 +11,7 @@ use ln_simln_jamming::parsing::{
 };
 use ln_simln_jamming::reputation_interceptor::ReputationInterceptor;
 use ln_simln_jamming::revenue_interceptor::{
-    PeacetimeRevenueMonitor, RevenueInterceptor, RevenueSnapshot,
+    PeacetimeRevenueMonitor, RevenueComparator, RevenueSnapshot, RevenueTracker,
 };
 use ln_simln_jamming::{
     get_network_reputation, BoxError, NetworkReputation, ACCOUNTABLE_TYPE, SIM_SEED,
@@ -42,6 +42,21 @@ const MAX_SIM_TIME_SECS: u32 = 365 * 24 * 60 * 60;
 
 /// The granularity in seconds with which we round our start time to be the same across runs on the same day.
 const START_TIME_QUANTUM_SECS: u64 = 24 * 60 * 60;
+
+/// Mean latency (ms) applied to htlc resolution, shared by the attack and peacetime networks so their timing matches.
+const LATENCY_MS: f32 = 150.0;
+
+/// Parameters for random activity generation, shared by both networks: expected payment size and activity multiplier.
+const EXPECTED_PAYMENT_MSAT: u64 = 3_800_000;
+const ACTIVITY_MULTIPLIER: f64 = 2.0;
+
+/// The peacetime revenue must exceed this (msat) before the revenue-drop monitor starts checking, so early
+/// small-number noise doesn't trigger a shutdown.
+const REVENUE_MONITOR_WARMUP_MSAT: u64 = 10_000_000;
+
+/// The monitor stops the attack once the target's revenue has dropped this fraction below peacetime. A margin keeps
+/// the near-tie between an inert attacker and peacetime (which differ only by routing noise) from tripping it.
+const REVENUE_DROP_FRACTION: u64 = 20; // 1/20 = 5%.
 
 fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
@@ -84,16 +99,16 @@ async fn run(
     let (target_alias, target_pubkey) = network.target();
     let attackers = network.attackers();
     let attacker_pubkeys: Vec<PublicKey> = attackers.iter().map(|a| a.1).collect();
-    let sim_network = network.active_network();
+    let attack_graph = network.active_network();
 
     if matches!(network, NetworkType::Peacetime(_)) {
         return Err("must run simulation with attack set".into());
     }
 
-    let tasks = TaskTracker::new();
+    // Master shutdown for the whole run. When it fires we stop both co-simulated networks.
     let (shutdown, listener) = triggered::trigger();
 
-    let target_channels: HashMap<u64, (PublicKey, String)> = sim_network
+    let target_channels: HashMap<u64, (PublicKey, String)> = attack_graph
         .iter()
         .filter_map(|channel| {
             if channel.node_1.pubkey == target_pubkey {
@@ -111,10 +126,6 @@ async fn run(
             }
         })
         .collect();
-
-    // Use the channel jamming interceptor and latency for simulated payments.
-    let latency_interceptor: Arc<dyn Interceptor> =
-        Arc::new(LatencyIntercepor::new_poisson(150.0, Some(SIM_SEED))?);
 
     let now = InstantClock::now(&*clock);
 
@@ -137,11 +148,16 @@ async fn run(
         now,
     )));
 
+    // The attack and peacetime networks each run on their own TaskTracker so their `run()` calls can close and wait
+    // independently, but they share the one virtual clock.
+    let attack_tasks = TaskTracker::new();
+    let peace_tasks = TaskTracker::new();
+
     let results_writer_1 = results_writer.clone();
     let results_listener = listener.clone();
     let results_shutdown = shutdown.clone();
     let results_clock = clock.clone();
-    tasks.spawn(async move {
+    attack_tasks.spawn(async move {
         let interval = Duration::from_secs(60);
         loop {
             select! {
@@ -162,6 +178,7 @@ async fn run(
         }
     });
 
+    // ---------- Attack network reputation ----------
     let reputation_file = network.reputation_file();
     let reputation_snapshot = reputation_snapshot_from_file(&reputation_file).map_err(|e| {
         format!(
@@ -169,19 +186,14 @@ async fn run(
             reputation_file.to_string_lossy(), e
         )
     })?;
-    let bootstrap_revenue: u64 = if let Some(target_revenue) = network.revenue_file() {
-        std::fs::read_to_string(target_revenue)?.parse()?
-    } else {
-        0
-    };
 
-    let reputation_interceptor = Arc::new(
+    let attack_reputation = Arc::new(
         ReputationInterceptor::new_from_snapshot(
             forward_params,
-            sim_network,
+            attack_graph,
             reputation_snapshot,
-            // If bootstrapping the attacker's reputation, we expect them to be in our snapshot
-            // of starting reputation values. Otherwise, they can be omitted.
+            // If bootstrapping the attacker's reputation, we expect them to be in our snapshot of starting reputation
+            // values. Otherwise, they can be omitted.
             if cli.attacker_bootstrap.is_some() {
                 HashSet::new()
             } else {
@@ -193,27 +205,28 @@ async fn run(
         .await?,
     );
 
-    // While we run the simulation, replay projected peacetime revenue to serve as a comparison.
-    let revenue_interceptor = Arc::new(
-        RevenueInterceptor::new_with_bootstrap(
+    // ---------- Peacetime network reputation ----------
+    // The peacetime network has no attacker channels and always uses the top-level peacetime reputation snapshot.
+    let peace_graph = network.peacetime_graph().clone();
+    let peace_reputation_file = network.peacetime_reputation_file();
+    let peace_snapshot = reputation_snapshot_from_file(&peace_reputation_file).map_err(|e| {
+        format!(
+            "could not find peacetime reputation snapshot {:?}: {:?}",
+            peace_reputation_file.to_string_lossy(),
+            e
+        )
+    })?;
+    let peace_reputation = Arc::new(
+        ReputationInterceptor::new_from_snapshot(
+            forward_params,
+            &peace_graph,
+            peace_snapshot,
+            HashSet::new(),
             clock.clone(),
-            target_pubkey,
-            bootstrap_revenue,
-            cli.attacker_bootstrap,
-            network.peacetime_projections(),
-            listener.clone(),
+            None::<Arc<Mutex<BatchForwardWriter>>>,
         )
         .await?,
     );
-
-    let revenue_interceptor_1 = revenue_interceptor.clone();
-    let revenue_shutdown = shutdown.clone();
-    tasks.spawn(async move {
-        if let Err(e) = revenue_interceptor_1.process_peacetime_fwds().await {
-            log::error!("Error processing peacetime forwards: {e}");
-            revenue_shutdown.trigger();
-        }
-    });
 
     // Reputation is assessed for a channel pair and a specific HTLC that's being proposed. To assess whether pairs
     // have reputation, we'll use LND's default fee policy to get the HTLC risk for our configured htlc size and hold
@@ -226,14 +239,26 @@ async fn run(
     // Accumulates the gross cost of every payment the attack dispatches.
     let attack_cost = Arc::new(AttackCost::new());
 
+    // The peacetime network's revenue tracker is created up-front so the comparator (used by the attack setup) can
+    // reference it; the tracker is wired into the peacetime simulation below.
+    let peace_revenue = Arc::new(RevenueTracker::new(target_pubkey));
+    let attack_revenue = Arc::new(RevenueTracker::new(target_pubkey));
+
+    // The comparator reads the target's live revenue in both networks at the same virtual instant.
+    let comparator = Arc::new(RevenueComparator::new(
+        clock.clone(),
+        Arc::clone(&attack_revenue),
+        Arc::clone(&peace_revenue),
+    ));
+
     // Next, setup the attack interceptor to use our custom attack.
     let attack = setup_attack(
         &cli,
         &network,
         Arc::clone(&clock),
-        Arc::clone(&reputation_interceptor),
-        Arc::clone(&revenue_interceptor),
-        Arc::clone(&reputation_interceptor),
+        Arc::clone(&attack_reputation),
+        Arc::clone(&comparator),
+        Arc::clone(&attack_reputation),
         Arc::clone(&attack_cost),
     )?;
 
@@ -245,79 +270,71 @@ async fn run(
         target_channels.iter().map(|(k, v)| (*k, v.0)).collect();
 
     let start_reputation = get_network_reputation(
-        reputation_interceptor.clone(),
+        attack_reputation.clone(),
         target_pubkey,
         &attacker_pubkeys,
         &target_pubkey_map,
         risk_margin,
-        // The reputation_interceptor clock has been set on decaying averages so we use the clock
-        // to provide a new instant rather than the previous fixed point.
         InstantClock::now(&*clock),
     )
     .await?;
 
     check_reputation_status(&cli, &start_reputation)?;
 
-    let attack_interceptor = AttackInterceptor::new(
+    let attack_interceptor = Arc::new(AttackInterceptor::new(
         attacker_pubkeys.clone(),
-        reputation_interceptor.clone(),
+        attack_reputation.clone(),
         attack.clone(),
-    );
-    let attack_interceptor = Arc::new(attack_interceptor);
-
-    let interceptors = vec![
-        latency_interceptor,
-        attack_interceptor.clone(),
-        revenue_interceptor.clone(),
-    ];
+    ));
 
     let custom_records =
         CustomRecords::from([(UPGRADABLE_TYPE, vec![1]), (ACCOUNTABLE_TYPE, vec![0])]);
 
-    let mut exclude = attacker_pubkeys.clone();
-    exclude.push(target_pubkey);
+    // ---------- Build the two co-simulated networks on the shared clock ----------
+    let mut attack_exclude = attacker_pubkeys.clone();
+    attack_exclude.push(target_pubkey);
 
-    // Setup the simulated network with our fake graph.
-    let sim_params = SimParams {
-        nodes: vec![],
+    let (attack_simulation, attack_activities, _attack_revenue_from_build, sim_nodes) =
+        build_network_simulation_with_revenue(
+            clock.clone(),
+            attack_tasks.clone(),
+            attack_graph.to_vec(),
+            attack_exclude,
+            // On the attack network the AttackInterceptor wraps reputation/bucketing, so it is the only middle
+            // interceptor.
+            vec![Arc::clone(&attack_interceptor) as Arc<dyn Interceptor>],
+            Arc::clone(&attack_revenue),
+            custom_records.clone(),
+        )
+        .await?;
 
-        sim_network: sim_network.to_vec(),
-        activity: vec![],
-        exclude,
-    };
+    let (peace_simulation, peace_activities, _peace_rev, _peace_nodes) =
+        build_network_simulation_with_revenue(
+            clock.clone(),
+            peace_tasks.clone(),
+            peace_graph.clone(),
+            vec![target_pubkey],
+            // The peacetime network has no attacker, so the reputation interceptor is the only middle interceptor.
+            vec![Arc::clone(&peace_reputation) as Arc<dyn Interceptor>],
+            Arc::clone(&peace_revenue),
+            custom_records.clone(),
+        )
+        .await?;
 
-    // Bound the simulation at one virtual year as a safeguard. Normally the attack triggers shutdown well before
-    // this; the ceiling just prevents virtual time from advancing forever if an attack never terminates.
-    let sim_cfg = SimulationCfg::new(
-        Some(MAX_SIM_TIME_SECS),
-        3_800_000,
-        2.0,
-        None,
-        Some(SIM_SEED),
-    );
-    let (simulation, validated_activities, sim_nodes) = create_simulation_with_network(
-        sim_cfg,
-        &sim_params,
-        clock.clone(),
-        tasks.clone(),
-        interceptors,
-        custom_records,
-    )
-    .await?;
-    let simulation = Arc::new(simulation);
+    let attack_simulation = Arc::new(attack_simulation);
+    let peace_simulation = Arc::new(peace_simulation);
 
-    // Collect all attacker nodes from the network
+    // Collect all attacker nodes from the attack network.
     let attacker_pubkeys_map: HashMap<PublicKey, String> = network
         .attackers()
         .iter()
         .map(|(alias, pk)| (*pk, alias.clone()))
         .collect();
 
-    // Ugly hack specific to SlowJam attack to include this node in the list of nodes passed to run_attack.
-    // This node is used as an "honest" node to send a test payment through our target channel to
-    // check that it is actually jammed.
+    // Ugly hack specific to SlowJam attack to include this node in the list of nodes passed to run_attack. This node
+    // is used as an "honest" node to send a test payment through our target channel to check that it is jammed.
     let honest_sender_pubkey = if cli.attack_type == AttackType::SlowJam {
-        Some(find_pubkey_by_alias("69", sim_network)?)
+        Some(find_pubkey_by_alias("69", attack_graph)?)
     } else {
         None
     };
@@ -337,14 +354,61 @@ async fn run(
         })
         .collect();
 
+    // Coordinator: when the master shutdown fires, stop both networks.
+    {
+        let coord_listener = listener.clone();
+        let coord_peace = Arc::clone(&peace_simulation);
+        let coord_attack = Arc::clone(&attack_simulation);
+        tokio::spawn(async move {
+            coord_listener.await;
+            coord_peace.shutdown();
+            coord_attack.shutdown();
+        });
+    }
+
+    // Revenue-drop monitor: stop the attack once the target's revenue in the attack network has dropped materially
+    // below peacetime. Because both networks advance on the same virtual clock, both revenues are read at the same
+    // virtual instant.
+    {
+        let monitor_comparator = Arc::clone(&comparator);
+        let monitor_shutdown = shutdown.clone();
+        let monitor_listener = listener.clone();
+        let monitor_clock = clock.clone();
+        tokio::spawn(async move {
+            let interval = Duration::from_secs(60 * 60 * 6);
+            loop {
+                select! {
+                    _ = monitor_listener.clone() => return,
+                    _ = monitor_clock.sleep(interval) => {},
+                }
+
+                let snapshot = monitor_comparator.get_revenue_difference().await;
+                if snapshot.peacetime_revenue_msat < REVENUE_MONITOR_WARMUP_MSAT {
+                    continue;
+                }
+
+                let drop_margin = snapshot.peacetime_revenue_msat / REVENUE_DROP_FRACTION;
+                if snapshot.simulation_revenue_msat + drop_margin
+                    < snapshot.peacetime_revenue_msat
+                {
+                    log::info!(
+                        "Revenue-drop monitor: target revenue under attack ({}) fell below peacetime ({}); stopping.",
+                        snapshot.simulation_revenue_msat,
+                        snapshot.peacetime_revenue_msat,
+                    );
+                    monitor_shutdown.trigger();
+                    return;
+                }
+            }
+        });
+    }
+
+    // Drive the attack. When run_attack returns, the attack is done and we shut the whole run down.
     let attack_shutdown_listener = listener.clone();
     let attack_shutdown_trigger = shutdown.clone();
     let attack_start_reputation = start_reputation.clone();
-    let attack_simulation_shutdown = Arc::clone(&simulation);
     let attack_clone = Arc::clone(&attack);
     tokio::spawn(async move {
-        // run_attack will block until the attack is done so trigger a simulation shutdown after
-        // it returns and log any errors.
         if let Err(e) = attack_clone
             .run_attack(
                 attack_start_reputation,
@@ -356,25 +420,35 @@ async fn run(
             log::error!("Error running custom attacker actions: {e}");
         }
         attack_shutdown_trigger.trigger();
-        attack_simulation_shutdown.shutdown();
     });
 
     let ctrlc_shutdown = shutdown.clone();
-    let simulation_shutdown = Arc::clone(&simulation);
     ctrlc::set_handler(move || {
         ctrlc_shutdown.trigger();
-        simulation_shutdown.shutdown();
     })?;
 
-    // Run simulation until it shuts down, then wait for the graph to exit.
-    simulation.run(&validated_activities).await?;
+    // Run the peacetime network alongside the attack network on the shared clock.
+    let peace_run = {
+        let peace_sim = Arc::clone(&peace_simulation);
+        tokio::spawn(async move { peace_sim.run(&peace_activities).await })
+    };
+
+    // Run the attack network. This blocks until the master shutdown fires (via the coordinator) or the attack sim
+    // reaches its own time bound.
+    attack_simulation.run(&attack_activities).await?;
+
+    // Ensure the master shutdown is triggered so the peacetime network stops at the same virtual time.
+    shutdown.trigger();
+    if let Err(e) = peace_run.await {
+        log::error!("Error awaiting peacetime simulation: {e}");
+    }
 
     // Wait for every attacker payment to resolve so the recorded cost is final before it is read.
     attack_cost.wait_for_pending_payments().await;
 
     // Write start and end state to a summary file.
     let end_reputation = get_network_reputation(
-        reputation_interceptor,
+        attack_reputation,
         network.target().1,
         &attacker_pubkeys,
         &target_pubkey_map,
@@ -383,7 +457,7 @@ async fn run(
     )
     .await?;
 
-    let snapshot = revenue_interceptor.get_revenue_difference().await;
+    let snapshot = comparator.get_revenue_difference().await;
 
     // Count the channels the attacker had to open in the graph to mount the attack.
     let attacker_pubkey_set: HashSet<PublicKey> = attacker_pubkeys.iter().copied().collect();
@@ -402,6 +476,62 @@ async fn run(
     )?;
 
     Ok(())
+}
+
+/// Builds a simulation for a single network on the shared clock. Interceptor order is: latency, the provided
+/// `middle_interceptors` (the attack interceptor on the attack network - which itself wraps reputation - or the bare
+/// reputation interceptor on the peacetime network), then the revenue tracker (which only observes, so it runs last).
+#[allow(clippy::too_many_arguments)]
+async fn build_network_simulation_with_revenue(
+    clock: Arc<SimulationClock>,
+    tasks: TaskTracker,
+    graph: Vec<sim_cli::parsing::NetworkParser>,
+    exclude: Vec<PublicKey>,
+    middle_interceptors: Vec<Arc<dyn Interceptor>>,
+    revenue: Arc<RevenueTracker>,
+    custom_records: CustomRecords,
+) -> Result<
+    (
+        simln_lib::Simulation<SimulationClock>,
+        Vec<simln_lib::ActivityDefinition>,
+        Arc<RevenueTracker>,
+        HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph, SimulationClock>>>>,
+    ),
+    BoxError,
+> {
+    let latency: Arc<dyn Interceptor> =
+        Arc::new(LatencyIntercepor::new_poisson(LATENCY_MS, Some(SIM_SEED))?);
+
+    let mut interceptors: Vec<Arc<dyn Interceptor>> = vec![latency];
+    interceptors.extend(middle_interceptors);
+    interceptors.push(Arc::clone(&revenue) as Arc<dyn Interceptor>);
+
+    let sim_params = SimParams {
+        nodes: vec![],
+        sim_network: graph,
+        activity: vec![],
+        exclude,
+    };
+
+    let sim_cfg = SimulationCfg::new(
+        Some(MAX_SIM_TIME_SECS),
+        EXPECTED_PAYMENT_MSAT,
+        ACTIVITY_MULTIPLIER,
+        None,
+        Some(SIM_SEED),
+    );
+
+    let (simulation, activities, sim_nodes) = create_simulation_with_network(
+        sim_cfg,
+        &sim_params,
+        clock,
+        tasks,
+        interceptors,
+        custom_records,
+    )
+    .await?;
+
+    Ok((simulation, activities, revenue, sim_nodes))
 }
 
 /// Checks whether the attacker and target meet the required portion of high reputation pairs to required.
