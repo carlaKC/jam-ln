@@ -1,4 +1,7 @@
+use crate::attacks::fast_jam::FastJam;
 use crate::attacks::general_jam::GeneralJam;
+use crate::attacks::inflation::InflationAttack;
+use crate::attacks::looped_htlc::LoopedHtlc;
 use crate::attacks::null::NullAttack;
 use crate::attacks::sink::SinkAttack;
 use crate::attacks::slow_jam::SlowJam;
@@ -472,6 +475,17 @@ pub enum AttackType {
     Null,
     /// Saturates the general bucket of every one of the target's channels and holds it.
     GeneralJam,
+    /// Fast jam: an endless stream of small, fast-failing HTLCs the attacker pushes through the
+    /// target to keep its channels' general-bucket HTLC slots full, so honest unaccountable
+    /// payments are rejected with `no general resources`. The defence is the unconditional fee.
+    FastJam,
+    /// Loops accountable HTLCs through the target across several of its channels and holds them to
+    /// damage the target's outgoing reputation, combined with a general-bucket jam.
+    LoopedHtlc,
+    /// Inflates the target's per-channel incoming-revenue thresholds with genuine settling
+    /// payments to price out honest peers' reputation, then congests the buckets so their
+    /// traffic is dropped.
+    Inflation,
     // NOTE: add your attack that you want to run here.
 }
 
@@ -569,6 +583,170 @@ where
             network.target().1,
             channel_jammer,
         ))),
+        AttackType::FastJam => {
+            let attackers = network.attackers();
+
+            // Attacker sender (originates the jamming payments) and receiver (fails them fast). The
+            // receiver is the last hop of every jamming route, so the target forwards our HTLCs out
+            // to it; the sender pushes them in through the target's honest peers.
+            let sender = attackers
+                .iter()
+                .find(|a| a.0 == "51")
+                .ok_or("required fast-jam attacker sender with alias 51 not found")?;
+            let receiver = attackers
+                .iter()
+                .find(|a| a.0 == "50")
+                .ok_or("required fast-jam attacker receiver with alias 50 not found")?;
+
+            // The target's incoming channels we keep jammed. We pick the target's two
+            // highest-capacity peers (44, 31), which carry the bulk of the honest traffic the
+            // target forwards, so filling their general buckets denies the largest share of the
+            // target's routing revenue for the fewest jammed channels (and thus the least
+            // unconditional fee).
+            let peers_to_jam = vec![
+                find_pubkey_by_alias("44", sim_network)?,
+                find_pubkey_by_alias("31", sim_network)?,
+            ];
+
+            let network_graph = network_graph(sim_network.clone())?;
+
+            let attack = Arc::new(FastJam::new(
+                clock,
+                network.target().1,
+                sender.0.clone(),
+                receiver.1,
+                peers_to_jam,
+                network_graph,
+                attack_cost,
+            ));
+
+            Ok(attack)
+        }
+        AttackType::LoopedHtlc => {
+            let target_pubkey = network.target().1;
+            // Two attacker nodes: 50 originates the loop, 51 receives and holds its final hop. A
+            // single node cannot be both (LDK refuses to route a payment back to its own origin).
+            let attacker_sender = network
+                .attackers()
+                .iter()
+                .find(|a| a.0 == "50")
+                .ok_or("Required attacker sender with alias 50 not found")?
+                .clone();
+            let attacker_receiver = network
+                .attackers()
+                .iter()
+                .find(|a| a.0 == "51")
+                .ok_or("Required attacker receiver with alias 51 not found")?
+                .clone();
+
+            // Honest peer used to inject the loop into the target. Alias 47 has a low
+            // target-incoming-revenue, so the loop's first crossing (target -> mid_peer) clears the
+            // reputation threshold set by this channel's revenue.
+            let entry_peer = find_pubkey_by_alias("47", sim_network)?;
+
+            // Honest peer used only to prime the receiver's reputation. Alias 31 already has very
+            // high target-incoming-revenue, so the fees the priming payments credit to its channel
+            // don't meaningfully move any threshold the loops depend on.
+            let prime_peer = find_pubkey_by_alias("31", sim_network)?;
+
+            // The target's highest-outgoing-reputation channels: these are the ones that would
+            // rescue honest forwards under the general jam (by upgrading them to protected), so
+            // destroying their reputation is what turns the jam into revenue loss. Each is also a
+            // low target-incoming-revenue peer, keeping the loop's final-hop threshold small.
+            let mid_aliases = ["8", "42", "44"];
+            let mut mid_peers = Vec::with_capacity(mid_aliases.len());
+            for alias in mid_aliases {
+                let pubkey = find_pubkey_by_alias(alias, sim_network)?;
+                let scid = sim_network
+                    .iter()
+                    .find(|c| {
+                        (c.node_1.pubkey == target_pubkey && c.node_2.pubkey == pubkey)
+                            || (c.node_2.pubkey == target_pubkey && c.node_1.pubkey == pubkey)
+                    })
+                    .ok_or(format!("target channel with mid peer {alias} not found"))?
+                    .scid
+                    .into();
+                mid_peers.push((pubkey, scid));
+            }
+
+            // The receiver must have a channel with the target for the loop's final hop; validate it
+            // exists (its reputation is primed at runtime).
+            sim_network
+                .iter()
+                .find(|c| {
+                    (c.node_1.pubkey == target_pubkey && c.node_2.pubkey == attacker_receiver.1)
+                        || (c.node_2.pubkey == target_pubkey
+                            && c.node_1.pubkey == attacker_receiver.1)
+                })
+                .ok_or("receiver must have a channel with the target for the receive hop")?;
+
+            let network_graph = network_graph(sim_network.clone())?;
+
+            Ok(Arc::new(LoopedHtlc::new(
+                clock,
+                sim_network,
+                target_pubkey,
+                attacker_sender,
+                attacker_receiver,
+                entry_peer,
+                prime_peer,
+                mid_peers,
+                // Loop amount: small enough that the accountable HTLC's in-flight risk stays under
+                // the entry peer's reputation (so honest hops forward it), but non-trivial so the
+                // target's per-hop fee — and hence the reputation damage on failure — is meaningful.
+                1_000_000,
+                // Priming: a few large-fee settling payments build the receiver's reputation.
+                4,
+                100_000,
+                channel_jammer,
+                network_graph,
+                attack_cost,
+            )))
+        }
+        AttackType::Inflation => {
+            let attackers = network.attackers();
+            // Attacker node that originates inflation payments (has channels to the inject peers).
+            let sender = attackers
+                .iter()
+                .find(|a| a.0 == "50")
+                .ok_or("Required attacker sender with alias 50 not found")?
+                .clone();
+            // Attacker node that receives inflation payments (has a channel to the exit peer).
+            let receiver = attackers
+                .iter()
+                .find(|a| a.0 == "51")
+                .ok_or("Required attacker receiver with alias 51 not found")?
+                .clone();
+
+            // Honest peers of the target whose incoming channel we inflate. Chosen among the
+            // target's channels whose current incoming-revenue threshold is low enough to be
+            // meaningfully raised (peer 31's is already ~1.4B and is not worth inflating).
+            let inject_peers = ["44", "4", "47"]
+                .iter()
+                .map(|alias| find_pubkey_by_alias(alias, sim_network))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            // Exit peer: routed *out* through a high-fee channel (peer 5, 2000ppm) so the target's
+            // fee per forward - which is what credits the inject channels' revenue - is large.
+            let exit_peer = find_pubkey_by_alias("5", sim_network)?;
+
+            let network_graph = network_graph(sim_network.clone())?;
+
+            Ok(Arc::new(InflationAttack::new(
+                clock,
+                sim_network,
+                network.target().1,
+                sender,
+                receiver,
+                inject_peers,
+                exit_peer,
+                reputation_monitor,
+                revenue_monitor,
+                channel_jammer,
+                network_graph,
+                attack_cost,
+            )))
+        }
     }
 }
 
