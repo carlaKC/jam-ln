@@ -642,6 +642,26 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
         .into())
 }
 
+/// Number of seconds in a 30-day month, used by [`parse_window`].
+const SECS_PER_MONTH: u64 = 30 * 24 * 60 * 60;
+
+/// Parses a traffic-generation window where `Xd` means X days and `Xm` means X *months* (30 days).
+///
+/// This deliberately diverges from [`parse_duration`]/humantime, where `m` means minutes — for a
+/// generation window (always days-to-months) the friendlier `Xm = months` shorthand is wanted. Any
+/// input not matching the `Xd`/`Xm` shorthand falls back to humantime, so long forms like
+/// `"6months"`, `"2weeks"` or `"7days"` still parse as before.
+pub fn parse_window(s: &str) -> Result<Duration, String> {
+    let s = s.trim();
+    if let Some(days) = s.strip_suffix('d').and_then(|n| n.parse::<u64>().ok()) {
+        return Ok(Duration::from_secs(days * 24 * 60 * 60));
+    }
+    if let Some(months) = s.strip_suffix('m').and_then(|n| n.parse::<u64>().ok()) {
+        return Ok(Duration::from_secs(months * SECS_PER_MONTH));
+    }
+    parse_duration(s)
+}
+
 fn find_next_newline(file: &mut BufReader<File>, start: u64) -> Result<u64, BoxError> {
     let mut position = start;
     file.seek(std::io::SeekFrom::Start(position))?;
@@ -754,6 +774,46 @@ pub async fn history_from_file(
     }
 
     Ok(forwards)
+}
+
+/// Tiles a short window of bootstrap forwards (the "loopback"/boost) so it spans at least
+/// `target` of wall time, without writing the duplicated data to disk.
+///
+/// The source forwards (e.g. ~7 days of dense traffic) are repeated end-to-end, each repetition
+/// shifted forward by the source's full span so the resulting timestamps stay strictly increasing
+/// across tile seams — the decaying-average reputation update rejects out-of-order timestamps, so
+/// monotonicity is load-bearing. Returns the input unchanged if it already covers `target` (or is
+/// empty / single-instant).
+pub fn boost_history(forwards: Vec<BootstrapForward>, target: Duration) -> Vec<BootstrapForward> {
+    let target_ns = target.as_nanos() as u64;
+    let min_added = match forwards.iter().map(|f| f.added_ns).min() {
+        Some(v) => v,
+        None => return forwards,
+    };
+    let max_settled = forwards
+        .iter()
+        .map(|f| f.settled_ns)
+        .max()
+        .unwrap_or(min_added);
+    let span = max_settled.saturating_sub(min_added);
+    if span == 0 || span >= target_ns {
+        return forwards;
+    }
+
+    // ceil(target / span) tiles to fully cover the window.
+    let tiles = target_ns.div_ceil(span);
+    let mut boosted = Vec::with_capacity(forwards.len() * tiles as usize);
+    for tile in 0..tiles {
+        // +tile to keep seams strictly monotonic when a forward sits exactly on the boundary.
+        let shift = tile.saturating_mul(span).saturating_add(tile);
+        for f in &forwards {
+            let mut copy = f.clone();
+            copy.added_ns += shift;
+            copy.settled_ns += shift;
+            boosted.push(copy);
+        }
+    }
+    boosted
 }
 
 pub fn reputation_snapshot_from_file(
@@ -892,8 +952,37 @@ mod tests {
     use std::ops::Add;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    use crate::parsing::get_history_for_bootstrap;
+    use crate::parsing::{boost_history, get_history_for_bootstrap};
     use crate::test_utils::test_bootstrap_forward;
+
+    #[test]
+    fn test_boost_history() {
+        // Empty input is returned untouched.
+        assert!(boost_history(vec![], Duration::from_nanos(100)).is_empty());
+
+        // Source spans 10ns (min added 100 .. max settled 110).
+        let src = || {
+            vec![
+                test_bootstrap_forward(100, 105, 1, 2),
+                test_bootstrap_forward(102, 110, 3, 4),
+            ]
+        };
+
+        // Target already covered by the source span -> returned unchanged.
+        assert_eq!(boost_history(src(), Duration::from_nanos(5)).len(), 2);
+
+        // Target 100ns over a 10ns span -> ceil(100/10) = 10 tiles.
+        let boosted = boost_history(src(), Duration::from_nanos(100));
+        assert_eq!(boosted.len(), 2 * 10);
+
+        // Timestamps stay strictly increasing across tile seams (the decay-average requirement),
+        // and the boosted stream covers at least the requested window.
+        for pair in boosted.windows(2) {
+            assert!(pair[1].added_ns > pair[0].added_ns);
+        }
+        let span = boosted.last().unwrap().settled_ns - boosted.first().unwrap().added_ns;
+        assert!(span >= 100);
+    }
 
     /// Tests the cases where filtering bootstrap data fails.
     #[test]

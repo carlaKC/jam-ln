@@ -171,6 +171,7 @@ pub fn test_bootstrap_forward(
         forwarding_node: get_random_keypair().1,
         channel_in_id,
         channel_out_id,
+        settled: true,
     }
 }
 
