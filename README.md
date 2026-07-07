@@ -35,13 +35,18 @@ attacks against. Each sub-directory represents a graph, and should
 contain the following:
 * `peacetime_network.json`: the lightning network [graph](https://github.com/carlaKC/sim-ln?tab=readme-ov-file#advanced-usage---network-simulation)
   for the attack, with no attacker channels added.
-* `peacetime_traffic.csv`: projected traffic for this network in times
-  of peace, used to execute peacetime operation of the network.
 * `reputation.csv`: the starting state reputation for nodes in the
   network, which bootstraps network state with 6 months of reputation
   history.
 * `target.txt`: a text file containing the alias of the node being
   targeted for attack.
+
+`peacetime_traffic.csv` is a large intermediate artifact (projected
+peacetime traffic) generated locally by `forward-builder` and consumed
+by `reputation-builder` to produce `reputation.csv`. It is git-ignored
+and **not** committed; the running simulator does not read it (peacetime
+revenue is now co-simulated live). Regenerate it with the tooling below
+only if you need to rebuild `reputation.csv`.
 
 To create an attack against a peacetime network, you will need to
 provide the following files in 
@@ -75,14 +80,6 @@ To implement an attack in the simulator, you need to:
 See the docs on each for further instructions.
 
 ## Install
-
-⚠️ We're currently hitting some issues with Github LFS, ping Carla for files!⚠️
-
-Note that this repo uses [git lfs](https://git-lfs.com/) to store large
-network files. To pull these files you will need to install it and run:
-```
-git lfs pull
-```
 
 To install and run the simulator:
 ```

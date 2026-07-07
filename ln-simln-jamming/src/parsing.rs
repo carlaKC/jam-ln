@@ -123,18 +123,6 @@ impl NetworkType {
         }
     }
 
-    /// Returns the file that contains traffic projections for the peacetime network. May be
-    /// the same as reputation_file if running in NetworkType::PeacetimeNetwork.
-    pub fn peacetime_projections(&self) -> PathBuf {
-        match self {
-            NetworkType::Peacetime(p)
-            | NetworkType::AttackTime(p, _)
-            | NetworkType::BootstrapAttackTime(p, _, _) => {
-                p.network_dir.join(PeacetimeNetwork::TRAFFIC)
-            }
-        }
-    }
-
     /// Returns the graph that we're actively simulating payments on.
     pub fn active_network(&self) -> &Vec<NetworkParser> {
         match self {
