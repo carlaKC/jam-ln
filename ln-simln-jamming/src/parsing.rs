@@ -1,3 +1,4 @@
+use crate::attacks::general_jam::GeneralJam;
 use crate::attacks::null::NullAttack;
 use crate::attacks::sink::SinkAttack;
 use crate::attacks::slow_jam::SlowJam;
@@ -469,6 +470,8 @@ pub enum AttackType {
     /// Inert baseline: adds attacker channels to the graph but takes no action, used to establish
     /// the Common-Random-Numbers baseline an attack's revenue impact is measured against.
     Null,
+    /// Saturates the general bucket of every one of the target's channels and holds it.
+    GeneralJam,
     // NOTE: add your attack that you want to run here.
 }
 
@@ -560,6 +563,12 @@ where
             Ok(attack)
         }
         AttackType::Null => Ok(Arc::new(NullAttack::new(clock))),
+        AttackType::GeneralJam => Ok(Arc::new(GeneralJam::new(
+            clock,
+            sim_network,
+            network.target().1,
+            channel_jammer,
+        ))),
     }
 }
 
