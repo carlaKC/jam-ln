@@ -368,8 +368,9 @@ async fn run(
 
     // Revenue-drop monitor: stop the attack once the target's revenue in the attack network has dropped materially
     // below peacetime. Because both networks advance on the same virtual clock, both revenues are read at the same
-    // virtual instant.
-    {
+    // virtual instant. Set DISABLE_REVENUE_MONITOR=1 to run the full fixed window instead (useful for measuring an
+    // attack's total damage rather than its time-to-5%-loss).
+    if std::env::var("DISABLE_REVENUE_MONITOR").is_err() {
         let monitor_comparator = Arc::clone(&comparator);
         let monitor_shutdown = shutdown.clone();
         let monitor_listener = listener.clone();
