@@ -3,6 +3,7 @@ pub mod forward_manager;
 pub use htlc_manager::ReputationParams;
 mod htlc_manager;
 mod incoming_channel;
+pub use incoming_channel::ASSIGNED_SLOTS;
 mod outgoing_channel;
 
 use serde::Serialize;

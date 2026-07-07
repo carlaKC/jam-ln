@@ -170,7 +170,7 @@ impl IncomingChannel {
 
 /// Defines the number of slots each candidate channel is allowed in the general bucket.
 /// This value assumes that we're operating with a protocol limit of 483 htlcs (not 120, as in V3).
-const ASSIGNED_SLOTS: usize = 20;
+pub const ASSIGNED_SLOTS: usize = 20;
 
 #[derive(Debug)]
 pub(super) struct GeneralBucket {

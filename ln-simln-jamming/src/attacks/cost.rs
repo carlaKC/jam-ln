@@ -13,6 +13,39 @@ pub fn channel_open_cost_msat(channels: usize) -> u64 {
     channels as u64 * APPROX_CHANNEL_OPEN_COST_MSAT
 }
 
+/// Hard-coded rule-of-thumb for the number of channels needed to hold **one** channel's general
+/// bucket full, used when the pairs-based estimate isn't cheaper.
+pub const EXPECTED_CHANNELS_PER_GENERAL_JAM: usize = 20;
+
+/// Estimates the number of channels an attacker must open to keep the general buckets of
+/// `jammed_channels` of a node's channels full — the cost the `ChannelJammer` helper does not
+/// itself charge. It is the **minimum** of two estimates:
+///
+/// 1. **Open the channel pairs directly** (as `SlotJam` does). The general bucket assigns each
+///    *(incoming, outgoing)* pair `assigned_slots` of its `slot_count` slots, so covering a
+///    bucket needs `ceil(slot_count / assigned_slots)` distinct outgoing channels — capped by the
+///    node's `target_channel_count` (you can only forward out over channels it actually has).
+///    Those receiver channels are shared across all the jammed (incoming) channels, and each
+///    jammed channel additionally needs one channel to inject HTLCs through it. So
+///    `jammed_channels + min(ceil(slot_count/assigned_slots), target_channel_count)`.
+/// 2. **The hard-coded expected value:** `jammed_channels * EXPECTED_CHANNELS_PER_GENERAL_JAM`.
+pub fn channels_to_jam_general(
+    jammed_channels: usize,
+    target_channel_count: usize,
+    slot_count: u16,
+    assigned_slots: usize,
+) -> usize {
+    if jammed_channels == 0 {
+        return 0;
+    }
+    let receivers = (slot_count as usize)
+        .div_ceil(assigned_slots.max(1))
+        .min(target_channel_count);
+    let pairs_based = jammed_channels + receivers;
+    let hardcoded = jammed_channels * EXPECTED_CHANNELS_PER_GENERAL_JAM;
+    pairs_based.min(hardcoded)
+}
+
 /// Accumulates the gross cost of attacker-dispatched payments during a simulation.
 ///
 /// Channel-opening costs are tracked separately (graph channels are counted from the
@@ -90,7 +123,26 @@ impl AttackCost {
 
 #[cfg(test)]
 mod tests {
-    use super::{channel_open_cost_msat, AttackCost};
+    use super::{channel_open_cost_msat, channels_to_jam_general, AttackCost};
+
+    /// The jam-channel estimate is the minimum of the pairs-based and hard-coded approaches, and
+    /// zero when nothing is jammed.
+    #[test]
+    fn test_channels_to_jam_general() {
+        // Nothing jammed -> no channels.
+        assert_eq!(channels_to_jam_general(0, 7, 193, 20), 0);
+
+        // Jamming all 7 of a 7-channel target: receivers = min(ceil(193/20)=10, 7) = 7, plus one
+        // injector per jammed channel = 7, so 14 pairs-based; hard-coded would be 7*20 = 140.
+        assert_eq!(channels_to_jam_general(7, 7, 193, 20), 14);
+
+        // Jamming one channel of a 7-channel target: 1 injector + 7 receivers = 8, vs 20 hard-coded.
+        assert_eq!(channels_to_jam_general(1, 7, 193, 20), 8);
+
+        // When the pairs approach is more expensive than the rule of thumb, the hard-coded value
+        // wins: 1 injector + min(ceil(400/20)=20, 100)=20 receivers = 21 > 20.
+        assert_eq!(channels_to_jam_general(1, 100, 400, 20), 20);
+    }
 
     /// Each opened channel costs a flat ~200 sat (200_000 msat) on-chain estimate.
     #[test]

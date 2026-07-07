@@ -449,6 +449,7 @@ where
         Ok(AttackStatisitcs {
             general_jammed_channels: 1,
             congestion_jammed_channels: 1,
+            estimated_jam_channels: 0,
         })
     }
 }

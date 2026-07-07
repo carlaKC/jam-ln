@@ -46,6 +46,12 @@ impl Default for ForwardManagerParams {
 }
 
 impl ForwardManagerParams {
+    /// The number of general-bucket HTLC slots a channel gets: `general_slot_portion` of the
+    /// protocol maximum of 483 in-flight HTLCs. Mirrors the computation in [`ForwardManager::add_channel`].
+    pub fn general_slot_count(&self) -> u16 {
+        483 * self.general_slot_portion as u16 / 100
+    }
+
     /// Returns the opportunity cost for the htlc amount and expiry provided, assuming 10 minute blocks.
     pub fn htlc_opportunity_cost(&self, fee_msat: u64, expiry: u32) -> u64 {
         self.reputation_params

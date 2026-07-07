@@ -460,6 +460,21 @@ async fn run(
 
     let snapshot = comparator.get_revenue_difference().await;
 
+    // Diagnostic: how many forwards did the target settle in each network, and at what average fee?
+    // Distinguishes "the target forwarded fewer payments" from "the target forwarded the same
+    // number but earned smaller fees".
+    let attack_count = attack_revenue.settled_count().await;
+    let peace_count = peace_revenue.settled_count().await;
+    log::info!(
+        "Target settled forwards — peacetime: {} forwards / {} msat (avg {} msat); attack: {} forwards / {} msat (avg {} msat)",
+        peace_count,
+        snapshot.peacetime_revenue_msat,
+        snapshot.peacetime_revenue_msat.checked_div(peace_count).unwrap_or(0),
+        attack_count,
+        snapshot.simulation_revenue_msat,
+        snapshot.simulation_revenue_msat.checked_div(attack_count).unwrap_or(0),
+    );
+
     // Count the channels the attacker had to open in the graph to mount the attack.
     let attacker_pubkey_set: HashSet<PublicKey> = attacker_pubkeys.iter().copied().collect();
     let graph_channels = count_attacker_channels(network.active_network(), &attacker_pubkey_set);
@@ -658,17 +673,29 @@ fn write_simulation_summary(
         attack_stats.congestion_jammed_channels,
     )?;
 
-    // The attacker cost covers only the channels it actually opened in the graph and the fees
-    // it paid on payments. Jammed channels are reported separately above: converting jamming
-    // into a channel-opening cost is left out deliberately, since the number of channels needed
-    // to jam one channel is uncertain (in expectation roughly 20, but not fixed).
+    // The attacker's channel cost has two parts: the channels it actually opened in the graph, and
+    // an estimate of the channels a helper-based jam would really need to hold the buckets full
+    // (the ChannelJammer helper jams for free). `estimated_jam_channels` is the minimum of opening
+    // the pairs directly and the hard-coded ~20-per-channel rule of thumb; it is zero for attacks
+    // that jam with real HTLCs over channels already counted in the graph.
     let channel_open_cost = channel_open_cost_msat(graph_channels);
+    let jam_channel_cost = channel_open_cost_msat(attack_stats.estimated_jam_channels);
     writeln!(writer, "--- Attacker cost ---")?;
     writeln!(writer, "Channels opened in graph: {}", graph_channels)?;
     writeln!(
         writer,
         "Channel open cost (msat): {} (approx 200 sat per channel)",
         channel_open_cost,
+    )?;
+    writeln!(
+        writer,
+        "Estimated jam-helper channels: {}",
+        attack_stats.estimated_jam_channels,
+    )?;
+    writeln!(
+        writer,
+        "Estimated jam-helper channel cost (msat): {}",
+        jam_channel_cost,
     )?;
     writeln!(
         writer,
@@ -698,7 +725,7 @@ fn write_simulation_summary(
     writeln!(
         writer,
         "Total attacker cost (msat): {}",
-        channel_open_cost + attack_cost.total_payment_fees_msat(),
+        channel_open_cost + jam_channel_cost + attack_cost.total_payment_fees_msat(),
     )?;
     writer.flush()?;
 

@@ -13,7 +13,9 @@ pub mod sink;
 pub mod slow_jam;
 pub mod utils;
 
-pub use cost::{channel_open_cost_msat, AttackCost};
+pub use cost::{
+    channel_open_cost_msat, channels_to_jam_general, AttackCost, EXPECTED_CHANNELS_PER_GENERAL_JAM,
+};
 
 /// Summarizes actions taken during the attack.
 pub struct AttackStatisitcs {
@@ -22,6 +24,12 @@ pub struct AttackStatisitcs {
 
     /// The number of channels congestion jammed using [`reputation_interceptor::ChannelJammer`].
     pub congestion_jammed_channels: usize,
+
+    /// The number of channels the attacker would realistically have to open to hold the jammed
+    /// buckets full with real HTLCs (the `ChannelJammer` helper does not open them). Zero for
+    /// attacks that jam with real HTLCs they actually open in the graph (those are counted as
+    /// graph channels instead). See [`channels_to_jam_general`].
+    pub estimated_jam_channels: usize,
 }
 
 // Defines an attack that can be mounted against the simulation framework.
