@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Exhaustive check that no (entry, mid) peer pair admits an accountable loop through the
-target on ln_50_v2. See sim-findings.md section 5. Run from networks/ln_50_v2/."""
+target on ln_50. See sim-findings.md section 5. Run from networks/ln_50/."""
 import csv, json
 
 TARGET = "03d607f3e69fd032524a867b288216bfab263b6eaee4e07783799a6fe69bb84fac"

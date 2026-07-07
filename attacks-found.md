@@ -2,7 +2,7 @@
 
 Revenue loss is measured against the **live co-simulated peacetime network** (no attacker),
 Common-Random-Numbers-matched to the attack run (`sim-findings.md` §1). All runs on
-`networks/ln_50_v2` (regenerated from scratch with the current binary), seed
+`networks/ln_50` (reputation snapshot regenerated with the current binary), seed
 `13995354354227336701`, `--target-reputation-percent 1`, no attacker bootstrap.
 
 ## Summary
@@ -192,7 +192,7 @@ damaged) channel. The receiver's channel with the target is reputation-primed fi
 **Result: the looped mechanism moved ZERO revenue.** Verified via logs: all 3 loop HTLCs were
 failed at the first honest hop with `outcome fail due to no reputation`; the target's reputation
 was unchanged (9/40 pairs). An exhaustive viability check
-(`networks/ln_50_v2/attacks/LoopedHtlc/viability_check.py`) found **0 viable (entry, mid) pairs**.
+(`networks/ln_50/attacks/LoopedHtlc/viability_check.py`) found **0 viable (entry, mid) pairs**.
 
 **Why (a mitigation property, not a bug).** The mitigation drops an accountable HTLC whose
 in-flight opportunity-cost risk exceeds a hop's reputation. A multi-hop loop accumulates CLTV, so

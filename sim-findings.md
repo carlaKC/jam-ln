@@ -33,7 +33,7 @@ Revenue loss:              0
 So the two co-simulated networks have no systematic bias — identical honest inputs produce
 identical target revenue exactly (not merely within noise). Any non-zero delta an attack
 shows is therefore caused by the attacker's channels-plus-actions, not by the machinery. The
-canonical `Null` baseline (`networks/ln_50_v2/attacks/Null/`) uses this non-perturbing
+canonical `Null` baseline (`networks/ln_50/attacks/Null/`) uses this non-perturbing
 isolated attacker channel.
 
 
@@ -81,7 +81,7 @@ The live sim, by contrast, credits the target only on end-to-end success
 
 This is a counting-semantics mismatch (add-time vs settle-time), present regardless
 of runtime — **not** a virtual-time/attack-branch timing bug. Measured directly on a
-30-day `NullAttack` over `ln_50_v2` (inert attacker):
+30-day `NullAttack` over `ln_50` (inert attacker):
 
 ```
 Target forwards the target accepted locally (succeeded forwards): ~363M msat in fees
@@ -118,16 +118,16 @@ show ~0 loss; the cold-start congestion itself is a separate realism question.
 
 ### Regeneration result (2026-06-30)
 
-Regenerating `ln_50`'s derived files from scratch with the current binary (new dir
-`networks/ln_50_v2`: fresh `peacetime_traffic.csv` via `forward-builder`, fresh
-`reputation.csv` via the now-fixed `reputation-builder`) reduced peacetime inflation
+Regenerating `ln_50`'s derived files from scratch with the current binary (fresh
+`peacetime_traffic.csv` via `forward-builder`, fresh `reputation.csv` via the now-fixed
+`reputation-builder`) reduced peacetime inflation
 (1.66B → 416M) and exercised the fixed `reputation-builder`, but the inert `NullAttack`
 still shows a ~91% phantom "loss" (peacetime 416M vs simulation 36M). Diagnosis above:
 the gap is add-time-vs-settle-time counting (1c) compounded by snapshot-fidelity
 congestion (1d) — **not** routing diversion (generating traffic on the attack graph
 gives the target ~422M/30d, ≈ the no-attacker 416M) and **not** a peacetime-replay
 timing bug. **Conclusion unchanged: do not use the peacetime line; measure with the
-`NullAttack` CRN baseline (here ~36M msat / 30d on `ln_50_v2`).**
+`NullAttack` CRN baseline (here ~36M msat / 30d on `ln_50`).**
 
 ### 1b. In `--attacker-bootstrap` mode the two sides are seeded inconsistently
 
@@ -188,7 +188,7 @@ past or a day in the future (`lightning::routing::gossip`, gossip.rs:2483/2489),
 anchor must stay close to real time; a daily grid is the coarsest quantum that both stays in
 that window and makes same-day runs identical.
 
-**Verified:** two 1-day no-monitor `null` runs (`networks/ln_50_v2`) are now byte-identical
+**Verified:** two 1-day no-monitor `null` runs (`networks/ln_50`) are now byte-identical
 in all simulation content — same payments (`13958 … 33966836063 msat … 70.13% success`),
 routes, liquidity moves, and settled revenue. The only residual per-run difference is the
 payment-hash/preimage *string* (an unseeded preimage RNG, cosmetic — it does not affect
@@ -297,7 +297,7 @@ ln(expected))`. The mean stays at `expected_payment_amt` (~3.8M msat), but for p
 target's peers are large (44 = 100B, 31 = 84B msat), so payments routed through it reach **~2B
 msat**, and because fee ∝ amount those rare giants dominate the target's fee revenue.
 
-Measured on `ln_50_v2` (30-day inert run): **the top 1% of the target's forwards (amount > 1B
+Measured on `ln_50` (30-day inert run): **the top 1% of the target's forwards (amount > 1B
 msat) carry 95% of its fee revenue**; the other 99% carry 5%.
 
 Why this matters for attacks: those billion-msat forwards have an in-flight risk (∝ amount) far
