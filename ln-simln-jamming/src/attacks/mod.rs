@@ -15,6 +15,7 @@ pub mod inflation;
 pub mod looped_htlc;
 pub mod null;
 pub mod sink;
+pub mod slot_jam;
 pub mod slow_jam;
 pub mod utils;
 

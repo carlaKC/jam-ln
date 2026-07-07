@@ -4,6 +4,7 @@ use crate::attacks::inflation::InflationAttack;
 use crate::attacks::looped_htlc::LoopedHtlc;
 use crate::attacks::null::NullAttack;
 use crate::attacks::sink::SinkAttack;
+use crate::attacks::slot_jam::SlotJam;
 use crate::attacks::slow_jam::SlowJam;
 use crate::attacks::{AttackCost, JammingAttack};
 use crate::reputation_interceptor::{
@@ -475,6 +476,9 @@ pub enum AttackType {
     Null,
     /// Saturates the general bucket of every one of the target's channels and holds it.
     GeneralJam,
+    /// The real (non-helper) general-bucket jam: pins each (incoming, outgoing) channel pair's
+    /// assigned general slots with held tiny HTLCs routed through the target.
+    SlotJam,
     /// Fast jam: an endless stream of small, fast-failing HTLCs the attacker pushes through the
     /// target to keep its channels' general-bucket HTLC slots full, so honest unaccountable
     /// payments are rejected with `no general resources`. The defence is the unconditional fee.
@@ -583,6 +587,52 @@ where
             network.target().1,
             channel_jammer,
         ))),
+        AttackType::SlotJam => {
+            let target_pubkey = network.target().1;
+            let attackers = network.attackers();
+            // Sender originates the held HTLCs; receiver holds them (two nodes, since LDK will not
+            // route a payment back to its own origin).
+            let attacker_sender = attackers
+                .iter()
+                .find(|a| a.0 == "50")
+                .ok_or("Required SlotJam attacker sender with alias 50 not found")?
+                .clone();
+            let attacker_receiver = attackers
+                .iter()
+                .find(|a| a.0 == "51")
+                .ok_or("Required SlotJam attacker receiver with alias 51 not found")?
+                .1;
+
+            // The target's honest peers (its channel counterparties), sorted by channel capacity
+            // descending so SlotJam jams the highest-value (I, O) pairs first when it is capped.
+            let mut peers_with_cap: Vec<(PublicKey, u64)> = sim_network
+                .iter()
+                .filter_map(|c| {
+                    if c.node_1.pubkey == target_pubkey {
+                        Some((c.node_2.pubkey, c.capacity_msat))
+                    } else if c.node_2.pubkey == target_pubkey {
+                        Some((c.node_1.pubkey, c.capacity_msat))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            peers_with_cap.sort_by(|a, b| b.1.cmp(&a.1));
+            let target_peers: Vec<PublicKey> = peers_with_cap.into_iter().map(|(pk, _)| pk).collect();
+
+            let network_graph = network_graph(sim_network.clone())?;
+
+            Ok(Arc::new(SlotJam::new(
+                clock,
+                target_pubkey,
+                attacker_sender,
+                attacker_receiver,
+                target_peers,
+                network_graph,
+                reputation_monitor,
+                attack_cost,
+            )))
+        }
         AttackType::FastJam => {
             let attackers = network.attackers();
 
