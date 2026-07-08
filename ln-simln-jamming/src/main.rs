@@ -35,6 +35,13 @@ use tokio::select;
 use tokio::sync::Mutex;
 use tokio_util::task::TaskTracker;
 
+/// Maximum time to run the simulation for in virutal time, used to safeguard against the clock spinning forever if an
+/// attack fails to shut itself down.
+const MAX_SIM_TIME_SECS: u32 = 365 * 24 * 60 * 60;
+
+/// The granularity in seconds with which we round our start time to be the same across runs on the same day.
+const START_TIME_QUANTUM_SECS: u64 = 24 * 60 * 60;
+
 fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
     let forward_params = cli.validate()?;
@@ -49,7 +56,15 @@ fn main() -> Result<(), BoxError> {
         .init()
         .unwrap();
 
-    let start_time = SystemTime::now();
+    // We can't fix start time exactly, because LDK's graph requires a recent timestamp to validate gossip. Round to
+    // the nearest day so that our clock is at least fixed for runs on the same day.
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("system clock is before UNIX_EPOCH")
+        .as_secs();
+    let start_time =
+        SystemTime::UNIX_EPOCH + Duration::from_secs(secs - secs % START_TIME_QUANTUM_SECS);
+
     block_on_virtual_time(start_time, |clock| run(clock, cli, forward_params))??;
 
     Ok(())
@@ -102,9 +117,10 @@ async fn run(
 
     let now = InstantClock::now(&*clock);
 
-    // Create a writer to store results for nodes that we care about.
+    // Create a writer to store results for nodes that we care about. We use real wall clock time here so that results
+    // don't overwrite each other.
     let results_dir = network
-        .results_dir(Clock::now(&*clock))
+        .results_dir(SystemTime::now())
         .ok_or("results dir none for attack")?;
     if !results_dir.exists() {
         fs::create_dir_all(&results_dir)?;
@@ -265,7 +281,15 @@ async fn run(
         exclude,
     };
 
-    let sim_cfg = SimulationCfg::new(None, 3_800_000, 2.0, None, Some(SIM_SEED));
+    // Bound the simulation at one virtual year as a safeguard. Normally the attack triggers shutdown well before
+    // this; the ceiling just prevents virtual time from advancing forever if an attack never terminates.
+    let sim_cfg = SimulationCfg::new(
+        Some(MAX_SIM_TIME_SECS),
+        3_800_000,
+        2.0,
+        None,
+        Some(SIM_SEED),
+    );
     let (simulation, validated_activities, sim_nodes) = create_simulation_with_network(
         sim_cfg,
         &sim_params,
