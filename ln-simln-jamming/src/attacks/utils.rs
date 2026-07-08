@@ -59,6 +59,9 @@ pub struct BuildReputationParams<'a, R: ReputationMonitor> {
     pub reputation_params: ForwardManagerParams,
     pub clock: Arc<SimulationClock>,
     pub shutdown_listener: Listener,
+    /// Reputation to build beyond the bare `revenue + htlc_risk` threshold. 0 = exact (pay only the
+    /// deficit); a small margin makes initial entry robust to the random CLTV offset in routing.
+    pub fee_buffer: u32,
 }
 
 /// Helper to build outgoing reputation towards the attacker with a specific target_channel.
@@ -126,8 +129,16 @@ pub async fn build_reputation<R: ReputationMonitor>(
         target_channel.0,
         current_target_revenue,
         current_attacker_reputation,
-        5000,
+        params.fee_buffer,
     );
+
+    // Gated, exact refill: if reputation already covers `revenue + htlc_risk` (+ buffer) the deficit
+    // is zero, so there is nothing to build — don't send a carrier payment just to pay route fees.
+    // This is what keeps maintenance free when the held HTLCs accrue no penalty (fast 85s holds);
+    // when reputation has genuinely decayed below the threshold, we pay exactly the deficit.
+    if total_fee == 0 {
+        return Ok(0);
+    }
 
     let total_fees_paid = total_fee + route.get_total_fees();
     for path in route.paths.iter_mut() {
@@ -525,6 +536,7 @@ mod tests {
             reputation_params: ForwardManagerParams::default(),
             clock: Arc::clone(&clock),
             shutdown_listener: shutdown.1.clone(),
+            fee_buffer: 5000,
         };
 
         let _ = build_reputation(build_rep_params).await.unwrap();

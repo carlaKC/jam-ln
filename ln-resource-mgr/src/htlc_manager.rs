@@ -15,6 +15,30 @@ pub(super) struct InFlightHtlc {
     pub(super) bucket: ResourceBucketType,
 }
 
+/// Selects the reputation scoring algorithm. New algorithms can be added as a variant here plus a
+/// match arm in [`ReputationParams::opportunity_cost`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ReputationAlgo {
+    /// Pre-existing behaviour: stepwise opportunity cost `floor(hold/period) × fee` — zero below one
+    /// resolution period, then one fee per full period. Selectable for comparison against `Gradual`.
+    Original,
+    /// Gradual opportunity cost (lightning/bolts#1280 / jam-ln#119): `max(0, (hold − period) /
+    /// period) × fee` — linear above the resolution period (no stair-steps / discontinuity), still
+    /// zero below it. This is the default (matches the behaviour on `master`).
+    #[default]
+    Gradual,
+    /// Ramp opportunity cost: free below a short [`RAMP_FREE_GRACE`] grace, then linear up to one
+    /// fee at the resolution period (`fee × (hold − grace) / (period − grace)`), then continuing at
+    /// the gradual rate above the period (`fee × hold / period` — one fee at the period, one extra
+    /// fee per period thereafter). Unlike `Original`/`Gradual` it charges for sub-period holds,
+    /// closing the "free" window that fast jams exploit. Continuous and strictly increasing.
+    Ramp,
+}
+
+/// Holds shorter than this accrue no opportunity cost under [`ReputationAlgo::Ramp`] — a small grace
+/// period before the linear ramp begins.
+const RAMP_FREE_GRACE: Duration = Duration::from_secs(5);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReputationParams {
     /// The period of time that revenue should be tracked to determine the threshold for reputation decisions.
@@ -26,17 +50,42 @@ pub struct ReputationParams {
     /// Expected block speed, surfaced to allow test networks to set different durations, defaults to 10 minutes
     /// otherwise.
     pub expected_block_speed: Option<Duration>,
+    /// The opportunity-cost algorithm in use.
+    pub algo: ReputationAlgo,
 }
 
 impl ReputationParams {
-    /// Calculates the opportunity_cost of a htlc being held on our channel - allowing one [`reputation_period`]'s
-    /// grace period, then charging for every subsequent period.
+    /// Calculates the opportunity_cost of a htlc being held on our channel, per the selected
+    /// [`ReputationAlgo`]:
+    /// - `Original`: stepwise `floor(hold/period) × fee` — zero below one period, one fee per period.
+    /// - `Gradual`:  `max(0, (hold − period)/period) × fee` — linear above the period, zero below.
+    /// - `Ramp`:     free below the grace, linear to one fee at the period, then `fee × hold/period`.
     pub(super) fn opportunity_cost(&self, fee_msat: u64, hold_time: Duration) -> u64 {
-        (0_f64.max(
-            (hold_time.as_secs_f64() - self.resolution_period.as_secs_f64())
-                / self.resolution_period.as_secs_f64(),
-        ) * (fee_msat as f64))
-            .round() as u64
+        match self.algo {
+            ReputationAlgo::Original => {
+                (hold_time.as_secs() / self.resolution_period.as_secs()).saturating_mul(fee_msat)
+            }
+            ReputationAlgo::Gradual => {
+                let period = self.resolution_period.as_secs_f64();
+                let periods_over = ((hold_time.as_secs_f64() - period) / period).max(0.0);
+                (periods_over * fee_msat as f64).round() as u64
+            }
+            ReputationAlgo::Ramp => {
+                let period = self.resolution_period.as_secs_f64();
+                let hold = hold_time.as_secs_f64();
+                let grace = RAMP_FREE_GRACE.as_secs_f64();
+                let fee = fee_msat as f64;
+                if hold < grace {
+                    0
+                } else if hold < period {
+                    // Linear ramp from 0 at the grace to one fee at the resolution period.
+                    (fee * (hold - grace) / (period - grace)).round() as u64
+                } else {
+                    // One fee at the period, then the gradual per-period rate above it.
+                    (fee * hold / period).round() as u64
+                }
+            }
+        }
     }
 
     /// Calculates the worst case reputation damage of a htlc, assuming it'll be held for its full expiry_delta.
@@ -201,7 +250,8 @@ mod tests {
 
     use crate::htlc_manager::{ChannelFilter, InFlightManager};
     use crate::{
-        AccountableSignal, HtlcRef, ReputationError, ReputationParams, ResourceBucketType,
+        AccountableSignal, HtlcRef, ReputationAlgo, ReputationError, ReputationParams,
+        ResourceBucketType,
     };
 
     use super::InFlightHtlc;
@@ -212,6 +262,7 @@ mod tests {
             reputation_multiplier: 10,
             resolution_period: Duration::from_secs(60),
             expected_block_speed: Some(Duration::from_secs(60 * 10)),
+            algo: ReputationAlgo::Gradual,
         })
     }
 

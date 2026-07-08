@@ -101,7 +101,7 @@ impl OutgoingChannel {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use crate::htlc_manager::ReputationParams;
+    use crate::htlc_manager::{ReputationAlgo, ReputationParams};
     use crate::{AccountableSignal, ForwardResolution, ResourceBucketType};
 
     use super::{InFlightHtlc, OutgoingChannel};
@@ -112,6 +112,7 @@ mod tests {
             reputation_multiplier: 10,
             resolution_period: Duration::from_secs(60),
             expected_block_speed: Some(Duration::from_secs(60 * 10)),
+            algo: ReputationAlgo::Gradual,
         }
     }
 
@@ -144,6 +145,35 @@ mod tests {
 
         // Multiple periods above resolution_period charges multiples of fee.
         assert_eq!(params.opportunity_cost(100, Duration::from_secs(600)), 900);
+    }
+
+    #[test]
+    fn test_original_opportunity_cost() {
+        // Original: stepwise floor(hold/period) × fee — one fee per full period, flat between steps.
+        let params = ReputationParams {
+            algo: ReputationAlgo::Original,
+            ..get_test_params() // resolution_period = 60s
+        };
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(10)), 0); // below one period
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(60)), 100); // one full period
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(65)), 100); // flat within period
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(600)), 1000);
+    }
+
+    #[test]
+    fn test_ramp_opportunity_cost() {
+        // Ramp: free <5s, linear to 1x fee at the period (60s here), then fee × hold/period above.
+        let params = ReputationParams {
+            algo: ReputationAlgo::Ramp,
+            ..get_test_params() // resolution_period = 60s, grace = 5s
+        };
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(3)), 0); // below grace
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(5)), 0); // at grace
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(16)), 20); // (16-5)/55 = 0.2
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(38)), 60); // (38-5)/55 = 0.6
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(60)), 100); // 1x at the period
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(120)), 200); // +1x per period
+        assert_eq!(params.opportunity_cost(100, Duration::from_secs(600)), 1000);
     }
 
     #[test]

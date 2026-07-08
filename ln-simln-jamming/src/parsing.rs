@@ -1,4 +1,5 @@
 use crate::attacks::sink::SinkAttack;
+use crate::attacks::slot_liq_jam::{FillMode, JamConfig, SlotLiqJam};
 use crate::attacks::slow_jam::SlowJam;
 use crate::attacks::JammingAttack;
 use crate::reputation_interceptor::{
@@ -12,7 +13,7 @@ use csv::{ReaderBuilder, StringRecord};
 use humantime::Duration as HumanDuration;
 use lightning::routing::gossip::NetworkGraph;
 use ln_resource_mgr::forward_manager::ForwardManagerParams;
-use ln_resource_mgr::ChannelSnapshot;
+use ln_resource_mgr::{ChannelSnapshot, ReputationAlgo};
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use sim_cli::parsing::NetworkParser;
@@ -49,6 +50,41 @@ pub const DEFAULT_REPUTATION_MARGIN_EXIPRY: &str = "200";
 /// The default batch size for writing results to disk.
 pub const DEFAULT_RESULT_BATCH_SIZE: &str = "500";
 
+/// CLI selector for the reputation scoring algorithm. Maps to [`ReputationAlgo`]; add a variant here
+/// (and the match arm) when a new named algorithm is added in ln-resource-mgr.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ReputationAlgoArg {
+    /// Pre-existing stepwise opportunity cost.
+    Original,
+    /// Gradual opportunity cost (bolts#1280 / jam-ln#119): linear above the resolution period, zero
+    /// below, no stair-steps.
+    Gradual,
+    /// Ramp opportunity cost: free below a 5s grace, linear up to one fee at the resolution period,
+    /// then `fee × hold/period` above it. Charges sub-period holds, closing the fast-jam window.
+    Ramp,
+}
+
+impl ReputationAlgoArg {
+    /// Canonical name (used as the default experiment label).
+    pub fn name(&self) -> &'static str {
+        match self {
+            ReputationAlgoArg::Original => "original",
+            ReputationAlgoArg::Gradual => "gradual",
+            ReputationAlgoArg::Ramp => "ramp",
+        }
+    }
+}
+
+impl From<ReputationAlgoArg> for ReputationAlgo {
+    fn from(arg: ReputationAlgoArg) -> Self {
+        match arg {
+            ReputationAlgoArg::Original => ReputationAlgo::Original,
+            ReputationAlgoArg::Gradual => ReputationAlgo::Gradual,
+            ReputationAlgoArg::Ramp => ReputationAlgo::Ramp,
+        }
+    }
+}
+
 #[derive(Clone, Parser)]
 pub struct ReputationParams {
     /// The window over which the value of a link's revenue to our node is calculated.
@@ -58,6 +94,11 @@ pub struct ReputationParams {
     /// The multiplier applied to revenue_window_seconds to get the duration over which reputation is bootstrapped.
     #[arg(long)]
     pub reputation_multiplier: Option<u8>,
+
+    /// The reputation scoring algorithm to use. Defaults to `gradual` (the behaviour on `master`);
+    /// pass `original` to compare against the pre-existing stepwise opportunity cost.
+    #[arg(long, value_enum, default_value_t = ReputationAlgoArg::Gradual)]
+    pub reputation_algo: ReputationAlgoArg,
 }
 
 impl From<ReputationParams> for ForwardManagerParams {
@@ -69,6 +110,7 @@ impl From<ReputationParams> for ForwardManagerParams {
         if let Some(multiplier) = cli.reputation_multiplier {
             forward_params.reputation_params.reputation_multiplier = multiplier;
         }
+        forward_params.reputation_params.algo = cli.reputation_algo.into();
         forward_params
     }
 }
@@ -177,9 +219,10 @@ impl NetworkType {
         }
     }
 
-    /// Returns a directory to write simulation results to, if appropriate for network type,
-    /// namespacing by the runtime provided.
-    pub fn results_dir(&self, now: SystemTime) -> Option<PathBuf> {
+    /// Returns a directory to write simulation results to, if appropriate for network type:
+    /// `results/{Attack}/{label}/{seconds_since_epoch}`. The label groups runs of the same
+    /// experiment (e.g. by reputation algorithm) for easier comparison.
+    pub fn results_dir(&self, now: SystemTime, label: &str) -> Option<PathBuf> {
         match self {
             NetworkType::Peacetime(_) => None,
             NetworkType::AttackTime(_, a) | NetworkType::BootstrapAttackTime(_, a, _) => {
@@ -188,6 +231,7 @@ impl NetworkType {
                 Some(
                     PathBuf::from("results")
                         .join(format!("{:?}", a.attack))
+                        .join(label)
                         .join(sec_since_epoch.to_string()),
                 )
             }
@@ -201,6 +245,19 @@ impl NetworkType {
             | NetworkType::AttackTime(p, _)
             | NetworkType::BootstrapAttackTime(p, _, _) => p.target.clone(),
         }
+    }
+
+    /// Overrides the target node (chosen from `target.txt`) by alias, resolved against the peacetime
+    /// graph. Lets a run pick its target at runtime without editing shared network files.
+    pub fn override_target(&mut self, alias: &str) -> Result<(), BoxError> {
+        let peacetime = match self {
+            NetworkType::Peacetime(p)
+            | NetworkType::AttackTime(p, _)
+            | NetworkType::BootstrapAttackTime(p, _, _) => p,
+        };
+        let pubkey = find_pubkey_by_alias(alias, &peacetime.graph)?;
+        peacetime.target = (alias.to_owned(), pubkey);
+        Ok(())
     }
 
     /// Returns the public keys of attackers in our network, if any.
@@ -430,8 +487,31 @@ pub struct Cli {
     #[arg(long, default_value = DEFAULT_RESULT_BATCH_SIZE)]
     pub result_batch_size: u16,
 
+    /// Alias of the node to attack, overriding `target.txt`. Lets experiments pick a target at
+    /// runtime without mutating shared network data (and makes switching targets a flag).
+    #[arg(long)]
+    pub target_alias: Option<String>,
+
+    /// scid of the target channel to jam (the slot/liquidity attacks). The peer is derived from the
+    /// graph as the channel's endpoint that isn't the target. Defaults to the original slow-jam
+    /// channel; set it to re-point the attack at a different (e.g. higher-revenue) target channel.
+    #[arg(long)]
+    pub channel_to_jam_scid: Option<u64>,
+
+    /// How long to sustain the slot/liquidity jam (eg `4w`, `6months`). For the slow variants this
+    /// is the single hold; for the fast variants it's the total window over which short holds are
+    /// repeated. Holding for several revenue windows is how the one-time entry cost amortizes
+    /// below the (accumulating) revenue denied. Defaults to 2 weeks.
+    #[arg(long, value_parser = parse_duration)]
+    pub jam_duration: Option<Duration>,
+
     #[command(flatten)]
     pub reputation_params: ReputationParams,
+
+    /// Optional label for this experiment. Results are written to
+    /// `results/{Attack}/{label}/{timestamp}`. Defaults to the reputation algorithm name.
+    #[arg(long)]
+    pub label: Option<String>,
 
     #[clap(long, default_value = "debug")]
     pub log_level: LevelFilter,
@@ -441,6 +521,12 @@ pub struct Cli {
 pub enum AttackType {
     Sink,
     SlowJam,
+    /// Slow slot jamming: fill the protected bucket with many tiny HTLCs (exhaust slots), hold ~2w.
+    SlowSlotJam,
+    /// Fast slot jamming: same slot fill, held ~85s and repeated for up to 2w.
+    FastSlotJam,
+    /// Fast liquidity jamming: a few large HTLCs exhausting protected liquidity, held ~85s, repeated.
+    FastLiqJam,
     // NOTE: add your attack that you want to run here.
 }
 
@@ -524,6 +610,88 @@ where
                 Arc::clone(&reputation_monitor),
                 Arc::clone(&channel_jammer),
                 network_graph,
+            ));
+
+            Ok(attack)
+        }
+        AttackType::SlowSlotJam | AttackType::FastSlotJam | AttackType::FastLiqJam => {
+            // All three reuse the slow-jam topology: attacker receiver alias 70, sender alias 25.
+            let attackers = network.attackers();
+            let attacker_receiver = attackers
+                .iter()
+                .find(|a| a.0 == "70")
+                .ok_or("Required attacker receiver with alias 70 not found")?;
+            let attacker_sender = attackers
+                .iter()
+                .find(|a| a.0 == "25")
+                .ok_or("Required attacker sender with alias 25 not found")?;
+
+            // Channel to jam: default to the original slow-jam channel, or take --channel-to-jam-scid.
+            // Derive the peer as the endpoint of that channel that isn't the target.
+            let channel_to_jam_scid = cli.channel_to_jam_scid.unwrap_or(348545186070528);
+            let target_pubkey = network.target().1;
+            let target_peer_pubkey = sim_network
+                .iter()
+                .find(|c| u64::from(c.scid) == channel_to_jam_scid)
+                .and_then(|c| {
+                    if c.node_1.pubkey == target_pubkey {
+                        Some(c.node_2.pubkey)
+                    } else if c.node_2.pubkey == target_pubkey {
+                        Some(c.node_1.pubkey)
+                    } else {
+                        None
+                    }
+                })
+                .ok_or(format!(
+                    "channel-to-jam scid {channel_to_jam_scid} is not a channel of the target"
+                ))?;
+            let channel_to_jam = (target_peer_pubkey, channel_to_jam_scid);
+            let network_graph = network_graph(sim_network.clone())?;
+
+            // Two weeks as 2016 blocks * 10 minutes (matches slow_jam's hold); overridable via
+            // --jam-duration so the jam can be sustained across several revenue windows.
+            let two_weeks = Duration::from_secs(2016 * 10 * 60);
+            let jam_duration = cli.jam_duration.unwrap_or(two_weeks);
+            // Fast variants hold just under the 90s resolution period so opportunity-cost penalties
+            // don't accrue, then repeat.
+            let fast_hold = Duration::from_secs(85);
+
+            let config = match network
+                .attack_type()
+                .ok_or("attack type must be set for simulation")?
+            {
+                AttackType::SlowSlotJam => JamConfig {
+                    fill: FillMode::Slots { htlc_msat: 1_000 },
+                    hold_time: jam_duration,
+                    repeat: false,
+                    total_duration: jam_duration,
+                },
+                AttackType::FastSlotJam => JamConfig {
+                    fill: FillMode::Slots { htlc_msat: 1_000 },
+                    hold_time: fast_hold,
+                    repeat: true,
+                    total_duration: jam_duration,
+                },
+                AttackType::FastLiqJam => JamConfig {
+                    fill: FillMode::Liquidity,
+                    hold_time: fast_hold,
+                    repeat: true,
+                    total_duration: jam_duration,
+                },
+                _ => unreachable!("outer match guarantees a slot/liquidity variant"),
+            };
+
+            let attack = Arc::new(SlotLiqJam::new(
+                Arc::clone(&clock),
+                sim_network,
+                network.target().1,
+                attacker_sender.clone(),
+                attacker_receiver.clone(),
+                channel_to_jam,
+                Arc::clone(&reputation_monitor),
+                Arc::clone(&channel_jammer),
+                network_graph,
+                config,
             ));
 
             Ok(attack)
@@ -754,6 +922,45 @@ pub async fn history_from_file(
     }
 
     Ok(forwards)
+}
+
+/// Tiles a short window of bootstrap forwards (the "loopback"/boost) so it spans at least `target`
+/// of wall time, without writing the duplicated data to disk. Lets a short traffic file bootstrap a
+/// full-length reputation window — the protocol's revenue/reputation windows are unchanged; only the
+/// *input data* is repeated to cover them.
+///
+/// Each repetition is shifted forward by the source's full span so timestamps stay strictly
+/// increasing across tile seams (the decaying-average reputation update rejects out-of-order
+/// timestamps). Returns the input unchanged if it already covers `target` (or is empty).
+pub fn boost_history(forwards: Vec<BootstrapForward>, target: Duration) -> Vec<BootstrapForward> {
+    let target_ns = target.as_nanos() as u64;
+    let min_added = match forwards.iter().map(|f| f.added_ns).min() {
+        Some(v) => v,
+        None => return forwards,
+    };
+    let max_settled = forwards
+        .iter()
+        .map(|f| f.settled_ns)
+        .max()
+        .unwrap_or(min_added);
+    let span = max_settled.saturating_sub(min_added);
+    if span == 0 || span >= target_ns {
+        return forwards;
+    }
+
+    let tiles = target_ns.div_ceil(span);
+    let mut boosted = Vec::with_capacity(forwards.len() * tiles as usize);
+    for tile in 0..tiles {
+        // +tile keeps seams strictly monotonic when a forward sits exactly on the boundary.
+        let shift = tile.saturating_mul(span).saturating_add(tile);
+        for f in &forwards {
+            let mut copy = f.clone();
+            copy.added_ns += shift;
+            copy.settled_ns += shift;
+            boosted.push(copy);
+        }
+    }
+    boosted
 }
 
 pub fn reputation_snapshot_from_file(

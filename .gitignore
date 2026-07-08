@@ -3,3 +3,11 @@ data
 results/*
 reputation_*
 revenue_*
+
+# Generated simulation data (rebuilt on demand by the Makefile / setup script).
+networks/*/peacetime_traffic.csv
+networks/*/reputation.csv
+# Attack-time networks the setup script derives from the tracked SlowJam template.
+networks/*/attacks/SlowSlotJam/
+networks/*/attacks/FastSlotJam/
+networks/*/attacks/FastLiqJam/

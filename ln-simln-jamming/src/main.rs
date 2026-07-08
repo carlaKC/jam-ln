@@ -47,11 +47,14 @@ async fn main() -> Result<(), BoxError> {
         .init()
         .unwrap();
 
-    let network = NetworkType::new(
+    let mut network = NetworkType::new(
         &cli.network,
         Some(cli.attack_type.clone()),
         cli.attacker_bootstrap,
     )?;
+    if let Some(alias) = &cli.target_alias {
+        network.override_target(alias)?;
+    }
     let (target_alias, target_pubkey) = network.target();
     let attackers = network.attackers();
     let attacker_pubkeys: Vec<PublicKey> = attackers.iter().map(|a| a.1).collect();
@@ -92,8 +95,13 @@ async fn main() -> Result<(), BoxError> {
     let now = InstantClock::now(&*clock);
 
     // Create a writer to store results for nodes that we care about.
+    // Label groups this experiment's results; defaults to the reputation algorithm name.
+    let label = cli
+        .label
+        .clone()
+        .unwrap_or_else(|| cli.reputation_params.reputation_algo.name().to_string());
     let results_dir = network
-        .results_dir(Clock::now(&*clock))
+        .results_dir(Clock::now(&*clock), &label)
         .ok_or("results dir none for attack")?;
     if !results_dir.exists() {
         fs::create_dir_all(&results_dir)?;
@@ -473,6 +481,47 @@ fn write_simulation_summary(
         writer,
         "Attacker congestion jammed {} edges (directional)",
         attack_stats.congestion_jammed_channels,
+    )?;
+    // The attacker builds reputation by routing *through* the target, so its fees are paid to the
+    // target and inflate `Simulation revenue`. Adding them back recovers the honest revenue denied.
+    let honest_revenue_denied = (revenue.peacetime_revenue_msat as i128
+        - revenue.simulation_revenue_msat as i128
+        + attack_stats.total_fees_paid_msat as i128)
+        .max(0) as u128;
+    let secs = revenue.runtime.as_secs();
+    // Absolute figures only (no ratios): how long the jam ran, what the target would have earned
+    // honestly over that window, how much of that the jam denied, and what the attacker paid —
+    // split into the one-time entry (gain protected access) and the ongoing maintenance.
+    writeln!(
+        writer,
+        "Attack total duration (seconds): {} ({:.2} days)",
+        secs,
+        secs as f64 / 86_400.0,
+    )?;
+    writeln!(
+        writer,
+        "Honest revenue the target earns over this duration (msat): {}",
+        revenue.peacetime_revenue_msat,
+    )?;
+    writeln!(
+        writer,
+        "Honest revenue denied over this duration (msat): {}",
+        honest_revenue_denied,
+    )?;
+    writeln!(
+        writer,
+        "Attacker total cost (msat): {}",
+        attack_stats.total_fees_paid_msat,
+    )?;
+    writeln!(
+        writer,
+        "  one-time entry cost (gain protected access) (msat): {}",
+        attack_stats.entry_fees_paid_msat,
+    )?;
+    writeln!(
+        writer,
+        "  sustaining cost (maintain the jam, {} refill(s)) (msat): {}",
+        attack_stats.refill_count, attack_stats.sustaining_fees_paid_msat,
     )?;
     writer.flush()?;
 

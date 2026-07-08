@@ -3,13 +3,17 @@ use crate::incoming_channel::{BucketParameters, IncomingChannel};
 use crate::outgoing_channel::OutgoingChannel;
 use crate::{
     AllocationCheck, BucketResources, ChannelSnapshot, ForwardResolution, ForwardingOutcome,
-    HtlcRef, ProposedForward, ReputationCheck, ReputationError, ReputationManager,
+    HtlcRef, ProposedForward, ReputationAlgo, ReputationCheck, ReputationError, ReputationManager,
     ReputationParams, ResourceBucketType, ResourceCheck,
 };
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+/// The maximum number of in-flight HTLC slots a channel exposes (BOLT `max_accepted_htlcs`), split
+/// across the general/congestion/protected buckets by the configured portions.
+pub const MAX_HTLC_SLOTS: u16 = 483;
 
 /// Tracks reputation and revenue for a channel.
 #[derive(Debug)]
@@ -36,6 +40,7 @@ impl Default for ForwardManagerParams {
                 reputation_multiplier: 12,
                 resolution_period: Duration::from_secs(90),
                 expected_block_speed: Some(Duration::from_secs(10 * 60)),
+                algo: ReputationAlgo::default(),
             },
             general_slot_portion: 40,
             general_liquidity_portion: 40,
@@ -241,11 +246,13 @@ impl ReputationManager for ForwardManager {
         {
             Entry::Occupied(_) => Err(ReputationError::ErrChannelExists(channel_id)),
             Entry::Vacant(v) => {
-                let general_slot_count = 483 * self.params.general_slot_portion as u16 / 100;
+                let general_slot_count =
+                    MAX_HTLC_SLOTS * self.params.general_slot_portion as u16 / 100;
                 let general_liquidity_amount =
                     capacity_msat * self.params.general_liquidity_portion as u64 / 100;
 
-                let congestion_slot_count = 483 * self.params.congestion_slot_portion as u16 / 100;
+                let congestion_slot_count =
+                    MAX_HTLC_SLOTS * self.params.congestion_slot_portion as u16 / 100;
                 let congestion_liquidity_amount =
                     capacity_msat * self.params.congestion_liquidity_portion as u64 / 100;
 
@@ -256,7 +263,7 @@ impl ReputationManager for ForwardManager {
                     - self.params.general_liquidity_portion
                     - self.params.congestion_liquidity_portion;
 
-                let protected_slot_count = 483 * protected_slot_portion as u16 / 100;
+                let protected_slot_count = MAX_HTLC_SLOTS * protected_slot_portion as u16 / 100;
                 let protected_liquidity_amount =
                     capacity_msat * protected_liquidity_portion as u64 / 100;
 
@@ -489,7 +496,7 @@ mod tests {
     use crate::{
         forward_manager::{ForwardManager, SimulationDebugManager},
         AccountableSignal, ChannelSnapshot, FailureReason, ForwardingOutcome, HtlcRef,
-        ProposedForward, ReputationError, ReputationManager, ReputationParams,
+        ProposedForward, ReputationAlgo, ReputationError, ReputationManager, ReputationParams,
     };
 
     #[test]
@@ -534,6 +541,7 @@ mod tests {
                 reputation_multiplier: 10,
                 resolution_period: Duration::from_secs(90),
                 expected_block_speed: None,
+                algo: ReputationAlgo::Gradual,
             },
             general_slot_portion: 30,
             general_liquidity_portion: 30,
