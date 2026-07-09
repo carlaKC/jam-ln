@@ -13,8 +13,7 @@ stable-output:
 check: check-code stable-output
 
 install-tools:
-	cargo install --locked --path ln-simln-jamming --bin reputation-builder
-	cargo install --locked --path ln-simln-jamming --bin forward-builder
+	cargo install --locked --path ln-simln-jamming --bin bootstrap-builder
 
 install:
 	cargo install --locked --path ln-simln-jamming

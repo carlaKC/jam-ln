@@ -181,7 +181,7 @@ async fn run(
     let reputation_file = network.reputation_file();
     let reputation_snapshot = reputation_snapshot_from_file(&reputation_file).map_err(|e| {
         format!(
-            "could not find reputation snapshot {:?}, try generating one with reputation-builder: {:?}",
+            "could not find reputation snapshot {:?}, try generating one with bootstrap-builder: {:?}",
             reputation_file.to_string_lossy(), e
         )
     })?;
