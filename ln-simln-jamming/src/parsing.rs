@@ -1,3 +1,4 @@
+use crate::attacks::null::NullAttack;
 use crate::attacks::sink::SinkAttack;
 use crate::attacks::slow_jam::SlowJam;
 use crate::attacks::JammingAttack;
@@ -454,6 +455,9 @@ pub struct Cli {
 pub enum AttackType {
     Sink,
     SlowJam,
+    /// Inert baseline: adds attacker channels to the graph but takes no action, used to establish
+    /// the Common-Random-Numbers baseline an attack's revenue impact is measured against.
+    Null,
     // NOTE: add your attack that you want to run here.
 }
 
@@ -541,6 +545,7 @@ where
 
             Ok(attack)
         }
+        AttackType::Null => Ok(Arc::new(NullAttack::new(clock))),
     }
 }
 
