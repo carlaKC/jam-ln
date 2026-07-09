@@ -1,5 +1,6 @@
 target
 data
 results/*
+*_traffic.csv
 reputation*.csv
 revenue*.csv

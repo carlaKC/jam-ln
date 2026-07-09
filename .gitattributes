@@ -1,2 +1,5 @@
-peacetime_traffic.csv filter=lfs diff=lfs merge=lfs -text
-attacktime_traffic.csv filter=lfs diff=lfs merge=lfs -text
+# Git LFS has been retired. The large traffic CSVs (peacetime_traffic.csv /
+# attacktime_traffic.csv) are no longer stored or committed: they are
+# regenerable intermediates produced in memory by bootstrap-builder and never
+# written to disk by the running simulator. They are git-ignored via
+# `*_traffic.csv`. Only the small reputation summaries are committed.
