@@ -1,227 +1,80 @@
-use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
-use std::collections::{BinaryHeap, HashMap};
-use std::ops::{Add, Sub};
-use std::path::PathBuf;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use ln_resource_mgr::HtlcRef;
-use simln_lib::clock::{Clock, SimulationClock};
+use simln_lib::clock::SimulationClock;
 use simln_lib::sim_node::{
     CriticalError, CustomRecords, ForwardingError, InterceptRequest, InterceptResolution,
     Interceptor,
 };
-use tokio::select;
 use tokio::sync::Mutex;
-use triggered::Listener;
 
 use crate::clock::InstantClock;
-use crate::parsing::peacetime_from_file;
-use crate::BoxError;
 
-/// Tracks revenue for a target node under attack and in peacetime, shutting down the simulation if the target node
-/// loses revenue under attack compared to peacetime.
-pub struct RevenueInterceptor {
-    clock: Arc<SimulationClock>,
+/// Tracks the settled forwarding revenue earned by a target node within a single simulated
+/// network. The same tracker type is attached to both the attack network and the co-simulated
+/// peacetime network so the two can be compared live, at identical virtual timestamps (Common
+/// Random Numbers): because both networks are driven by the same seed, their honest traffic is
+/// identical and any difference in the target's settled revenue is caused by the attacker.
+///
+/// Revenue is credited only when a forward *settles* (`notify_resolution` with `success`), so it
+/// measures money the target actually earned end-to-end — unlike the peacetime CSV replay, which
+/// counted every forward at HTLC-add time regardless of downstream outcome.
+pub struct RevenueTracker {
     target_node: PublicKey,
-    target_revenue: Mutex<NodeRevenue>,
-    peacetime_revenue: Mutex<PeacetimeRevenue>,
-    start_ins: Instant,
-    listener: Listener,
+    revenue: Mutex<NodeRevenue>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct NodeRevenue {
     revenue_total: u64,
-    /// Tracks pending htlcs on the target node so that we can report fees once we know how they have resolved.
+    /// Number of forwards the target settled (for diagnostics: distinguishing "fewer forwards"
+    /// from "smaller fees per forward").
+    settled_count: u64,
+    /// Fees of htlcs currently in flight on the target, keyed by incoming htlc so we can credit
+    /// them once we learn how they resolved.
     pending_htlcs: HashMap<HtlcRef, u64>,
 }
 
-/// Minimally represents a forwarding event for a node.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RevenueEvent {
-    pub timestamp_ns: u64,
-    pub fee_msat: u64,
-}
-
-// Reverse the ordering to create a min-heap based on timestamp_ns.
-impl Ord for RevenueEvent {
-    fn cmp(&self, other: &Self) -> Ordering {
-        other.timestamp_ns.cmp(&self.timestamp_ns)
-    }
-}
-
-impl PartialOrd for RevenueEvent {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-/// Polls current revenue against the projected revenue for the target node in times of peace.
-#[async_trait]
-pub trait PeacetimeRevenueMonitor {
-    async fn get_revenue_difference(&self) -> RevenueSnapshot;
-}
-
-/// Responsible for tracking what the target node's revenue would be in a peacetime network (without the attacker).
-#[derive(Clone, Debug)]
-struct PeacetimeRevenue {
-    /// Represents the revenue of the target node in peacetime (a network without the attacker).
-    peacetime_revenue: u64,
-
-    /// A queue of peacetime revenue events that need to be replayed with the simulation to compare peace and attack
-    /// time revenue.
-    revenue_events: BinaryHeap<RevenueEvent>,
-}
-
-#[derive(Clone, Debug)]
-pub struct RevenueSnapshot {
-    pub peacetime_revenue_msat: u64,
-    pub simulation_revenue_msat: u64,
-    pub runtime: Duration,
-}
-
-impl PeacetimeRevenue {
-    async fn new_with_bootstrap(
-        target_pubkey: PublicKey,
-        revenue_file: PathBuf,
-        bootstrap_duration: Option<Duration>,
-    ) -> Result<Self, BoxError> {
-        let mut peacetime_activity = peacetime_from_file(&revenue_file, target_pubkey)
-            .await
-            .map_err(|e| format!("could not read peacetime projections: {}", e))?;
-
-        // Grab the first event to get our starting timestamp, push the event back on so that we can process it.
-        let first_event = peacetime_activity
-            .peek()
-            .ok_or("should have at least one forward for target node".to_string())?;
-
-        let bootstrap = match bootstrap_duration {
-            Some(bootstrap) => bootstrap,
-            None => {
-                // If the attacker did not bootstrap any reputation, we don't need to "catch up"
-                // our peacetime projections with any period of time - we can just start fresh.
-                return Ok(PeacetimeRevenue {
-                    peacetime_revenue: 0,
-                    revenue_events: peacetime_activity,
-                });
-            }
-        };
-        let cutoff_ns = first_event.timestamp_ns.add(bootstrap.as_nanos() as u64);
-
-        // Accumulate the starting peacetime revenue, defined by the period of time that we bootstrapped the simulation
-        // from, so that we're on the same starting point.
-        let mut peacetime_revenue: u64 = 0;
-        while let Some(event) = peacetime_activity.peek() {
-            if event.timestamp_ns >= cutoff_ns {
-                break;
-            }
-
-            peacetime_revenue += event.fee_msat;
-            peacetime_activity.pop();
-        }
-
-        Ok(PeacetimeRevenue {
-            peacetime_revenue,
-            revenue_events: peacetime_activity,
-        })
-    }
-}
-
-impl RevenueInterceptor {
-    pub async fn new_with_bootstrap(
-        clock: Arc<SimulationClock>,
-        target_pubkey: PublicKey,
-        bootstrap_revenue: u64,
-        bootstrap_duration: Option<Duration>,
-        revenue_file: PathBuf,
-        listener: Listener,
-    ) -> Result<Self, BoxError> {
-        Ok(Self {
-            clock: clock.clone(),
-            target_node: target_pubkey,
-            target_revenue: Mutex::new(NodeRevenue {
-                revenue_total: bootstrap_revenue,
+impl RevenueTracker {
+    pub fn new(target_node: PublicKey) -> Self {
+        Self {
+            target_node,
+            revenue: Mutex::new(NodeRevenue {
+                revenue_total: 0,
+                settled_count: 0,
                 pending_htlcs: HashMap::new(),
             }),
-            peacetime_revenue: Mutex::new(
-                PeacetimeRevenue::new_with_bootstrap(
-                    target_pubkey,
-                    revenue_file,
-                    bootstrap_duration,
-                )
-                .await?,
-            ),
-            start_ins: InstantClock::now(&*clock),
-            listener,
-        })
+        }
     }
 
-    /// Replays projected forwards for the simulated network in a time of peace (ie, without the attacker). These events
-    /// are replayed "live" so that they can be compared to the current simulation's revenue.
-    pub async fn process_peacetime_fwds(&self) -> Result<(), BoxError> {
-        let mut last_event_ts = self
-            .peacetime_revenue
-            .lock()
-            .await
-            .revenue_events
-            .peek()
-            .ok_or("peacetime activity is empty")?
-            .timestamp_ns;
+    /// The target's cumulative settled forwarding revenue so far, in msat.
+    pub async fn revenue_msat(&self) -> u64 {
+        self.revenue.lock().await.revenue_total
+    }
 
-        loop {
-            // Grab our lock to get the next event, we don't want to hold it because we have to sleep later.
-            let mut peacetime_lock = self.peacetime_revenue.lock().await;
-            let next_event = peacetime_lock
-                .revenue_events
-                .pop()
-                .ok_or("out of peacetime events".to_string())?;
-            drop(peacetime_lock);
-
-            let wait = next_event.timestamp_ns.sub(last_event_ts);
-            last_event_ts = next_event.timestamp_ns;
-
-            select! {
-                _ = self.listener.clone() => return Ok(()),
-                _ = self.clock.sleep(Duration::from_nanos(wait)) => {},
-            }
-
-            self.peacetime_revenue.lock().await.peacetime_revenue += next_event.fee_msat;
-        }
+    /// The number of forwards the target has settled so far.
+    pub async fn settled_count(&self) -> u64 {
+        self.revenue.lock().await.settled_count
     }
 }
 
 #[async_trait]
-impl PeacetimeRevenueMonitor for RevenueInterceptor {
-    async fn get_revenue_difference(&self) -> RevenueSnapshot {
-        RevenueSnapshot {
-            simulation_revenue_msat: self.target_revenue.lock().await.revenue_total,
-            peacetime_revenue_msat: self.peacetime_revenue.lock().await.peacetime_revenue,
-            runtime: InstantClock::now(&*self.clock).duration_since(self.start_ins),
-        }
-    }
-}
-
-#[async_trait]
-impl Interceptor for RevenueInterceptor {
-    /// RevenueInterceptor does not need to take any active action on incoming htlcs.
+impl Interceptor for RevenueTracker {
+    /// Record the fee of every htlc the target forwards so we can credit it on resolution.
     async fn intercept_htlc(
         &self,
         req: InterceptRequest,
     ) -> Result<Result<CustomRecords, ForwardingError>, CriticalError> {
         if req.forwarding_node == self.target_node {
-            match self
-                .target_revenue
-                .lock()
-                .await
-                .pending_htlcs
-                .entry(HtlcRef {
-                    channel_id: req.incoming_htlc.channel_id.into(),
-                    htlc_index: req.incoming_htlc.index,
-                }) {
+            match self.revenue.lock().await.pending_htlcs.entry(HtlcRef {
+                channel_id: req.incoming_htlc.channel_id.into(),
+                htlc_index: req.incoming_htlc.index,
+            }) {
                 Entry::Occupied(_) => Err(CriticalError::InterceptorError(format!(
                     "duplicate incoming htlc index: {:?}",
                     req.incoming_htlc
@@ -236,21 +89,19 @@ impl Interceptor for RevenueInterceptor {
         }
     }
 
-    /// Notifies the underlying jamming interceptor of htlc resolution, as our attacking interceptor doesn't need
-    /// to handle notifications.
+    /// Credit the target's revenue only when the forward settled successfully.
     async fn notify_resolution(&self, res: InterceptResolution) -> Result<(), CriticalError> {
         if res.forwarding_node == self.target_node {
-            let mut target_revenue = self.target_revenue.lock().await;
-
-            match target_revenue.pending_htlcs.remove_entry(&HtlcRef {
+            let mut revenue = self.revenue.lock().await;
+            match revenue.pending_htlcs.remove_entry(&HtlcRef {
                 channel_id: res.incoming_htlc.channel_id.into(),
                 htlc_index: res.incoming_htlc.index,
             }) {
                 Some((_, fee)) => {
                     if res.success {
-                        target_revenue.revenue_total += fee;
+                        revenue.revenue_total += fee;
+                        revenue.settled_count += 1;
                     }
-
                     Ok(())
                 }
                 None => Err(CriticalError::InterceptorError(format!(
@@ -264,6 +115,60 @@ impl Interceptor for RevenueInterceptor {
     }
 
     fn name(&self) -> String {
-        "revenue interceptor".to_string()
+        "revenue tracker".to_string()
+    }
+}
+
+/// A point-in-time comparison of the target's settled revenue in the attack network versus the
+/// co-simulated peacetime network.
+#[derive(Clone, Debug)]
+pub struct RevenueSnapshot {
+    pub peacetime_revenue_msat: u64,
+    pub simulation_revenue_msat: u64,
+    pub runtime: Duration,
+}
+
+/// Reads the live difference between the target's revenue under attack and in peacetime. Attacks
+/// use this to decide when they have driven the target below its peacetime earnings; the summary
+/// reads it at the end of the run.
+#[async_trait]
+pub trait PeacetimeRevenueMonitor {
+    async fn get_revenue_difference(&self) -> RevenueSnapshot;
+}
+
+/// Compares the target's live settled revenue between the attack network and the peacetime network
+/// that is co-simulated alongside it on the same virtual clock. Because both networks advance on
+/// the same clock, `get_revenue_difference` reads both revenues at the *same* virtual instant.
+pub struct RevenueComparator {
+    clock: Arc<SimulationClock>,
+    start_ins: Instant,
+    simulation: Arc<RevenueTracker>,
+    peacetime: Arc<RevenueTracker>,
+}
+
+impl RevenueComparator {
+    pub fn new(
+        clock: Arc<SimulationClock>,
+        simulation: Arc<RevenueTracker>,
+        peacetime: Arc<RevenueTracker>,
+    ) -> Self {
+        let start_ins = InstantClock::now(&*clock);
+        Self {
+            clock,
+            start_ins,
+            simulation,
+            peacetime,
+        }
+    }
+}
+
+#[async_trait]
+impl PeacetimeRevenueMonitor for RevenueComparator {
+    async fn get_revenue_difference(&self) -> RevenueSnapshot {
+        RevenueSnapshot {
+            simulation_revenue_msat: self.simulation.revenue_msat().await,
+            peacetime_revenue_msat: self.peacetime.revenue_msat().await,
+            runtime: InstantClock::now(&*self.clock).duration_since(self.start_ins),
+        }
     }
 }
