@@ -2,14 +2,17 @@
 name = "ln-simln-jamming"
 version = "0.1.0"
 edition = "2021"
+# Declare binaries explicitly and disable auto-discovery so leftover files in
+# src/bin/ are not picked up as binaries.
+autobins = false
 
 [[bin]]
-name = "reputation-builder"
-path = "src/bin/reputation_builder.rs"
+name = "ln-simln-jamming"
+path = "src/main.rs"
 
 [[bin]]
-name = "forward-builder"
-path = "src/bin/forward_builder.rs"
+name = "bootstrap-builder"
+path = "src/bin/bootstrap_builder.rs"
 
 [dependencies]
 simln-lib = { git = "https://github.com/bitcoin-dev-project/sim-ln", rev = "cefd0c4f23478fd5a9d84b49f8ce304b2c74b4e0" }
