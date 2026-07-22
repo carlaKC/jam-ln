@@ -3,9 +3,7 @@ use crate::clock::InstantClock;
 use crate::{accountable_from_records, records_from_signal, upgradable_from_records, BoxError};
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
-use ln_resource_mgr::forward_manager::{
-    ForwardManager, ForwardManagerParams, SimulationDebugManager,
-};
+use ln_resource_mgr::forward_manager::{ForwardManagerParams, SimulationDebugManager};
 use ln_resource_mgr::{
     AccountableSignal, ChannelSnapshot, ForwardResolution, ForwardingOutcome, HtlcRef,
     ProposedForward, ReputationError, ReputationManager,
@@ -121,9 +119,10 @@ where
     results: Option<Arc<Mutex<R>>>,
 }
 
-impl<R> ReputationInterceptor<R, ForwardManager>
+impl<R, M> ReputationInterceptor<R, M>
 where
     R: ForwardReporter,
+    M: ReputationManager + SimulationDebugManager + From<ForwardManagerParams>,
 {
     pub fn new_for_network(
         params: ForwardManagerParams,
@@ -131,13 +130,13 @@ where
         clock: Arc<SimulationClock>,
         results: Option<Arc<Mutex<R>>>,
     ) -> Result<Self, BoxError> {
-        let mut network_nodes: HashMap<PublicKey, Node<ForwardManager>> = HashMap::new();
+        let mut network_nodes: HashMap<PublicKey, Node<M>> = HashMap::new();
 
         macro_rules! add_node_to_network {
             ($network_nodes:expr, $node_pubkey:expr, $node_alias:expr, $channel:expr) => {
                 match $network_nodes.entry($node_pubkey) {
                     Entry::Vacant(e) => {
-                        let forward_manager = ForwardManager::new(params);
+                        let forward_manager = M::from(params);
 
                         let _ = forward_manager.add_channel(
                             $channel.scid.into(),
@@ -230,7 +229,7 @@ where
 
                 match network_nodes.entry(pubkey) {
                     Entry::Vacant(e) => {
-                        let forward_manager = ForwardManager::new(params);
+                        let forward_manager = M::from(params);
                         forward_manager.add_channel(
                             scid,
                             $channel.capacity_msat,

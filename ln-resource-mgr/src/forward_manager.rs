@@ -198,6 +198,12 @@ impl ForwardManager {
     }
 }
 
+impl From<ForwardManagerParams> for ForwardManager {
+    fn from(params: ForwardManagerParams) -> Self {
+        ForwardManager::new(params)
+    }
+}
+
 impl SimulationDebugManager for ForwardManager {
     fn general_jam_channel(&self, channel: u64) -> Result<(), ReputationError> {
         self.inner

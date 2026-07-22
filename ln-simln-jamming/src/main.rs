@@ -9,6 +9,14 @@ use ln_simln_jamming::parsing::{
     find_pubkey_by_alias, reputation_snapshot_from_file, setup_attack, AttackType, Cli, NetworkType,
 };
 use ln_simln_jamming::reputation_interceptor::ReputationInterceptor;
+
+/// The resource manager implementation the simulation runs against. Selected at compile time via
+/// the `ldk-resource-manager` feature: the native `ForwardManager` by default, or the
+/// rust-lightning `LdkResourceManager` when enabled.
+#[cfg(not(feature = "ldk-resource-manager"))]
+type SelectedResourceManager = ln_resource_mgr::forward_manager::ForwardManager;
+#[cfg(feature = "ldk-resource-manager")]
+type SelectedResourceManager = ln_simln_jamming::ldk_manager::LdkResourceManager;
 use ln_simln_jamming::revenue_interceptor::{
     PeacetimeRevenueMonitor, RevenueInterceptor, RevenueSnapshot,
 };
@@ -175,7 +183,7 @@ async fn run(
     };
 
     let reputation_interceptor = Arc::new(
-        ReputationInterceptor::new_from_snapshot(
+        ReputationInterceptor::<_, SelectedResourceManager>::new_from_snapshot(
             forward_params,
             sim_network,
             reputation_snapshot,

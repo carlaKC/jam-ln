@@ -3,6 +3,10 @@ name = "ln-simln-jamming"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+ldk-resource-manager = []
+
 [[bin]]
 name = "reputation-builder"
 path = "src/bin/reputation_builder.rs"
@@ -31,5 +35,6 @@ humantime = "2.1.0"
 rand = "0.9.1"
 mockall = "0.13.1"
 lightning = { version = "0.0.123" }
+lightning-ldk = { package = "lightning", git = "https://github.com/elnosh/rust-lightning", rev = "0f397e8fe90691c8c3a28aadcaa68775a8d3ede0" }
 tokio-util = { version = "0.7.15", features = ["rt"] }
 ctrlc = "3.4.7"

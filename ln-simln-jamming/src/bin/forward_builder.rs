@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use clap::Parser;
+use ln_resource_mgr::forward_manager::ForwardManager;
 use ln_resource_mgr::{AllocationCheck, ProposedForward};
 use ln_simln_jamming::analysis::ForwardReporter;
 use ln_simln_jamming::clock::InstantClock;
@@ -75,24 +76,25 @@ async fn run(clock: Arc<SimulationClock>, cli: Cli) -> Result<(), BoxError> {
     // Create a reputation interceptor without any bootstrap (since here we're creating the
     // bootstrap itself, we just want to run with reputation active).
     let traffic_file = network.traffic_file();
-    let reputation_interceptor = Arc::new(ReputationInterceptor::new_for_network(
-        cli.reputation_params.into(),
-        sim_network,
-        clock.clone(),
-        Some(Arc::new(Mutex::new(BootstrapWriter::new(
+    let reputation_interceptor =
+        Arc::new(ReputationInterceptor::<_, ForwardManager>::new_for_network(
+            cli.reputation_params.into(),
+            sim_network,
             clock.clone(),
-            // TODO: change API in SimLN so that we can just pass a path in here.
-            traffic_file
-                .parent()
-                .ok_or("could not get traffic file directory")?
-                .to_path_buf(),
-            traffic_file
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .to_string(),
-        )?))),
-    )?);
+            Some(Arc::new(Mutex::new(BootstrapWriter::new(
+                clock.clone(),
+                // TODO: change API in SimLN so that we can just pass a path in here.
+                traffic_file
+                    .parent()
+                    .ok_or("could not get traffic file directory")?
+                    .to_path_buf(),
+                traffic_file
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string(),
+            )?))),
+        )?);
     let latency_interceptor = Arc::new(LatencyIntercepor::new_poisson(300.0, Some(SIM_SEED))?);
 
     let sim_cfg = SimulationCfg::new(
